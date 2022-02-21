@@ -20,7 +20,7 @@ let package = Package(
     targets: [
         .target(
             name: "sACNKit",
-            dependencies: []),
+            dependencies: ["CocoaAsyncSocket"]),
         .testTarget(
             name: "sACNKitTests",
             dependencies: ["sACNKit"]),
