@@ -635,21 +635,33 @@ extension sACNSource: ComponentSocketDelegate {
     /// Called when a message has been received.
     ///
     /// - Parameters:
+    ///    - socket: The socket which received a message.
     ///    - data: The message as `Data`.
     ///    - sourceHostname: The hostname of the source of the message.
     ///    - sourcePort: The UDP port of the source of the message.
     ///    - ipFamily: The `ComponentSocketIPFamily` of the source of the message.
     ///
-    func receivedMessage(withData data: Data, sourceHostname hostname: String, sourcePort port: UInt16, ipFamily: ComponentSocketIPFamily) {
+    func receivedMessage(for socket: ComponentSocket, withData data: Data, sourceHostname: String, sourcePort: UInt16, ipFamily: ComponentSocketIPFamily) {
         // sACN sources do not process messages
+    }
+    
+    /// Called when the socket was closed.
+    ///
+    /// - Parameters:
+    ///    - socket: The socket which was closed.
+    ///    - error: An optional error which occured when the socket was closed.
+    ///
+    func socket(_ socket: ComponentSocket, socketDidCloseWithError error: Error?) {
+        delegateQueue.async { self.delegate?.source(self, socketDidCloseWithError: error) }
     }
     
     /// Called when a debug socket log is produced.
     ///
     /// - Parameters:
+    ///    - socket: The socket for which this log event occured.
     ///    - logMessage: The debug message.
     ///
-    func debugSocketLog(_ logMessage: String) {
+    func debugLog(for socket: ComponentSocket, with logMessage: String) {
         delegateQueue.async { self.debugDelegate?.debugSocketLog(logMessage) }
     }
 }
@@ -662,6 +674,14 @@ extension sACNSource: ComponentSocketDelegate {
 /// Required methods for objects implementing this delegate.
 ///
 public protocol sACNSourceDelegate: AnyObject {
+    /// Called when the socket was closed for this source.
+    ///
+    /// - Parameters:
+    ///    - source: The source for which the socket was closed.
+    ///    - error: An optional error which occured when the socket was closed.
+    ///
+    func source(_ source: sACNSource, socketDidCloseWithError error: Error?)
+    
     /// Notifies the delegate that data transmission has started.
     func transmissionStarted()
     

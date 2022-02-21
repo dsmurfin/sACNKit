@@ -166,10 +166,10 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
             case .unicast:
                 // only bind on an interface if not multicast
                 try socket?.bind(toPort: port, interface: interface)
-                delegate?.debugSocketLog("Successfully bound unicast to port: \(socket?.localPort() ?? 0) on interface: \(interface)")
+                delegate?.debugLog(for: self, with: "Successfully bound unicast to port: \(socket?.localPort() ?? 0) on interface: \(interface)")
             case .multicastv4, .multicastv6:
                 try socket?.bind(toPort: port)
-                delegate?.debugSocketLog("Successfully bound multicast to port: \(port) on interface: \(interface)")
+                delegate?.debugLog(for: self, with: "Successfully bound multicast to port: \(port) on interface: \(interface)")
             }
         } catch {
             throw ComponentSocketError.couldNotBind(message: "\(cid): Could not bind \(socketType.rawValue) socket.")
@@ -247,12 +247,12 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
     
     /// Called when the datagram with the given tag has been sent.
     public func udpSocket(_ sock: GCDAsyncUdpSocket, didSendDataWithTag tag: Int) {
-        delegate?.debugSocketLog("\(socketTypeString()) socket did send data")
+        delegate?.debugLog(for: self, with: "\(socketTypeString()) socket did send data")
     }
     
     /// Called if an error occurs while trying to send a datagram. This could be due to a timeout, or something more serious such as the data being too large to fit in a single packet.
     public func udpSocket(_ sock: GCDAsyncUdpSocket, didNotSendDataWithTag tag: Int, dueToError error: Error?) {
-        delegate?.debugSocketLog("\(socketTypeString()) socket did not send data due to error \(String(describing: error?.localizedDescription))")
+        delegate?.debugLog(for: self, with: "\(socketTypeString()) socket did not send data due to error \(String(describing: error?.localizedDescription))")
     }
     
     /// Called when the socket has received a datagram.
@@ -261,13 +261,14 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
         let port = GCDAsyncUdpSocket.port(fromAddress: address)
         let ipFamily: ComponentSocketIPFamily = GCDAsyncUdpSocket.family(fromAddress: address) == AF_INET6 ? .IPv6 : .IPv4
         
-        delegate?.debugSocketLog("Socket received data of length \(data.count), from \(ipFamily.rawValue) \(hostname):\(port)")
-        delegate?.receivedMessage(withData: data, sourceHostname: hostname, sourcePort: port, ipFamily: ipFamily)
+        delegate?.debugLog(for: self, with: "Socket received data of length \(data.count), from \(ipFamily.rawValue) \(hostname):\(port)")
+        delegate?.receivedMessage(for: self, withData: data, sourceHostname: hostname, sourcePort: port, ipFamily: ipFamily)
     }
     
     /// Called when the socket is closed.
     public func udpSocketDidClose(_ sock: GCDAsyncUdpSocket, withError error: Error?) {
-        delegate?.debugSocketLog("\(socketTypeString()) socket did close, with error \(String(describing: error?.localizedDescription))")
+        delegate?.debugLog(for: self, with: "\(socketTypeString()) socket did close, with error \(String(describing: error?.localizedDescription))")
+        delegate?.socket(self, socketDidCloseWithError: error)
     }
     
 }
@@ -286,19 +287,29 @@ protocol ComponentSocketDelegate: AnyObject {
     /// Called when a message has been received.
     ///
     /// - Parameters:
+    ///    - socket: The socket which received a message.
     ///    - data: The message as `Data`.
     ///    - sourceHostname: The hostname of the source of the message.
     ///    - sourcePort: The UDP port of the source of the message.
     ///    - ipFamily: The `ComponentSocketIPFamily` of the source of the message.
     ///
-    func receivedMessage(withData data: Data, sourceHostname: String, sourcePort: UInt16, ipFamily: ComponentSocketIPFamily)
+    func receivedMessage(for socket: ComponentSocket, withData data: Data, sourceHostname: String, sourcePort: UInt16, ipFamily: ComponentSocketIPFamily)
+    
+    /// Called when the socket was closed.
+    ///
+    /// - Parameters:
+    ///    - socket: The socket which was closed.
+    ///    - error: An optional error which occured when the socket was closed.
+    ///
+    func socket(_ socket: ComponentSocket, socketDidCloseWithError error: Error?)
     
     /// Called when a debug socket log is produced.
     ///
     /// - Parameters:
+    ///    - socket: The socket for which this log event occured.
     ///    - logMessage: The debug message.
     ///
-    func debugSocketLog(_ logMessage: String)
+    func debugLog(for socket: ComponentSocket, with logMessage: String)
     
 }
 
