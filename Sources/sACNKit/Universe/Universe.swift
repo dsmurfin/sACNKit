@@ -53,7 +53,7 @@ public struct sACNUniverse: Equatable {
     ///     - levels: An array of levels.
     ///     - priorities: Optional: An optional array of priorities.
     ///
-    init(number: UInt16, priority: UInt8? = nil, levels: [UInt8], priorities: [UInt8]? = nil) {
+    public init(number: UInt16, priority: UInt8? = nil, levels: [UInt8], priorities: [UInt8]? = nil) {
         self.number = number.nearestValidUniverse()
         self.priority = priority?.nearestValidPriority()
         
