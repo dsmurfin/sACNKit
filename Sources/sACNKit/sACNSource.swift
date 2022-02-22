@@ -68,11 +68,24 @@ final public class sACNSource {
     
     // MARK: Socket
     
-    /// The interface for communications.
-    private let interface: String
+    /// The interface for communications (thread-safe getter).
+    public var interface: String? {
+        get { Self.queue.sync { _interface } }
+    }
+    
+    /// The private interface used for communications.
+    private var _interface: String?
     
     /// The socket used for communications.
     private let socket: ComponentSocket
+    
+    /// The isocket listening status (thread-safe getter).
+    public var isListening: Bool {
+        get { Self.queue.sync { _isListening } }
+    }
+    
+    /// The private socket listening status.
+    private var _isListening: Bool
     
     // MARK: Delegate
     
@@ -159,14 +172,19 @@ final public class sACNSource {
     ///    - priority: Optional: Default priority for this source, used when universes do not have explicit priorities (values permitted 0-200).
     ///    - delegateQueue: A delegate queue on which to receive delegate calls from this source.
     ///
-    public init(name: String? = nil, cid: UUID = UUID(), ipMode: sACNIPMode = .ipv4Only, interface: String, priority: UInt8 = 100, delegateQueue: DispatchQueue) {
+    /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interface must not be nil.
+    ///
+    public init(name: String? = nil, cid: UUID = UUID(), ipMode: sACNIPMode = .ipv4Only, interface: String?, priority: UInt8 = 100, delegateQueue: DispatchQueue) {
+        precondition(ipMode.usesIPv6(), "An interface must be provided for IPv6.")
+
         self.cid = cid
         let sourceName = name ?? Source.getDeviceName()
         self.name = sourceName
         self.nameData = Source.buildNameData(from: sourceName)
         self.ipMode = ipMode
-        self.interface = interface
-        self.socket = ComponentSocket(cid: cid, type: .unicast, interface: interface, delegateQueue: Self.socketDelegateQueue)
+        self._interface = interface
+        self.socket = ComponentSocket(cid: cid, type: .transmit, ipMode: ipMode, interface: interface, delegateQueue: Self.socketDelegateQueue)
+        self._isListening = false
         self.delegateQueue = delegateQueue
         self.timerQueue = DispatchQueue(label: "com.danielmurfin.sACNKit.sourceTimerQueue.\(cid.uuidString)")
         self.universeDiscoveryMessages = []
@@ -175,6 +193,10 @@ final public class sACNSource {
         self.universeNumbers = []
         self.universes = []
         self.shouldTerminate = false
+    }
+    
+    deinit {
+        stop()
     }
         
     // MARK: - Public API
@@ -194,6 +216,9 @@ final public class sACNSource {
 
         // begin listening
         try socket.startListening()
+        Self.queue.sync(flags: .barrier) {
+            self._isListening = true
+        }
         
         // start heartbeats
         startDataTransmit()
@@ -364,9 +389,6 @@ final public class sACNSource {
     }
     
     /// Starts this source's data transmission heartbeat.
-    ///
-    /// - Precondition: Must be on `timerQueue`.
-    ///
     private func startDataTransmit() {
         timerQueue.sync {
             let timer = DispatchSource.repeatingTimer(interval: Self.dataTransmitInterval, leeway: Self.timingLeeway, queue: timerQueue) { [weak self] in
@@ -652,6 +674,9 @@ extension sACNSource: ComponentSocketDelegate {
     ///    - error: An optional error which occured when the socket was closed.
     ///
     func socket(_ socket: ComponentSocket, socketDidCloseWithError error: Error?) {
+        Self.queue.sync(flags: .barrier) {
+            self._isListening = false
+        }
         delegateQueue.async { self.delegate?.source(self, socketDidCloseWithError: error) }
     }
     

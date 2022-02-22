@@ -31,12 +31,10 @@ import Network
 /// Enumerates the types of component sockets.
 ///
 enum ComponentSocketType: String {
-    /// Used for unicast communications (transmitting sACN messages).
-    case unicast = "unicast"
-    /// Used for IPv4 multicast communications (receiving sACN messages).
-    case multicastv4 = "multicastv4"
-    /// Used for IPv6 multicast communications (receiving sACN messages).
-    case multicastv6 = "multicastv6"
+    /// Used for transmit communications (transmitting sACN messages).
+    case transmit = "transmit"
+    /// Used for receiving multicast communications (receiving sACN messages).
+    case receive = "receive"
 }
 
 /// Source Socket IP Family
@@ -72,7 +70,7 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
     private var socketQueue: DispatchQueue
     
     /// The interface on which to bind this socket.
-    private var interface: String
+    private var interface: String?
     
     /// The UDP port on which to bind this socket.
     private var port: UInt16
@@ -86,12 +84,17 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
     ///
     /// - Parameters:
     ///    - cid: The CID of this component.
-    ///    - type: The type of socket (unicast, multicast IPv4, multicast IPv6).
+    ///    - type: The type of socket (unicast, multicast).
+    ///    - ipMode: IP mode for this socket (IPv4/IPv6/Both).
     ///    - port: Optional: UDP port to bind.
-    ///    - interface: The interface on which to bind the socket. It may be a name (e.g. "en1" or "lo0") or the corresponding IP address (e.g. "192.168.4.35").
+    ///    - interface: An optional interface on which to bind the socket. It may be a name (e.g. "en1" or "lo0") or the corresponding IP address (e.g. "192.168.4.35").
     ///    - delegateQueue: The dispatch queue on which to receive delegate calls from this component.
     ///
-    init(cid: UUID, type: ComponentSocketType, port: UInt16 = 0, interface: String, delegateQueue: DispatchQueue) {
+    ///  - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interface must not be nil.
+    ///
+    init(cid: UUID, type: ComponentSocketType, ipMode: sACNIPMode, port: UInt16 = 0, interface: String?, delegateQueue: DispatchQueue) {
+        precondition(ipMode.usesIPv6(), "An interface must be provided for IPv6.")
+
         self.cid = cid
         self.socketType = type
         self.port = port
@@ -122,9 +125,9 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
     ///
     func join(multicastGroup: String) throws {
         switch socketType {
-        case .unicast:
+        case .transmit:
             break
-        case .multicastv4, .multicastv6:
+        case .receive:
             do {
                 try socket?.joinMulticastGroup(multicastGroup, onInterface: interface)
             } catch {
@@ -142,9 +145,9 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
     ///
     func leave(multicastGroup: String) throws {
         switch socketType {
-        case .unicast:
+        case .transmit:
             break
-        case .multicastv4, .multicastv6:
+        case .receive:
             do {
                 try socket?.leaveMulticastGroup(multicastGroup, onInterface: interface)
             } catch {
@@ -163,13 +166,13 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
     func startListening(multicastGroups: [String] = []) throws {
         do {
             switch socketType {
-            case .unicast:
+            case .transmit:
                 // only bind on an interface if not multicast
                 try socket?.bind(toPort: port, interface: interface)
-                delegate?.debugLog(for: self, with: "Successfully bound unicast to port: \(socket?.localPort() ?? 0) on interface: \(interface)")
-            case .multicastv4, .multicastv6:
+                delegate?.debugLog(for: self, with: "Successfully bound unicast to port: \(socket?.localPort() ?? 0) on interface: \(interface ?? "default")")
+            case .receive:
                 try socket?.bind(toPort: port)
-                delegate?.debugLog(for: self, with: "Successfully bound multicast to port: \(port) on interface: \(interface)")
+                delegate?.debugLog(for: self, with: "Successfully bound multicast to port: \(port) on interface: \(interface ?? "default")")
             }
         } catch {
             throw ComponentSocketError.couldNotBind(message: "\(cid): Could not bind \(socketType.rawValue) socket.")
@@ -177,10 +180,13 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
         
         do {
             switch socketType {
-            case .unicast:
+            case .transmit:
                 // attempt to set the interface multicast should be sent on (required for IPv6)
-                try socket?.sendIPv6Multicast(onInterface: interface)
-            case .multicastv4, .multicastv6:
+                // it should not be possible to have a nil interface when using IPv6
+                if let interface = interface {
+                    try socket?.sendIPv6Multicast(onInterface: interface)
+                }
+            case .receive:
                 break
             }
         } catch {
@@ -194,9 +200,9 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
         }
         
         switch socketType {
-        case .unicast:
+        case .transmit:
             break
-        case .multicastv4, .multicastv6:
+        case .receive:
             for group in multicastGroups {
                 try join(multicastGroup: group)
             }
@@ -227,7 +233,7 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
     /// - Returns: A string representing the type of this socket.
     ///
     private func socketTypeString() -> String {
-        var socketType = ComponentSocketType.unicast.rawValue
+        var socketType = ComponentSocketType.transmit.rawValue
         let semaphore = DispatchSemaphore(value: 0)
         
         DispatchQueue.main.async {
