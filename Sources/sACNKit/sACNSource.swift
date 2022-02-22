@@ -230,8 +230,8 @@ final public class sACNSource {
     ///
     public func stop() {
         // stops heartbeats
-        stopDataTransmit()
         stopUniverseDiscovery()
+        stopDataTransmit()
         
         // stop listening on socket occurs after
         // final termination is sent
@@ -474,7 +474,6 @@ final public class sACNSource {
             // calculate and insert framing layer length
             let framingLayerLength: UInt16 =  UInt16(framingLayer.count + universeDiscoveryLayer.count)
             framingLayer.replacingUniverseDiscoveryFramingFlagsAndLength(with: framingLayerLength)
-
             
             // calculate and insert root layer length
             let rootLayerLength: UInt16 = UInt16(rootLayer.count + framingLayer.count + universeDiscoveryLayer.count - RootLayer.lengthCountOffset)
@@ -518,10 +517,12 @@ private extension sACNSource {
             self.universeNumbers.removeAll(where: { universesToRemove.map { universe in universe.number }.contains($0) })
                 
             // termination of all universes is complete
-            if self.shouldTerminate && self.universes.isEmpty {
-                dataTransmitTimer = nil
-                socket.stopListening()
-
+            if self.universes.isEmpty {
+                if self.shouldTerminate {
+                    // the source should terminate
+                    dataTransmitTimer = nil
+                    socket.stopListening()
+                }
                 defer {
                     delegateQueue.async {
                         self.delegate?.transmissionEnded()
