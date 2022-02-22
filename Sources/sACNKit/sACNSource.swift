@@ -512,21 +512,22 @@ private extension sACNSource {
         // remove all fully terminated universes
         Self.queue.sync(flags: .barrier) {
             let universesToRemove = universes.filter { $0.shouldTerminate && $0.dirtyCounter < 1 }
+            let countToRemove = universesToRemove.count
             
             self.universes.removeAll(where: { universesToRemove.contains($0) })
             self.universeNumbers.removeAll(where: { universesToRemove.map { universe in universe.number }.contains($0) })
                 
             // termination of all universes is complete
             if self.universes.isEmpty {
+                if countToRemove > 0 {
+                    delegateQueue.async {
+                        self.delegate?.transmissionEnded()
+                    }
+                }
                 if self.shouldTerminate {
                     // the source should terminate
                     dataTransmitTimer = nil
                     socket.stopListening()
-                }
-                defer {
-                    delegateQueue.async {
-                        self.delegate?.transmissionEnded()
-                    }
                 }
                 return
             }
