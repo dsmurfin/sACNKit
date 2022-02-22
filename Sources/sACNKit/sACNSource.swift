@@ -233,8 +233,8 @@ final public class sACNSource {
         stopDataTransmit()
         stopUniverseDiscovery()
         
-        // stop listening
-        socket.stopListening()
+        // stop listening on socket occurs after
+        // final termination is sent
     }
     
     /// Adds a new universe to this source.
@@ -520,6 +520,8 @@ private extension sACNSource {
             // termination of all universes is complete
             if self.shouldTerminate && self.universes.isEmpty {
                 dataTransmitTimer = nil
+                socket.stopListening()
+
                 defer {
                     delegateQueue.async {
                         self.delegate?.transmissionEnded()
