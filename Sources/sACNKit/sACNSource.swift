@@ -68,13 +68,12 @@ final public class sACNSource {
     
     // MARK: Socket
     
-    /// The interface for communications (thread-safe getter).
+    /// The interface used for communications.
     public var interface: String? {
-        get { Self.queue.sync { _interface } }
+        didSet {
+            stop()
+        }
     }
-    
-    /// The private interface used for communications.
-    private var _interface: String?
     
     /// The socket used for communications.
     private let socket: ComponentSocket
@@ -182,8 +181,8 @@ final public class sACNSource {
         self.name = sourceName
         self.nameData = Source.buildNameData(from: sourceName)
         self.ipMode = ipMode
-        self._interface = interface
-        self.socket = ComponentSocket(cid: cid, type: .transmit, ipMode: ipMode, interface: interface, delegateQueue: Self.socketDelegateQueue)
+        self.interface = interface
+        self.socket = ComponentSocket(cid: cid, type: .transmit, ipMode: ipMode, delegateQueue: Self.socketDelegateQueue)
         self._isListening = false
         self.delegateQueue = delegateQueue
         self.timerQueue = DispatchQueue(label: "com.danielmurfin.sACNKit.sourceTimerQueue.\(cid.uuidString)")
@@ -215,7 +214,7 @@ final public class sACNSource {
         socket.delegate = self
 
         // begin listening
-        try socket.startListening()
+        try socket.startListening(onInterface: self.interface)
         Self.queue.sync(flags: .barrier) {
             self._isListening = true
         }

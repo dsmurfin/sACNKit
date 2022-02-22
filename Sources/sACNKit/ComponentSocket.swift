@@ -69,6 +69,9 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
     /// The dispatch queue on which the socket sends and receives messages.
     private var socketQueue: DispatchQueue
     
+    /// The Internet Protocol version(s) used by the source.
+    private let ipMode: sACNIPMode
+    
     /// The interface on which to bind this socket.
     private var interface: String?
     
@@ -87,18 +90,13 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
     ///    - type: The type of socket (unicast, multicast).
     ///    - ipMode: IP mode for this socket (IPv4/IPv6/Both).
     ///    - port: Optional: UDP port to bind.
-    ///    - interface: An optional interface on which to bind the socket. It may be a name (e.g. "en1" or "lo0") or the corresponding IP address (e.g. "192.168.4.35").
     ///    - delegateQueue: The dispatch queue on which to receive delegate calls from this component.
     ///
-    ///  - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interface must not be nil.
-    ///
-    init(cid: UUID, type: ComponentSocketType, ipMode: sACNIPMode, port: UInt16 = 0, interface: String?, delegateQueue: DispatchQueue) {
-        precondition(ipMode.usesIPv6(), "An interface must be provided for IPv6.")
-
+    init(cid: UUID, type: ComponentSocketType, ipMode: sACNIPMode, port: UInt16 = 0, delegateQueue: DispatchQueue) {
         self.cid = cid
         self.socketType = type
+        self.ipMode = ipMode
         self.port = port
-        self.interface = interface
         self.socketQueue = DispatchQueue(label: "com.danielmurfin.sACNKit.componentSocketQueue-\(cid.uuidString)")
         super.init()
         self.socket = GCDAsyncUdpSocket(delegate: self, delegateQueue: delegateQueue, socketQueue: self.socketQueue)
@@ -159,11 +157,17 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
     /// Starts listening for network data. Binds sockets, and joins multicast groups as neccessary.
     ///
     /// - Parameters:
+    ///    - interface: An optional interface on which to bind the socket. It may be a name (e.g. "en1" or "lo0") or the corresponding IP address (e.g. "192.168.4.35").
     ///    - multicastGroups: An array of multicast group hostnames for this socket.
     ///
     /// - Throws: An error of type `ComponentSocketError`
     ///
-    func startListening(multicastGroups: [String] = []) throws {
+    /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interface must not be nil.
+    ///
+    func startListening(onInterface interface: String?, multicastGroups: [String] = []) throws {
+        precondition(!ipMode.usesIPv6() || interface != nil, "An interface must be provided for IPv6.")
+        self.interface = interface
+
         do {
             switch socketType {
             case .transmit:
