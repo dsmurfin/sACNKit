@@ -174,7 +174,7 @@ final public class sACNSource {
     /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interface must not be nil.
     ///
     public init(name: String? = nil, cid: UUID = UUID(), ipMode: sACNIPMode = .ipv4Only, interface: String?, priority: UInt8 = 100, delegateQueue: DispatchQueue) {
-        precondition(ipMode.usesIPv6(), "An interface must be provided for IPv6.")
+        precondition(!ipMode.usesIPv6() || interface != nil, "An interface must be provided for IPv6.")
 
         self.cid = cid
         let sourceName = name ?? Source.getDeviceName()
