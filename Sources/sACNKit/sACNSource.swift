@@ -553,7 +553,7 @@ private extension sACNSource {
             self.universes.removeAll(where: { terminatingUniversesToRemove.contains($0) })
             self.universeNumbers.removeAll(where: { terminatingUniversesToRemove.map { universe in universe.number }.contains($0) })
 
-            if self.universes.filter ({ $0.removeAfterTerminate }).isEmpty {
+            if self.universes.isEmpty {
                 if delegateTransmissionState != false {
                     delegateTransmissionState = false
                     delegateQueue.async {
