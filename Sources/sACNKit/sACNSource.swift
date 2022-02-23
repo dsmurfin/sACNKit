@@ -211,15 +211,15 @@ final public class sACNSource {
     /// - Throws: An error of type `ComponentSocketError`.
     ///
     public func start() throws {
-        guard !isListening else {
-            throw sACNSourceValidationError.sourceStarted
-        }
-        
         Self.queue.sync(flags: .barrier) {
             if self.shouldTerminate {
                 self.shouldResume = true
                 return
             }
+        }
+        
+        guard !isListening else {
+            throw sACNSourceValidationError.sourceStarted
         }
         
         socket.delegate = self
