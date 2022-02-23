@@ -165,7 +165,7 @@ internal extension Data {
     ///    - offset: The offset of the value to be replaced.
     ///
     mutating func replacingDMPLayerValue(_ value: UInt8, at offset: Int) {
-        self[offset+1] = value
+        self[DMPLayer.Offset.propertyValues.rawValue+offset+1] = value
     }
 }
 
