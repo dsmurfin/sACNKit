@@ -314,7 +314,7 @@ final public class sACNSource {
         
         Self.queue.sync(flags: .barrier) {
             let internalUniverse = self.universes.first(where: { $0.number == number })
-            internalUniverse?.terminate(remove: false)
+            internalUniverse?.terminate(remove: true)
         }
         
         updateUniverseDiscoveryMessages()
@@ -439,7 +439,7 @@ final public class sACNSource {
     private func stopDataTransmit() {
         Self.queue.sync(flags: .barrier) {
             self.shouldTerminate = true
-            self.universes.forEach { $0.terminate(remove: true) }
+            self.universes.forEach { $0.terminate(remove: false) }
         }
     }
 
@@ -547,19 +547,23 @@ private extension sACNSource {
     private func sendDataMessages() {
         // remove all fully terminated universes
         Self.queue.sync(flags: .barrier) {
-            let terminatingUniverses = universes.filter { $0.shouldTerminate && $0.dirtyCounter < 1 }
-            let terminatingUniversesToRemove = terminatingUniverses.filter { $0.removeAfterTerminate }
             
-            self.universes.removeAll(where: { terminatingUniversesToRemove.contains($0) })
-            self.universeNumbers.removeAll(where: { terminatingUniversesToRemove.map { universe in universe.number }.contains($0) })
-
-            if self.universes.isEmpty {
+            // remove all universes which are full terminated and should be removed
+            let universesToRemove = universes.filter { $0.removeAfterTerminate && $0.shouldTerminate && $0.dirtyCounter < 1 }
+            self.universes.removeAll(where: { universesToRemove.contains($0) })
+            self.universeNumbers.removeAll(where: { universesToRemove.map { universe in universe.number }.contains($0) })
+            
+            let activeUniverses = universes.filter { !$0.shouldTerminate || $0.dirtyCounter > 0 }
+            
+            if activeUniverses.isEmpty {
+                // notify transmission ended (once)
                 if delegateTransmissionState != false {
                     delegateTransmissionState = false
                     delegateQueue.async {
                         self.delegate?.transmissionEnded()
                     }
                 }
+                
                 // termination of all universes to be removed is complete
                 if self.shouldTerminate {
                     // the source should terminate
@@ -577,15 +581,6 @@ private extension sACNSource {
                     }
                 }
                 return
-            } else if self.universes.allSatisfy({ $0.shouldTerminate && $0.dirtyCounter < 1 }) {
-                // all universes have been terminated
-                if delegateTransmissionState != false {
-                    delegateTransmissionState = false
-                    delegateQueue.async {
-                        self.delegate?.transmissionEnded()
-                    }
-                }
-                return
             }
         }
 
@@ -593,7 +588,8 @@ private extension sACNSource {
         Self.queue.sync(flags: .barrier) {
             let rootLayer = self.rootLayer
 
-            for (index, _) in universes.enumerated() {
+            let activeUniverses = universes.filter { !$0.shouldTerminate || $0.dirtyCounter > 0 }
+            for (index, _) in activeUniverses.enumerated() {
                 let universe = universes[index]
                 
                 // should levels be sent?
