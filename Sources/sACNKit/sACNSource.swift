@@ -367,7 +367,7 @@ final public class sACNSource {
     ///  - Throws: An error of type `sACNSourceValidationError`.
     ///
     public func updateSlot(slot: Int, in universeNumber: UInt16, level: UInt8, priority: UInt8? = nil) throws {
-        let internalUniverse = Self.queue.sync { self.universes.first(where: { $0.number == universe.number }) }
+        let internalUniverse = Self.queue.sync { self.universes.first(where: { $0.number == universeNumber }) }
         guard let internalUniverse = internalUniverse else {
             throw sACNSourceValidationError.universeDoesNotExist
         }
