@@ -247,6 +247,12 @@ final public class sACNSource {
     /// - Throws: An error of type `sACNSourceValidationError`.
     ///
     public func addUniverse(_ universe: sACNUniverse) throws {
+        let shouldTerminate = Self.queue.sync { self.shouldTerminate }
+        
+        guard !shouldTerminate else {
+            throw sACNSourceValidationError.universeExists
+        }
+        
         let universeNumbers = Self.queue.sync { self.universeNumbers }
 
         guard !universeNumbers.contains(universe.number) else {
@@ -331,13 +337,16 @@ final public class sACNSource {
     ///  - Throws: An error of type `sACNSourceValidationError`.
     ///
     public func updateLevels(with universe: sACNUniverse) throws {
-        guard universeNumbers.contains(universe.number) else {
+        let internalUniverse = Self.queue.sync { self.universes.first(where: { $0.number == universe.number }) }
+        guard let internalUniverse = internalUniverse else {
             throw sACNSourceValidationError.universeDoesNotExist
+        }
+        guard !internalUniverse.shouldTerminate else {
+            throw sACNSourceValidationError.universeTerminating
         }
         
         try Self.queue.sync(flags: .barrier) {
-            let internalUniverse = self.universes.first(where: { $0.number == universe.number })
-            try internalUniverse?.update(with: universe)
+            try internalUniverse.update(with: universe)
         }
     }
     
@@ -358,8 +367,12 @@ final public class sACNSource {
     ///  - Throws: An error of type `sACNSourceValidationError`.
     ///
     public func updateSlot(slot: Int, in universeNumber: UInt16, level: UInt8, priority: UInt8? = nil) throws {
-        guard universeNumbers.contains(universeNumber) else {
+        let internalUniverse = Self.queue.sync { self.universes.first(where: { $0.number == universe.number }) }
+        guard let internalUniverse = internalUniverse else {
             throw sACNSourceValidationError.universeDoesNotExist
+        }
+        guard !internalUniverse.shouldTerminate else {
+            throw sACNSourceValidationError.universeTerminating
         }
         
         try Self.queue.sync(flags: .barrier) {
@@ -611,6 +624,12 @@ private extension sACNSource {
 ///
 public enum sACNSourceValidationError: LocalizedError {
     
+    /// The source is terminating.
+    case sourceTerminating
+    
+    /// The universe is terminating.
+    case universeTerminating
+    
     /// The universe already exists.
     case universeExists
     
@@ -632,6 +651,10 @@ public enum sACNSourceValidationError: LocalizedError {
     /// A human-readable description of the error useful for logging purposes.
     var logDescription: String {
         switch self {
+        case .sourceTerminating:
+            return "The source is terminating"
+        case .universeTerminating:
+            return "The universe is terminating"
         case .universeExists:
             return "The universe already exists"
         case .universeDoesNotExist:
