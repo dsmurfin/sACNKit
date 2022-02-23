@@ -32,16 +32,21 @@ import SwiftUI
 public struct sACNUniverse: Equatable {
     
     /// The universe number.
-    private (set) var number: UInt16
+    public private (set) var number: UInt16
     
     /// The per-packet priority.
-    private (set) var priority: UInt8?
+    public private (set) var priority: UInt8?
     
     /// The level data (512).
-    private (set) var levels: [UInt8]
+    public private (set) var levels: [UInt8]
     
     /// The priority (per-slot) data (512).
-    private (set) var priorities: [UInt8]?
+    public private (set) var priorities: [UInt8]?
+    
+    /// Whether this universe uses per-slot priority.
+    public var usesPerSlotPriority: Bool {
+        return priorities != nil
+    }
     
     /// Initializes a universe with an optional per-packet priority and an array of levels.
     /// If less than 512 levels are provided levels will be padded to 512.
