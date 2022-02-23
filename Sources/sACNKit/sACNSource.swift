@@ -242,6 +242,13 @@ final public class sACNSource {
         // start heartbeats
         startDataTransmit()
         startUniverseDiscovery()
+        
+        if delegateTransmissionState != true {
+            delegateTransmissionState = true
+            delegateQueue.async {
+                self.delegate?.transmissionStarted()
+            }
+        }
     }
     
     /// Stops this source.
@@ -272,7 +279,7 @@ final public class sACNSource {
         let shouldTerminate = Self.queue.sync { self.shouldTerminate }
         
         guard !shouldTerminate else {
-            throw sACNSourceValidationError.universeExists
+            throw sACNSourceValidationError.universeTerminating
         }
         
         let universeNumbers = Self.queue.sync { self.universeNumbers }
@@ -287,7 +294,7 @@ final public class sACNSource {
             self.universeNumbers.append(universe.number)
             self.universeNumbers.sort()
             
-            if delegateTransmissionState != true {
+            if _isListening && delegateTransmissionState != true {
                 delegateTransmissionState = true
                 delegateQueue.async {
                     self.delegate?.transmissionStarted()
@@ -745,7 +752,7 @@ extension sACNSource: ComponentSocketDelegate {
     ///
     func socket(_ socket: ComponentSocket, socketDidCloseWithError error: Error?) {
         Self.queue.sync(flags: .barrier) {
-            guard self._isListening else { return }
+            guard error != nil, self._isListening else { return }
             self._isListening = false
         }
         delegateQueue.async { self.delegate?.source(self, socketDidCloseWithError: error) }
