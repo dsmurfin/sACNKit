@@ -557,6 +557,7 @@ private extension sACNSource {
                     
                     // the source is now terminated
                     self.shouldTerminate = false
+                    self._isListening = false
                     
                     if self.shouldResume {
                         DispatchQueue.main.async {
@@ -728,6 +729,7 @@ extension sACNSource: ComponentSocketDelegate {
     ///
     func socket(_ socket: ComponentSocket, socketDidCloseWithError error: Error?) {
         Self.queue.sync(flags: .barrier) {
+            guard self._isListening else { return }
             self._isListening = false
         }
         delegateQueue.async { self.delegate?.source(self, socketDidCloseWithError: error) }
