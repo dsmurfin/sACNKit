@@ -128,6 +128,9 @@ class Universe: Equatable {
     /// Whether this universe should be terminated.
     private (set) var shouldTerminate: Bool
     
+    /// Whether the universe should be removed after termination.
+    private (set) var removeAfterTerminate: Bool
+    
     /// Initializes a universe with a public `sACNUniverse`.
     ///
     ///  - parameters:
@@ -148,6 +151,16 @@ class Universe: Equatable {
         self.dirtyCounter = 3
         self.dirtyPriority = true
         self.shouldTerminate = false
+        self.removeAfterTerminate = false
+    }
+    
+    /// Resets this universe for new transmission.
+    func reset() {
+        self.transmitCounter = 0
+        self.dirtyCounter = 3
+        self.dirtyPriority = true
+        self.shouldTerminate = false
+        self.removeAfterTerminate = false
     }
     
     /// Updates an existing universe with new priorities and values from an `sACNUniverse`.
@@ -273,8 +286,13 @@ class Universe: Equatable {
     }
     
     /// Terminates transmission of this universe.
-    func terminate() {
+    ///
+    /// - parameters:
+    ///     - remove: Whether this universe should be removed after termination.
+    ///
+    func terminate(remove: Bool) {
         self.shouldTerminate = true
+        self.removeAfterTerminate = remove
         self.dirtyCounter = 3
     }
     

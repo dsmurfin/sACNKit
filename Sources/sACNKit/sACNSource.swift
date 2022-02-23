@@ -119,6 +119,10 @@ final public class sACNSource {
     /// The queue on which to send delegate notifications.
     private let delegateQueue: DispatchQueue
     
+    /// The previous delegate transmission state.
+    /// If `true`, transmission was notified already as active, if `false`, transmission was notified already as inactive.
+    private var delegateTransmissionState: Bool?
+    
     // MARK: Timer
     
     /// The queue on which timers run.
@@ -223,6 +227,11 @@ final public class sACNSource {
         }
         
         socket.delegate = self
+        
+        Self.queue.sync(flags: .barrier) {
+            universes.forEach { $0.reset() }
+            delegateTransmissionState = nil
+        }
 
         // begin listening
         try socket.startListening(onInterface: self.interface)
@@ -253,7 +262,6 @@ final public class sACNSource {
     /// Adds a new universe to this source.
     ///
     /// If a universe with this number already exists, this universe will not be added.
-    /// If a source is terminated universes are removed and must be re-added.
     ///
     /// - Parameters:
     ///    - universe: The universe to add.
@@ -279,7 +287,8 @@ final public class sACNSource {
             self.universeNumbers.append(universe.number)
             self.universeNumbers.sort()
             
-            if universeNumbers.count == 1 {
+            if delegateTransmissionState != true {
+                delegateTransmissionState = true
                 delegateQueue.async {
                     self.delegate?.transmissionStarted()
                 }
@@ -305,7 +314,7 @@ final public class sACNSource {
         
         Self.queue.sync(flags: .barrier) {
             let internalUniverse = self.universes.first(where: { $0.number == number })
-            internalUniverse?.terminate()
+            internalUniverse?.terminate(remove: false)
         }
         
         updateUniverseDiscoveryMessages()
@@ -430,7 +439,7 @@ final public class sACNSource {
     private func stopDataTransmit() {
         Self.queue.sync(flags: .barrier) {
             self.shouldTerminate = true
-            self.universes.forEach { $0.terminate() }
+            self.universes.forEach { $0.terminate(remove: true) }
         }
     }
 
@@ -538,19 +547,20 @@ private extension sACNSource {
     private func sendDataMessages() {
         // remove all fully terminated universes
         Self.queue.sync(flags: .barrier) {
-            let universesToRemove = universes.filter { $0.shouldTerminate && $0.dirtyCounter < 1 }
-            let countToRemove = universesToRemove.count
+            let terminatingUniverses = universes.filter { $0.shouldTerminate && $0.dirtyCounter < 1 }
+            let terminatingUniversesToRemove = terminatingUniverses.filter { $0.removeAfterTerminate }
             
-            self.universes.removeAll(where: { universesToRemove.contains($0) })
-            self.universeNumbers.removeAll(where: { universesToRemove.map { universe in universe.number }.contains($0) })
-                
-            // termination of all universes is complete
-            if self.universes.isEmpty {
-                if countToRemove > 0 {
+            self.universes.removeAll(where: { terminatingUniversesToRemove.contains($0) })
+            self.universeNumbers.removeAll(where: { terminatingUniversesToRemove.map { universe in universe.number }.contains($0) })
+
+            if self.universes.filter ({ $0.removeAfterTerminate }).isEmpty {
+                if delegateTransmissionState != false {
+                    delegateTransmissionState = false
                     delegateQueue.async {
                         self.delegate?.transmissionEnded()
                     }
                 }
+                // termination of all universes to be removed is complete
                 if self.shouldTerminate {
                     // the source should terminate
                     dataTransmitTimer = nil
@@ -564,6 +574,15 @@ private extension sACNSource {
                         DispatchQueue.main.async {
                             try? self.start()
                         }
+                    }
+                }
+                return
+            } else if self.universes.allSatisfy({ $0.shouldTerminate && $0.dirtyCounter < 1 }) {
+                // all universes have been terminated
+                if delegateTransmissionState != false {
+                    delegateTransmissionState = false
+                    delegateQueue.async {
+                        self.delegate?.transmissionEnded()
                     }
                 }
                 return
