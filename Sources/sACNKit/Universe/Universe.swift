@@ -244,7 +244,7 @@ class Universe: Equatable {
         
         if var priorities = self.priorities, let priority = priority, priorities[slot] != priority {
             priorities[slot] = priority
-            self.dmpLevelsLayer.replacingDMPLayerValue(priority, at: slot)
+            self.dmpPrioritiesLayer.replacingDMPLayerValue(priority, at: slot)
             dirty = true
             dirtyPriority = true
         }
