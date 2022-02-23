@@ -253,6 +253,7 @@ final public class sACNSource {
     /// Adds a new universe to this source.
     ///
     /// If a universe with this number already exists, this universe will not be added.
+    /// If a source is terminated universes are removed and must be re-added.
     ///
     /// - Parameters:
     ///    - universe: The universe to add.
