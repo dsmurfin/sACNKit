@@ -157,6 +157,9 @@ final public class sACNSource {
     /// Whether the source should terminate.
     private var shouldTerminate: Bool
     
+    /// Whether the source should resume after termination.
+    private var shouldResume: Bool
+    
     // MARK: - Initialization
 
     /// Creates a new source using a name, interface and delegate queue, and optionally a CID, IP Mode, Priority.
@@ -192,6 +195,7 @@ final public class sACNSource {
         self.universeNumbers = []
         self.universes = []
         self.shouldTerminate = false
+        self.shouldResume = false
     }
     
     deinit {
@@ -207,8 +211,15 @@ final public class sACNSource {
     /// - Throws: An error of type `ComponentSocketError`.
     ///
     public func start() throws {
+        guard !isListening else {
+            throw sACNSourceValidationError.sourceStarted
+        }
+        
         Self.queue.sync(flags: .barrier) {
-            self.shouldTerminate = false
+            if self.shouldTerminate {
+                self.shouldResume = true
+                return
+            }
         }
         
         socket.delegate = self
@@ -229,6 +240,8 @@ final public class sACNSource {
     /// When stopped, this source will no longer transmit sACN messages.
     ///
     public func stop() {
+        guard isListening else { return }
+        
         // stops heartbeats
         stopUniverseDiscovery()
         stopDataTransmit()
@@ -541,6 +554,15 @@ private extension sACNSource {
                     // the source should terminate
                     dataTransmitTimer = nil
                     socket.stopListening()
+                    
+                    // the source is now terminated
+                    self.shouldTerminate = false
+                    
+                    if self.shouldResume {
+                        DispatchQueue.main.async {
+                            try? self.start()
+                        }
+                    }
                 }
                 return
             }
@@ -624,6 +646,9 @@ private extension sACNSource {
 ///
 public enum sACNSourceValidationError: LocalizedError {
     
+    /// The source is started.
+    case sourceStarted
+    
     /// The source is terminating.
     case sourceTerminating
     
@@ -651,6 +676,8 @@ public enum sACNSourceValidationError: LocalizedError {
     /// A human-readable description of the error useful for logging purposes.
     var logDescription: String {
         switch self {
+        case .sourceStarted:
+            return "The source is already started"
         case .sourceTerminating:
             return "The source is terminating"
         case .universeTerminating:
@@ -733,9 +760,10 @@ public protocol sACNSourceDelegate: AnyObject {
     ///
     func source(_ source: sACNSource, socketDidCloseWithError error: Error?)
     
-    /// Notifies the delegate that data transmission has started.
+    /// Notifies the delegate that the source is actively transmitting universe data messages.
     func transmissionStarted()
     
-    /// Notifies the delegate that data transmission has ended.
+    /// Notifies the delegate that the source has stopped transmitting universe data messages.
+    /// Note: This does not indicate that the source is stopped, it could simply be no universes have been added.
     func transmissionEnded()
 }
