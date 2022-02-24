@@ -155,7 +155,7 @@ internal extension Data {
     ///    - values: The values to be replaced in the layer.
     ///
     mutating func replacingDMPLayerValues(with values: [UInt8]) {
-        self.replaceSubrange(DMPLayer.Offset.propertyValues.rawValue+1...DMPLayer.Offset.propertyValues.rawValue+1+values.count, with: values)
+        self.replaceSubrange(DMPLayer.Offset.propertyValues.rawValue+1..<DMPLayer.Offset.propertyValues.rawValue+1+values.count, with: values)
     }
     
     /// Replaces the `DMPLayer` value at a specific offset.
