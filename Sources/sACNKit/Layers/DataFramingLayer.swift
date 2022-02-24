@@ -192,6 +192,15 @@ internal extension Data {
     mutating func replacingOptions(with options: DataFramingLayer.Options) {
         self[DataFramingLayer.Offset.options.rawValue] = options.rawValue
     }
+    
+    /// Replaces the `DataFramingLayer` options.
+    ///
+    /// - Parameters:
+    ///    - priority: The options to be replaced in the layer.
+    ///
+    mutating func replacingPriority(with priority: UInt8) {
+        self[DataFramingLayer.Offset.priority.rawValue] = priority
+    }
 }
 
 /// Data Framing Layer Validation Error

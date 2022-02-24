@@ -192,6 +192,9 @@ class Universe: Equatable {
         
         if self.priority != universe.priority {
             self.priority = universe.priority
+            if let priority = universe.priority {
+                self.framingLayer.replacingPriority(with: priority)
+            }
             dirty = true
         }
         
