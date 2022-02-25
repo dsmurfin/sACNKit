@@ -111,20 +111,20 @@ struct RootLayer {
         guard data.count > Offset.data.rawValue else { throw RootLayerValidationError.lengthOutOfRange }
         
         // the preamble size
-        guard data[...(Offset.postAmble.rawValue-1)] == Self.preambleSize else {
+        guard data[..<Offset.postAmble.rawValue] == Self.preambleSize else {
             throw RootLayerValidationError.invalidPreamblePostambleSize
         }
         // the postamble size
-        guard data[Offset.postAmble.rawValue...Offset.acnPacketIdentifier.rawValue-1] == Self.postambleSize else {
+        guard data[Offset.postAmble.rawValue..<Offset.acnPacketIdentifier.rawValue] == Self.postambleSize else {
             throw RootLayerValidationError.invalidPreamblePostambleSize
         }
         // the packet identifier
-        guard data[Offset.acnPacketIdentifier.rawValue...Offset.flagsAndLength.rawValue-1] == Self.packetIdentifier else {
+        guard data[Offset.acnPacketIdentifier.rawValue..<Offset.flagsAndLength.rawValue] == Self.packetIdentifier else {
             throw RootLayerValidationError.invalidPacketIdentifier
         }
         // the flags and length
         // TODO: This needs to be checked for universe discovery
-        guard data[Offset.flagsAndLength.rawValue...Offset.vector.rawValue-1] == Self.flagsAndLength else {
+        guard data[Offset.flagsAndLength.rawValue..<Offset.vector.rawValue] == Self.flagsAndLength else {
             throw RootLayerValidationError.invalidFlagsAndLength
         }
         // the vector for this message

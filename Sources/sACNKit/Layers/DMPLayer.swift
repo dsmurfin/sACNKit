@@ -111,7 +111,7 @@ struct DMPLayer {
         guard data.count > Offset.propertyValues.rawValue+1 else { throw DMPLayerValidationError.lengthOutOfRange }
         
         // the flags and length
-        guard data[Offset.flagsAndLength.rawValue...Offset.vector.rawValue-1] == Self.flagsAndLength else {
+        guard data[Offset.flagsAndLength.rawValue..<Offset.vector.rawValue] == Self.flagsAndLength else {
             throw DMPLayerValidationError.invalidFlagsAndLength
         }
         // the vector for this layer
@@ -122,7 +122,7 @@ struct DMPLayer {
             throw DMPLayerValidationError.invalidVector(vector)
         }
         // the address property block
-        guard data[Offset.addressTypeDataType.rawValue...Offset.propertyValueCount.rawValue-1] == DMPLayer.addressPropertyBlock else {
+        guard data[Offset.addressTypeDataType.rawValue..<Offset.propertyValueCount.rawValue] == DMPLayer.addressPropertyBlock else {
             throw DMPLayerValidationError.invalidAddressPropertyBlock
         }
         // the number of property values
@@ -137,7 +137,7 @@ struct DMPLayer {
             throw DMPLayerValidationError.unableToParse(field: "START Code")
         }
         let propertyValuesOffset = Offset.propertyValues.rawValue+1
-        let values = data.subdata(in: propertyValuesOffset..<propertyValuesOffset+Int(propertyValueCount)-1).bytes
+        let values = data.subdata(in: propertyValuesOffset..<propertyValuesOffset+Int(propertyValueCount)).bytes
 
         return Self(startCode: STARTCode, values: values)
     }

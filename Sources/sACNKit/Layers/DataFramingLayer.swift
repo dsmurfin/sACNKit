@@ -123,7 +123,7 @@ struct DataFramingLayer {
         guard data.count > Offset.data.rawValue else { throw DataFramingLayerValidationError.lengthOutOfRange }
         
         // the flags and length
-        guard data[Offset.flagsAndLength.rawValue...Offset.vector.rawValue-1] == Self.flagsAndLength else {
+        guard data[Offset.flagsAndLength.rawValue..<Offset.vector.rawValue] == Self.flagsAndLength else {
             throw DataFramingLayerValidationError.invalidFlagsAndLength
         }
         // the vector for this layer
