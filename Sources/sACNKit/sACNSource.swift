@@ -279,7 +279,7 @@ final public class sACNSource {
         let shouldTerminate = Self.queue.sync { self.shouldTerminate }
         
         guard !shouldTerminate else {
-            throw sACNSourceValidationError.universeTerminating
+            throw sACNSourceValidationError.sourceTerminating
         }
         
         let universeNumbers = Self.queue.sync { self.universeNumbers }
@@ -320,8 +320,13 @@ final public class sACNSource {
         }
         
         Self.queue.sync(flags: .barrier) {
-            let internalUniverse = self.universes.first(where: { $0.number == number })
-            internalUniverse?.terminate(remove: true)
+            if _isListening {
+                let internalUniverse = self.universes.first(where: { $0.number == number })
+                internalUniverse?.terminate(remove: true)
+            } else {
+                self.universes.removeAll(where: { $0.number == number })
+                self.universeNumbers.removeAll(where: { $0 == number })
+            }
         }
         
         updateUniverseDiscoveryMessages()
