@@ -172,10 +172,11 @@ class Universe: Equatable {
     ///
     ///  - parameters:
     ///     - universe: A public `sACNUniverse`.
+    ///     - isSourceActive: Whether the source is active.
     ///
     ///  - Throws: An error of type `sACNSourceValidationError`.
     ///
-    func update(with universe: sACNUniverse) throws {
+    func update(with universe: sACNUniverse, sourceActive isSourceActive: Bool) throws {
         guard universe.levels.count == 512 else {
             throw sACNSourceValidationError.incorrectLevelsCount
         }
@@ -210,10 +211,12 @@ class Universe: Equatable {
                 self.dmpPrioritiesLayer.replacingDMPLayerValues(with: priorities)
             }
             dirty = true
-            dirtyPriority = true
+            if isSourceActive {
+                dirtyPriority = true
+            }
         }
         
-        if dirty {
+        if isSourceActive && dirty {
             dirtyCounter = 3
         }
     }
@@ -224,10 +227,11 @@ class Universe: Equatable {
     ///     - slot: The slot to update.
     ///     - level: The level for this slot.
     ///     - priority: Optional: An optional per-slot priority for this slot.
+    ///     - isSourceActive: Whether the source is active.
     ///
     ///  - Throws: An error of type `sACNSourceValidationError`.
     ///
-    func update(slot: Int, level: UInt8, priority: UInt8? = nil) throws {
+    func update(slot: Int, level: UInt8, priority: UInt8? = nil, sourceActive isSourceActive: Bool) throws {
         guard slot < 512 else {
             throw sACNSourceValidationError.invalidSlotNumber
         }
@@ -249,10 +253,12 @@ class Universe: Equatable {
             priorities[slot] = priority
             self.dmpPrioritiesLayer.replacingDMPLayerValue(priority, at: slot)
             dirty = true
-            dirtyPriority = true
+            if isSourceActive {
+                dirtyPriority = true
+            }
         }
         
-        if dirty {
+        if isSourceActive && dirty {
             dirtyCounter = 3
         }
     }

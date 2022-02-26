@@ -78,7 +78,7 @@ final public class sACNSource {
     /// The socket used for communications.
     private let socket: ComponentSocket
     
-    /// The isocket listening status (thread-safe getter).
+    /// The socket listening status (thread-safe getter).
     public var isListening: Bool {
         get { Self.queue.sync { _isListening } }
     }
@@ -371,12 +371,14 @@ final public class sACNSource {
         guard let internalUniverse = internalUniverse else {
             throw sACNSourceValidationError.universeDoesNotExist
         }
-        guard !internalUniverse.shouldTerminate else {
+        
+        let isListening = self.isListening
+        guard !isListening || !internalUniverse.shouldTerminate else {
             throw sACNSourceValidationError.universeTerminating
         }
         
         try Self.queue.sync(flags: .barrier) {
-            try internalUniverse.update(with: universe)
+            try internalUniverse.update(with: universe, sourceActive: isListening)
         }
     }
     
@@ -401,13 +403,15 @@ final public class sACNSource {
         guard let internalUniverse = internalUniverse else {
             throw sACNSourceValidationError.universeDoesNotExist
         }
-        guard !internalUniverse.shouldTerminate else {
+        
+        let isListening = self.isListening
+        guard !isListening || !internalUniverse.shouldTerminate else {
             throw sACNSourceValidationError.universeTerminating
         }
         
         try Self.queue.sync(flags: .barrier) {
             let internalUniverse = self.universes.first(where: { $0.number == universeNumber })
-            try internalUniverse?.update(slot: slot, level: level, priority: priority)
+            try internalUniverse?.update(slot: slot, level: level, priority: priority, sourceActive: isListening)
         }
     }
 
