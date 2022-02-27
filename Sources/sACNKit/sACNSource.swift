@@ -454,6 +454,7 @@ final public class sACNSource {
     /// Stops this source's data transmission.
     private func stopDataTransmit() {
         Self.queue.sync(flags: .barrier) {
+            self.shouldResume = false
             self.shouldTerminate = true
             self.universes.forEach { $0.terminate(remove: false) }
         }
