@@ -46,7 +46,7 @@ final public class sACNSource {
     /// The leeway used for timing. Informs the OS how accurate timings should be.
     private static let timingLeeway: DispatchTimeInterval = .nanoseconds(0)
 
-    // MARK: General
+    // MARK: Essential
 
     /// A globally unique identifier (UUID) representing the source.
     private let cid: UUID
@@ -113,7 +113,7 @@ final public class sACNSource {
     /// The delegate which receives notifications from this source.
     private weak var delegate: sACNSourceDelegate?
     
-    /// The delegate which receives debug log messages from this producer.
+    /// The delegate which receives debug log messages from this source.
     private weak var debugDelegate: sACNComponentDebugDelegate?
 
     /// The queue on which to send delegate notifications.
@@ -738,8 +738,7 @@ public enum sACNSourceValidationError: LocalizedError {
 
 /// Component Socket Delegate
 ///
-/// Required methods for objects implementing this delegate.
-///
+/// `ComponentSocketDelegate` conformance.
 extension sACNSource: ComponentSocketDelegate {
     /// Called when a message has been received.
     ///
