@@ -1,7 +1,7 @@
 //
-//  Priority.swift
+//  ReceiverSource.swift
 //
-//  Copyright (c) 2022 Daniel Murfin
+//  Copyright (c) 2023 Daniel Murfin
 //
 //  Permission is hereby granted, free of charge, to any person obtaining a copy
 //  of this software and associated documentation files (the "Software"), to deal
@@ -24,36 +24,31 @@
 
 import Foundation
 
-/// UInt8 Extension
+/// Receiver Source
 ///
-/// Priority Extensions to `UInt8`.
-///
-internal extension UInt8 {
-    /// The minimum permitted value for priority.
-    static let minPriority: UInt8 = 0
+class ReceiverSource {
     
-    /// The maximum permitted value for priority.
-    static let maxPriority: UInt8 = 200
+    /// The sACN CID of this source.
+    var cid: UUID
     
-    /// The default value for priority; used where not specified.
-    static let defaultPriority: UInt8 = 100
+    /// The hostname of the source.
+    var hostname: String
     
-    /// The range of valid priorities.
-    static let validPriorities: ClosedRange<UInt8> = minPriority...maxPriority
+    /// The name of the source.
+    var name: String
     
-    /// Determines whether this priority is valid.
-    ///
-    /// - Returns: Whether this priority is valid.
-    ///
-    func validPriority() -> Bool {
-        return UInt8.minPriority...UInt8.maxPriority ~= self
+    /// Whether only per-address priority data has been received (waiting for levels).
+    var pending: Bool
+    
+    /// Whether this source is currently sampling.
+    var sampling: Bool
+    
+    init(sourceData: sACNReceiverRawSourceData, pending: Bool) {
+        self.cid = sourceData.cid
+        self.hostname = sourceData.hostname
+        self.name = sourceData.name
+        self.pending = pending
+        self.sampling = sourceData.isSampling
     }
     
-    /// Calculates the nearest valid priority to the one specified.
-    ///
-    /// - Returns: A valid priority nearest to the value specified.
-    ///
-    func nearestValidPriority() -> UInt8 {
-        self < Self.minPriority ? Self.minPriority : self > Self.maxPriority ? Self.maxPriority : self
-    }
 }

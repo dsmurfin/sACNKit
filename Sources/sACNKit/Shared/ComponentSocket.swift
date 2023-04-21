@@ -1,7 +1,7 @@
 //
 //  ComponentSocket.swift
 //
-//  Copyright (c) 2022 Daniel Murfin
+//  Copyright (c) 2023 Daniel Murfin
 //
 //  Permission is hereby granted, free of charge, to any person obtaining a copy
 //  of this software and associated documentation files (the "Software"), to deal
@@ -57,26 +57,26 @@ enum ComponentSocketIPFamily: String {
 ///
 class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
  
-    /// A globally unique identifier (UUID) representing an E1.31 source, compliant with RFC 4122.
-    private var cid: UUID
+    /// A unique identifier for this socket.
+    let id: UUID
     
     /// The raw socket.
     private var socket: GCDAsyncUdpSocket?
     
     /// The type of socket.
-    private var socketType: ComponentSocketType
+    private let socketType: ComponentSocketType
     
     /// The dispatch queue on which the socket sends and receives messages.
-    private var socketQueue: DispatchQueue
+    private let socketQueue: DispatchQueue
     
     /// The Internet Protocol version(s) used by the source.
     private let ipMode: sACNIPMode
     
     /// The interface on which to bind this socket.
-    private var interface: String?
+    private (set) var interface: String?
     
     /// The UDP port on which to bind this socket.
-    private var port: UInt16
+    private let port: UInt16
     
     /// The delegate to receive notifications.
     weak var delegate: ComponentSocketDelegate?
@@ -86,31 +86,30 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
     /// Component sockets are used for joining multicast groups, and sending and receiving network data.
     ///
     /// - Parameters:
-    ///    - cid: The CID of this component.
     ///    - type: The type of socket (unicast, multicast).
     ///    - ipMode: IP mode for this socket (IPv4/IPv6/Both).
     ///    - port: Optional: UDP port to bind.
     ///    - delegateQueue: The dispatch queue on which to receive delegate calls from this component.
     ///
-    init(cid: UUID, type: ComponentSocketType, ipMode: sACNIPMode, port: UInt16 = 0, delegateQueue: DispatchQueue) {
-        self.cid = cid
+    init(type: ComponentSocketType, ipMode: sACNIPMode, port: UInt16 = 0, delegateQueue: DispatchQueue) {
+        self.id = UUID()
         self.socketType = type
         self.ipMode = ipMode
         self.port = port
-        self.socketQueue = DispatchQueue(label: "com.danielmurfin.sACNKit.componentSocketQueue-\(cid.uuidString)")
+        self.socketQueue = DispatchQueue(label: "com.danielmurfin.sACNKit.componentSocketQueue-\(id.uuidString)")
         super.init()
         self.socket = GCDAsyncUdpSocket(delegate: self, delegateQueue: delegateQueue, socketQueue: self.socketQueue)
     }
     
     /// Allows other services to reuse the port.
     ///
-    /// - Throws: An error of type `ComponentSocketError`.
+    /// - Throws: An error of type `sACNComponentSocketError`.
     ///
     func enableReusePort() throws {
         do {
             try socket?.enableReusePort(true)
         } catch {
-            throw ComponentSocketError.couldNotEnablePortReuse
+            throw sACNsACNComponentSocketError.couldNotEnablePortReuse
         }
     }
 
@@ -119,7 +118,7 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
     /// - Parameters:
     ///    - multicastGroup: The multicast group hostname.
     ///
-    /// - Throws: An error of type `ComponentSocketError`
+    /// - Throws: An error of type `sACNComponentSocketError`
     ///
     func join(multicastGroup: String) throws {
         switch socketType {
@@ -129,7 +128,7 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
             do {
                 try socket?.joinMulticastGroup(multicastGroup, onInterface: interface)
             } catch {
-                throw ComponentSocketError.couldNotJoin(multicastGroup: multicastGroup)
+                throw sACNsACNComponentSocketError.couldNotJoin(multicastGroup: multicastGroup)
             }
         }
     }
@@ -139,7 +138,7 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
     /// - Parameters:
     ///    - multicastGroup: The multicast group hostname.
     ///
-    /// - Throws: An error of type `ComponentSocketError`
+    /// - Throws: An error of type `sACNComponentSocketError`
     ///
     func leave(multicastGroup: String) throws {
         switch socketType {
@@ -149,7 +148,7 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
             do {
                 try socket?.leaveMulticastGroup(multicastGroup, onInterface: interface)
             } catch {
-                throw ComponentSocketError.couldNotLeave(multicastGroup: multicastGroup)
+                throw sACNsACNComponentSocketError.couldNotLeave(multicastGroup: multicastGroup)
             }
         }
     }
@@ -160,7 +159,7 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
     ///    - interface: An optional interface on which to bind the socket. It may be a name (e.g. "en1" or "lo0") or the corresponding IP address (e.g. "192.168.4.35").
     ///    - multicastGroups: An array of multicast group hostnames for this socket.
     ///
-    /// - Throws: An error of type `ComponentSocketError`
+    /// - Throws: An error of type `sACNComponentSocketError`
     ///
     /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interface must not be nil.
     ///
@@ -171,36 +170,36 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
         do {
             switch socketType {
             case .transmit:
-                // only bind on an interface if not multicast
+                // only bind on an interface if not multicast receiver
                 try socket?.bind(toPort: port, interface: interface)
-                delegate?.debugLog(for: self, with: "Successfully bound unicast to port: \(socket?.localPort() ?? 0) on interface: \(interface ?? "default")")
+                delegate?.debugLog(for: self, with: "Successfully bound unicast to port: \(socket?.localPort() ?? 0) on interface: \(interface ?? "all")")
             case .receive:
                 try socket?.bind(toPort: port)
-                delegate?.debugLog(for: self, with: "Successfully bound multicast to port: \(port) on interface: \(interface ?? "default")")
+                delegate?.debugLog(for: self, with: "Successfully bound multicast to port: \(port)")
             }
         } catch {
-            throw ComponentSocketError.couldNotBind(message: "\(cid): Could not bind \(socketType.rawValue) socket.")
+            throw sACNsACNComponentSocketError.couldNotBind(message: "\(id): Could not bind \(socketType.rawValue) socket.")
         }
         
         do {
             switch socketType {
             case .transmit:
                 // attempt to set the interface multicast should be sent on (required for IPv6)
-                // it should not be possible to have a nil interface when using IPv6
-                if let interface = interface {
+                // it should not be possible to have a no interfaces when using IPv6
+                if let interface, ipMode.usesIPv6() {
                     try socket?.sendIPv6Multicast(onInterface: interface)
                 }
             case .receive:
                 break
             }
         } catch {
-            throw ComponentSocketError.couldNotAssignMulticastInterface(message: "\(cid): Could not assign interface(s) for sending multicast on \(socketType.rawValue) socket.")
+            throw sACNsACNComponentSocketError.couldNotAssignMulticastInterface(message: "\(id): Could not assign interface for sending multicast on \(socketType.rawValue) socket.")
         }
         
         do {
             try socket?.beginReceiving()
         } catch {
-            throw ComponentSocketError.couldNotReceive(message: "\(cid): Could not receive on \(socketType.rawValue) socket.")
+            throw sACNsACNComponentSocketError.couldNotReceive(message: "\(id): Could not receive on \(socketType.rawValue) socket.")
         }
         
         switch socketType {
@@ -269,7 +268,7 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
     public func udpSocket(_ sock: GCDAsyncUdpSocket, didReceive data: Data, fromAddress address: Data, withFilterContext filterContext: Any?) {
         guard let hostname = GCDAsyncUdpSocket.host(fromAddress: address) else { return }
         let port = GCDAsyncUdpSocket.port(fromAddress: address)
-        let ipFamily: ComponentSocketIPFamily = GCDAsyncUdpSocket.family(fromAddress: address) == AF_INET6 ? .IPv6 : .IPv4
+        let ipFamily: ComponentSocketIPFamily = GCDAsyncUdpSocket.isIPv6Address(address) ? .IPv6 : .IPv4
         
         delegate?.debugLog(for: self, with: "Socket received data of length \(data.count), from \(ipFamily.rawValue) \(hostname):\(port)")
         delegate?.receivedMessage(for: self, withData: data, sourceHostname: hostname, sourcePort: port, ipFamily: ipFamily)
@@ -328,9 +327,9 @@ protocol ComponentSocketDelegate: AnyObject {
 
 /// Source Socket Error
 ///
-/// Enumerates all possible `ComponentSocketError` errors.
+/// Enumerates all possible `sACNsACNComponentSocketError` errors.
 ///
-public enum ComponentSocketError: LocalizedError {
+public enum sACNsACNComponentSocketError: LocalizedError {
     
     /// It was not possible to enable port reuse.
     case couldNotEnablePortReuse

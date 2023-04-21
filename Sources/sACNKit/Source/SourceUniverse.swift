@@ -1,7 +1,7 @@
 //
-//  Universe.swift
+//  SourceUniverse.swift
 //
-//  Copyright (c) 2022 Daniel Murfin
+//  Copyright (c) 2023 Daniel Murfin
 //
 //  Permission is hereby granted, free of charge, to any person obtaining a copy
 //  of this software and associated documentation files (the "Software"), to deal
@@ -23,73 +23,11 @@
 //
 
 import Foundation
-import SwiftUI
 
-/// sACN Universe
-///
-/// An sACN universes contains level and priority information.
-///
-public struct sACNUniverse: Equatable {
-    
-    /// The universe number.
-    public private (set) var number: UInt16
-    
-    /// The per-packet priority.
-    public private (set) var priority: UInt8?
-    
-    /// The level data (512).
-    public private (set) var levels: [UInt8]
-    
-    /// The priority (per-slot) data (512).
-    public private (set) var priorities: [UInt8]?
-    
-    /// Whether this universe uses per-slot priority.
-    public var usesPerSlotPriority: Bool {
-        return priorities != nil
-    }
-    
-    /// Initializes a universe with an optional per-packet priority and an array of levels.
-    /// If less than 512 levels are provided levels will be padded to 512.
-    /// If more than 512 levels are provided, levels will be truncated to 512.
-    ///
-    ///  - Parameters:
-    ///     - number: The universe number (values permitted 1-63999)
-    ///     - priority: Optional: An optional priority (values permitted 0-200).
-    ///     - levels: An array of levels.
-    ///     - priorities: Optional: An optional array of priorities.
-    ///
-    public init(number: UInt16, priority: UInt8? = nil, levels: [UInt8], priorities: [UInt8]? = nil) {
-        self.number = number.nearestValidUniverse()
-        self.priority = priority?.nearestValidPriority()
-        
-        // truncate, then pad levels
-        var validLevels = levels.prefix(512)
-        for _ in validLevels.count..<512 {
-            validLevels.append(0)
-        }
-        self.levels = Array(validLevels)
-        
-        // truncate, then pad slot priorities
-        if let priorities = priorities {
-            var validPriorities = priorities.prefix(512)
-            for _ in validPriorities.count..<512 {
-                validPriorities.append(UInt8.min)
-            }
-            self.priorities = validPriorities.map { $0.validPriority() ? $0 : UInt8.defaultPriority }
-        }
-    }
-    
-    public static func ==(lhs: sACNUniverse, rhs: sACNUniverse) -> Bool {
-        return lhs.number == rhs.number
-    }
-    
-}
-
-/// Universe
+/// Source Universe
 ///
 /// A universes contains level and priority information.
-///
-class Universe: Equatable {
+class SourceUniverse: Equatable {
     
     /// The range of data universe numbers.
     static let dataUniverseNumbers: ClosedRange<UInt16> = UInt16.validUniverses
@@ -136,14 +74,14 @@ class Universe: Equatable {
     /// Whether the universe should be removed after termination.
     private (set) var removeAfterTerminate: Bool
     
-    /// Initializes a universe with a public `sACNUniverse`.
+    /// Initializes a universe with a public `sACNSourceUniverse`.
     ///
     ///  - parameters:
-    ///     - universe: A public `sACNUniverse`.
+    ///     - universe: A public `sACNSourceUniverse`.
     ///     - sourcePriority: The priority for the source containing this universe.
     ///     - nameData: The name data for the source.
     ///
-    init(with universe: sACNUniverse, sourcePriority: UInt8, nameData: Data) {
+    init(with universe: sACNSourceUniverse, sourcePriority: UInt8, nameData: Data) {
         self.number = universe.number
         self.priority = universe.priority
         self.levels = universe.levels
@@ -168,15 +106,15 @@ class Universe: Equatable {
         self.removeAfterTerminate = false
     }
     
-    /// Updates an existing universe with new priorities and values from an `sACNUniverse`.
+    /// Updates an existing universe with new priorities and values from an `sACNSourceUniverse`.
     ///
     ///  - parameters:
-    ///     - universe: A public `sACNUniverse`.
+    ///     - universe: A public `sACNSourceUniverse`.
     ///     - isSourceActive: Whether the source is active.
     ///
     ///  - Throws: An error of type `sACNSourceValidationError`.
     ///
-    func update(with universe: sACNUniverse, sourceActive isSourceActive: Bool) throws {
+    func update(with universe: sACNSourceUniverse, sourceActive isSourceActive: Bool) throws {
         guard universe.levels.count == 512 else {
             throw sACNSourceValidationError.incorrectLevelsCount
         }
@@ -301,8 +239,8 @@ class Universe: Equatable {
     
     /// Terminates transmission of this universe.
     ///
-    /// - parameters:
-    ///     - remove: Whether this universe should be removed after termination.
+    /// - Parameters:
+    ///    - remove: Whether this universe should be removed after termination.
     ///
     func terminate(remove: Bool) {
         self.shouldTerminate = true
@@ -310,7 +248,12 @@ class Universe: Equatable {
         self.dirtyCounter = 3
     }
     
-    static func ==(lhs: Universe, rhs: Universe) -> Bool {
+    /// Terminates transmission of this universe for some sockets.
+    func terminateSockets() {
+        self.dirtyCounter = 3
+    }
+    
+    static func ==(lhs: SourceUniverse, rhs: SourceUniverse) -> Bool {
         return lhs.number == rhs.number
     }
     
@@ -319,8 +262,7 @@ class Universe: Equatable {
 /// UInt16 Extension
 ///
 /// Universe Extensions to `UInt16`.
-///
-internal extension UInt16 {
+extension UInt16 {
     /// The minimum permitted value for universe.
     static let minUniverse: UInt16 = 1
     

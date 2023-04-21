@@ -1,7 +1,7 @@
 //
-//  Source.swift
+//  sACNReceiverMergedData.swift
 //
-//  Copyright (c) 2022 Daniel Murfin
+//  Copyright (c) 2023 Daniel Murfin
 //
 //  Permission is hereby granted, free of charge, to any person obtaining a copy
 //  of this software and associated documentation files (the "Software"), to deal
@@ -23,44 +23,25 @@
 //
 
 import Foundation
-#if os(iOS)
-import UIKit
-#endif
 
-/// Source
+/// sACN Receiver Merged Data
 ///
-/// A stream of E1.31 Packets for a universe is said to be sent from a source.
-/// Sources are uniquely identified by their CID.
-///
-struct Source: Equatable {
+public struct sACNReceiverMergedData {
     
-    /// The maximum source name length in bytes.
-    static let sourceNameMaxBytes = 64
+    /// The universe from which data was received (1-63999).
+    public var universe: UInt16
     
-    /// A unique identifier for this source.
-    var cid: UUID
+    /// The (512) levels received.
+    public var levels: [UInt8]
     
-    /// Gets the current device name.
-    ///
-    /// - Returns: A device name as a string.
-    ///
-    static func getDeviceName() -> String {
-        #if os(iOS)
-        return UIDevice.current.name
-        #else
-        return Host.current().localizedName!
-        #endif
-    }
+    /// The (512) optional winners for each level.
+    public var winners: [UUID?]
     
-    /// Builds source name data for this source.
-    ///
-    /// - parameters:
-    ///    - name: The name of the source.
-    ///
-    /// - Returns: A Data object.
-    ///
-    static func buildNameData(from name: String) -> Data {
-        name.data(paddedTo: Self.sourceNameMaxBytes)
-    }
+    /// The identifiers of the sources.
+    public var activeSources: [UUID]
+    
+    /// The number of active sources.
+    /// This should always be equal to the size of `activeSources`.
+    public  var numberOfActiveSources: Int
     
 }
