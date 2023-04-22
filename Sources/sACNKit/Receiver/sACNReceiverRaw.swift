@@ -379,7 +379,9 @@ public class sACNReceiverRaw {
     private func startHeartbeat() {
         let timer = DispatchSource.repeatingTimer(interval: Self.heartbeatTime, leeway: Self.timingLeeway, queue: Self.timerQueue) { [weak self] in
             if let _ = self?.heartbeatTimer {
-                self?.checkForSourceLoss()
+                self?.socketDelegateQueue.async {
+                    self?.checkForSourceLoss()
+                }
             }
         }
         heartbeatTimer = timer
@@ -477,7 +479,7 @@ public class sACNReceiverRaw {
         
         // notify all lost sources
         if !notifyLostSources.isEmpty {
-            delegate?.receiver(self, lostSources: Array(notifyLostSources))
+            delegateQueue.async { self.delegate?.receiver(self, lostSources: Array(notifyLostSources)) }
         }
         
         // remove any expired sources
