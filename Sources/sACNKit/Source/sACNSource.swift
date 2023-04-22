@@ -134,13 +134,10 @@ final public class sACNSource {
     private static let universeDiscoveryInterval: DispatchTimeInterval = DispatchTimeInterval.seconds(10)
     
     /// The data transmit interval (0.227 secs).
-    private static let dataTransmitInterval: DispatchTimeInterval = DispatchTimeInterval.seconds(1/44)
+    private static let dataTransmitInterval: DispatchTimeInterval = DispatchTimeInterval.interval(1/44)
     
     /// The queue on which timers run.
     private let timerQueue: DispatchQueue
-    
-    /// The timer used to delay execution of functions.
-    private var delayExecutionTimer: DispatchSourceTimer?
 
     /// The universe discovery timer
     private var universeDiscoveryTimer: DispatchSourceTimer?
@@ -233,7 +230,7 @@ final public class sACNSource {
             startDataTransmit()
             startUniverseDiscovery()
             
-            if delegateTransmissionState != true {
+            if delegateTransmissionState != true && !universes.isEmpty {
                 delegateTransmissionState = true
                 delegateQueue.async {
                     self.delegate?.transmissionStarted()
@@ -530,10 +527,17 @@ final public class sACNSource {
     
     /// Starts this source's universe discovery timer.
     private func startUniverseDiscovery() {
-        timerQueue.sync {
+        timerQueue.async { [self] in
+            // send a discovery message straight away
+            self.socketDelegateQueue.async {
+                self.sendUniverseDiscoveryMessage()
+            }
+            
             let timer = DispatchSource.repeatingTimer(interval: Self.universeDiscoveryInterval, leeway: Self.timingLeeway, queue: timerQueue) { [weak self] in
                 if let _ = self?.universeDiscoveryTimer {
-                    self?.sendUniverseDiscoveryMessage()
+                    self?.socketDelegateQueue.async {
+                        self?.sendUniverseDiscoveryMessage()
+                    }
                 }
             }
             universeDiscoveryTimer = timer
@@ -547,10 +551,12 @@ final public class sACNSource {
     
     /// Starts this source's data transmission heartbeat.
     private func startDataTransmit() {
-        timerQueue.sync {
+        timerQueue.async { [self] in
             let timer = DispatchSource.repeatingTimer(interval: Self.dataTransmitInterval, leeway: Self.timingLeeway, queue: timerQueue) { [weak self] in
                 if let _ = self?.dataTransmitTimer {
-                    self?.sendDataMessages()
+                    self?.socketDelegateQueue.async {
+                        self?.sendDataMessages()
+                    }
                 }
             }
             dataTransmitTimer = timer
@@ -570,43 +576,18 @@ final public class sACNSource {
 
     /// Sends the Universe Discovery messages for this source.
     private func sendUniverseDiscoveryMessage() {
-        print("send")
-        socketDelegateQueue.sync {
-            sockets.forEach { interface, socket in
-                for message in universeDiscoveryMessages {
-                    if ipMode.usesIPv4() {
-                        socket.send(message: message, host: IPv4.universeDiscoveryHostname, port: UDP.sdtPort)
-                    }
-                    if ipMode.usesIPv6() {
-                        socket.send(message: message, host: IPv6.universeDiscoveryHostname, port: UDP.sdtPort)
-                    }
+        sockets.forEach { interface, socket in
+            for message in universeDiscoveryMessages {
+                if ipMode.usesIPv4() {
+                    socket.send(message: message, host: IPv4.universeDiscoveryHostname, port: UDP.sdtPort)
+                }
+                if ipMode.usesIPv6() {
+                    socket.send(message: message, host: IPv6.universeDiscoveryHostname, port: UDP.sdtPort)
                 }
             }
-            
-            delegateQueue.async { self.debugDelegate?.debugLog("Sending universe discovery message(s) multicast") }
         }
-    }
-    
-    /// Delays the execution of a closure.
-    ///
-    /// - Parameters:
-    ///    - interval: The number of milliseconds to delay the execution.
-    ///    - completion: The closure to be executed on completion.
-    ///
-    private func delayExecution(by interval: Int, completion: @escaping () -> Void) {
-        timerQueue.sync {
-            let timer = DispatchSource.singleTimer(interval: .milliseconds(interval), leeway: Self.timingLeeway, queue: timerQueue) { [weak self] in
-                if let _ = self?.delayExecutionTimer {
-                    completion()
-                }
-            }
-            delayExecutionTimer = timer
-        }
-    }
-    
-    /// Stops this source's delayed execution timer.
-    private func stopDelayExecution() {
-        timerQueue.sync { delayExecutionTimer = nil }
+        
+        delegateQueue.async { self.debugDelegate?.debugLog("Sending universe discovery message(s) multicast") }
     }
     
     // MARK: Build and Update Data
@@ -664,123 +645,121 @@ private extension sACNSource {
     
     /// Sends the data messages for this source.
     private func sendDataMessages() {
-        socketDelegateQueue.sync { [self] in
-            // remove all universes which are full terminated and should be removed
-            let universesToRemove = universes.filter { $0.removeAfterTerminate && $0.shouldTerminate && $0.dirtyCounter < 1 }
-            self.universes.removeAll(where: { universesToRemove.contains($0) })
-            self.universeNumbers.removeAll(where: { universesToRemove.map { universe in universe.number }.contains($0) })
-            
-            let activeUniverses = universes.filter { !$0.shouldTerminate || $0.dirtyCounter > 0 }
-            
-            if activeUniverses.isEmpty {
-                // notify transmission ended (once)
-                if delegateTransmissionState != false {
-                    delegateTransmissionState = false
-                    delegateQueue.async {
-                        self.delegate?.transmissionEnded()
-                    }
+        // remove all universes which are full terminated and should be removed
+        let universesToRemove = universes.filter { $0.removeAfterTerminate && $0.shouldTerminate && $0.dirtyCounter < 1 }
+        self.universes.removeAll(where: { universesToRemove.contains($0) })
+        self.universeNumbers.removeAll(where: { universesToRemove.map { universe in universe.number }.contains($0) })
+        
+        let activeUniverses = universes.filter { !$0.shouldTerminate || $0.dirtyCounter > 0 }
+        
+        if activeUniverses.isEmpty {
+            // notify transmission ended (once)
+            if delegateTransmissionState != false {
+                delegateTransmissionState = false
+                delegateQueue.async {
+                    self.delegate?.transmissionEnded()
                 }
-                
-                // termination of all universes to be removed is complete
-                if self.shouldTerminate {
-                    // the source should terminate
-                    dataTransmitTimer = nil
-                    
-                    sockets.forEach { _, socket in
-                        socket.stopListening()
-                    }
-                    
-                    // the source is now terminated
-                    self.shouldTerminate = false
-                    self._isListening = false
-                }
-                return
-            } else if !universesToRemove.isEmpty && !socketsShouldTerminate.isEmpty {
-                // not all universes were removed, but some were and there are sockets which should terminate
-                socketsShouldTerminate.forEach { interface, remove in
-                    // deinit first stops listening
-                    sockets.removeValue(forKey: interface)
-                }
-                socketsShouldTerminate.removeAll()
             }
             
-            var universeMessages = [(universeNumber: UInt16, data: Data)]()
-            var socketTerminationMessages = [(universeNumber: UInt16, data: Data)]()
-
-            let rootLayer = self.rootLayer
+            // termination of all universes to be removed is complete
+            if self.shouldTerminate {
+                // the source should terminate
+                timerQueue.sync { dataTransmitTimer = nil }
                 
-            for (index, _) in activeUniverses.enumerated() {
-                let universe = universes[index]
-                
-                // should levels be sent?
-                let sendLevels: Bool
-                switch universe.transmitCounter {
-                case 0, 11, 22, 33:
-                    sendLevels = true
-                default:
-                    sendLevels = universe.dirtyCounter > 0 ? true : false
+                sockets.forEach { _, socket in
+                    socket.stopListening()
                 }
                 
-                let framingOptions: DataFramingLayer.Options = universe.shouldTerminate ? [.terminated] : .none
-                
-                // should per-slot priority be sent?
-                let sendPriority: Bool
-                if !universe.shouldTerminate, universe.priorities != nil {
-                    sendPriority = universe.dirtyPriority || universe.transmitCounter == 0
-                } else {
-                    sendPriority = false
-                }
+                // the source is now terminated
+                shouldTerminate = false
+                _isListening = false
+            }
+            return
+        } else if !universesToRemove.isEmpty && !socketsShouldTerminate.isEmpty {
+            // not all universes were removed, but some were and there are sockets which should terminate
+            socketsShouldTerminate.forEach { interface, remove in
+                // deinit first stops listening
+                sockets.removeValue(forKey: interface)
+            }
+            socketsShouldTerminate.removeAll()
+        }
+        
+        var universeMessages = [(universeNumber: UInt16, data: Data)]()
+        var socketTerminationMessages = [(universeNumber: UInt16, data: Data)]()
 
-                if sendLevels {
+        let rootLayer = rootLayer
+            
+        for (index, _) in activeUniverses.enumerated() {
+            let universe = universes[index]
+            
+            // should levels be sent?
+            let sendLevels: Bool
+            switch universe.transmitCounter {
+            case 0, 11, 22, 33:
+                sendLevels = true
+            default:
+                sendLevels = universe.dirtyCounter > 0 ? true : false
+            }
+            
+            let framingOptions: DataFramingLayer.Options = universe.shouldTerminate ? [.terminated] : .none
+            
+            // should per-slot priority be sent?
+            let sendPriority: Bool
+            if !universe.shouldTerminate, universe.priorities != nil {
+                sendPriority = universe.dirtyPriority || universe.transmitCounter == 0
+            } else {
+                sendPriority = false
+            }
+
+            if sendLevels {
+                var framingLayer = universe.framingLayer
+                framingLayer.replacingSequence(with: universe.sequence)
+                framingLayer.replacingOptions(with: framingOptions)
+                
+                let dmpLayer = universe.dmpLevelsLayer
+
+                let levels = rootLayer+framingLayer+dmpLayer
+                universeMessages.append((universeNumber: universe.number, data: levels))
+                
+                if !socketsShouldTerminate.isEmpty {
+                    let framingOptions: DataFramingLayer.Options = [.terminated]
                     var framingLayer = universe.framingLayer
-                    framingLayer.replacingSequence(with: universe.sequence)
                     framingLayer.replacingOptions(with: framingOptions)
-                    
-                    let dmpLayer = universe.dmpLevelsLayer
-
                     let levels = rootLayer+framingLayer+dmpLayer
-                    universeMessages.append((universeNumber: universe.number, data: levels))
-                    
-                    if !socketsShouldTerminate.isEmpty {
-                        let framingOptions: DataFramingLayer.Options = [.terminated]
-                        var framingLayer = universe.framingLayer
-                        framingLayer.replacingOptions(with: framingOptions)
-                        let levels = rootLayer+framingLayer+dmpLayer
-                        socketTerminationMessages.append((universeNumber: universe.number, data: levels))
-                    }
-                    
-                    universe.incrementSequence()
-                    universe.decrementDirty()
+                    socketTerminationMessages.append((universeNumber: universe.number, data: levels))
                 }
                 
-                if sendPriority {
-                    var framingLayer = universe.framingLayer
-                    framingLayer.replacingSequence(with: universe.sequence)
-                    framingLayer.replacingOptions(with: framingOptions)
-                    
-                    let dmpLayer = universe.dmpPrioritiesLayer
-
-                    let priorities = rootLayer+framingLayer+dmpLayer
-                    universeMessages.append((universeNumber: universe.number, data: priorities))
-                    
-                    universe.incrementSequence()
-                    universe.prioritySent()
-                }
-                
-                universe.incrementCounter()
+                universe.incrementSequence()
+                universe.decrementDirty()
             }
             
-            sockets.forEach { interface, socket in
-                let messages = socketsShouldTerminate[interface] != nil ? socketTerminationMessages : universeMessages
-                for universeMessage in messages {
-                    if ipMode.usesIPv4() {
-                        let hostname = IPv4.multicastHostname(for: universeMessage.universeNumber)
-                        socket.send(message: universeMessage.data, host: hostname, port: UDP.sdtPort)
-                    }
-                    if ipMode.usesIPv6() {
-                        let hostname = IPv6.multicastHostname(for: universeMessage.universeNumber)
-                        socket.send(message: universeMessage.data, host: hostname, port: UDP.sdtPort)
-                    }
+            if sendPriority {
+                var framingLayer = universe.framingLayer
+                framingLayer.replacingSequence(with: universe.sequence)
+                framingLayer.replacingOptions(with: framingOptions)
+                
+                let dmpLayer = universe.dmpPrioritiesLayer
+
+                let priorities = rootLayer+framingLayer+dmpLayer
+                universeMessages.append((universeNumber: universe.number, data: priorities))
+                
+                universe.incrementSequence()
+                universe.prioritySent()
+            }
+            
+            universe.incrementCounter()
+        }
+        
+        sockets.forEach { interface, socket in
+            let messages = socketsShouldTerminate[interface] != nil ? socketTerminationMessages : universeMessages
+            for universeMessage in messages {
+                if ipMode.usesIPv4() {
+                    let hostname = IPv4.multicastHostname(for: universeMessage.universeNumber)
+                    socket.send(message: universeMessage.data, host: hostname, port: UDP.sdtPort)
+                }
+                if ipMode.usesIPv6() {
+                    let hostname = IPv6.multicastHostname(for: universeMessage.universeNumber)
+                    socket.send(message: universeMessage.data, host: hostname, port: UDP.sdtPort)
                 }
             }
         }
