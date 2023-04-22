@@ -54,6 +54,11 @@ public class sACNReceiver {
     
     /// Whether the merger is sampling.
     private var isSampling: Bool = true
+    
+    /// The receiver listening status.
+    public var isListening: Bool {
+        receiver.isListening
+    }
 
     // MARK: Delegate
     
@@ -162,7 +167,11 @@ public class sACNReceiver {
     /// - Throws: An `sACNReceiverValidationError` if the source cannot be found.
     ///
     /// - Returns: Source information.
+    ///
+    /// - Precondition: Must be called on the `delegateQueue` provided an initialization.
     public func information(for sourceId: UUID) throws -> sACNReceiverSource {
+        dispatchPrecondition(condition: .onQueue(delegateQueue))
+
         guard let source = sources[sourceId] else { throw sACNReceiverValidationError.sourceDoesNotExist }
         return sACNReceiverSource(receiverSource: source)
     }
