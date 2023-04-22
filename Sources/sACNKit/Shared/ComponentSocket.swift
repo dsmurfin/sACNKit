@@ -236,15 +236,7 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
     /// - Returns: A string representing the type of this socket.
     ///
     private func socketTypeString() -> String {
-        var socketType = ComponentSocketType.transmit.rawValue
-        let semaphore = DispatchSemaphore(value: 0)
-        
-        DispatchQueue.main.async {
-            socketType = self.socketType.rawValue.capitalized
-            semaphore.signal()
-        }
-        semaphore.wait()
-        return socketType
+        socketType.rawValue.capitalized
     }
     
     // MARK: - GCD Async UDP Socket Delegate
