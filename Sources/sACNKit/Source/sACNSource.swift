@@ -647,6 +647,7 @@ private extension sACNSource {
     private func sendDataMessages() {
         // remove all universes which are full terminated and should be removed
         let universesToRemove = universes.filter { $0.removeAfterTerminate && $0.shouldTerminate && $0.dirtyCounter < 1 }
+        let universesReadyForSocketRemoval = universes.filter { $0.pendingSocketRemoval && $0.dirtyCounter < 1 }
         self.universes.removeAll(where: { universesToRemove.contains($0) })
         self.universeNumbers.removeAll(where: { universesToRemove.map { universe in universe.number }.contains($0) })
         
@@ -676,12 +677,24 @@ private extension sACNSource {
             }
             return
         } else if !universesToRemove.isEmpty && !socketsShouldTerminate.isEmpty {
-            // not all universes were removed, but some were and there are sockets which should terminate
+            // not all universes were removed, but some were and there may be sockets which should terminate
             socketsShouldTerminate.forEach { interface, remove in
-                // deinit first stops listening
-                sockets.removeValue(forKey: interface)
+                if remove {
+                    // deinit first stops listening
+                    sockets.removeValue(forKey: interface)
+                }
             }
             socketsShouldTerminate.removeAll()
+        } else if !universesReadyForSocketRemoval.isEmpty && !socketsShouldTerminate.isEmpty {
+            // all universes are ready for socket removal
+            socketsShouldTerminate.forEach { interface, remove in
+                if remove {
+                    // deinit first stops listening
+                    sockets.removeValue(forKey: interface)
+                }
+            }
+            socketsShouldTerminate.removeAll()
+            universesReadyForSocketRemoval.forEach { $0.terminateSocketsComplete() }
         }
         
         var universeMessages = [(universeNumber: UInt16, data: Data)]()

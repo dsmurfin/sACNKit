@@ -74,6 +74,9 @@ class SourceUniverse: Equatable {
     /// Whether the universe should be removed after termination.
     private (set) var removeAfterTerminate: Bool
     
+    /// Whether the this universe is pending socket removal.
+    private (set) var pendingSocketRemoval: Bool
+    
     /// Initializes a universe with a public `sACNSourceUniverse`.
     ///
     ///  - parameters:
@@ -95,6 +98,7 @@ class SourceUniverse: Equatable {
         self.dirtyPriority = true
         self.shouldTerminate = false
         self.removeAfterTerminate = false
+        self.pendingSocketRemoval = false
     }
     
     /// Resets this universe for new transmission.
@@ -104,6 +108,7 @@ class SourceUniverse: Equatable {
         self.dirtyPriority = true
         self.shouldTerminate = false
         self.removeAfterTerminate = false
+        self.pendingSocketRemoval = false
     }
     
     /// Updates an existing universe with new priorities and values from an `sACNSourceUniverse`.
@@ -250,7 +255,13 @@ class SourceUniverse: Equatable {
     
     /// Terminates transmission of this universe for some sockets.
     func terminateSockets() {
+        self.pendingSocketRemoval = true
         self.dirtyCounter = 3
+    }
+    
+    /// Termination of transmission for sockets is complete.
+    func terminateSocketsComplete() {
+        self.pendingSocketRemoval = false
     }
     
     static func ==(lhs: SourceUniverse, rhs: SourceUniverse) -> Bool {
