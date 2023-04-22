@@ -109,7 +109,7 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
         do {
             try socket?.enableReusePort(true)
         } catch {
-            throw sACNsACNComponentSocketError.couldNotEnablePortReuse
+            throw sACNComponentSocketError.couldNotEnablePortReuse
         }
     }
 
@@ -128,7 +128,7 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
             do {
                 try socket?.joinMulticastGroup(multicastGroup, onInterface: interface)
             } catch {
-                throw sACNsACNComponentSocketError.couldNotJoin(multicastGroup: multicastGroup)
+                throw sACNComponentSocketError.couldNotJoin(multicastGroup: multicastGroup)
             }
         }
     }
@@ -148,7 +148,7 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
             do {
                 try socket?.leaveMulticastGroup(multicastGroup, onInterface: interface)
             } catch {
-                throw sACNsACNComponentSocketError.couldNotLeave(multicastGroup: multicastGroup)
+                throw sACNComponentSocketError.couldNotLeave(multicastGroup: multicastGroup)
             }
         }
     }
@@ -159,7 +159,7 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
     ///    - interface: An optional interface on which to bind the socket. It may be a name (e.g. "en1" or "lo0") or the corresponding IP address (e.g. "192.168.4.35").
     ///    - multicastGroups: An array of multicast group hostnames for this socket.
     ///
-    /// - Throws: An error of type `sACNComponentSocketError`
+    /// - Throws: An error of type `sACNComponentSocketError`.
     ///
     /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interface must not be nil.
     ///
@@ -178,7 +178,7 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
                 delegate?.debugLog(for: self, with: "Successfully bound multicast to port: \(port)")
             }
         } catch {
-            throw sACNsACNComponentSocketError.couldNotBind(message: "\(id): Could not bind \(socketType.rawValue) socket.")
+            throw sACNComponentSocketError.couldNotBind(message: "\(id): Could not bind \(socketType.rawValue) socket.")
         }
         
         do {
@@ -193,13 +193,13 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
                 break
             }
         } catch {
-            throw sACNsACNComponentSocketError.couldNotAssignMulticastInterface(message: "\(id): Could not assign interface for sending multicast on \(socketType.rawValue) socket.")
+            throw sACNComponentSocketError.couldNotAssignMulticastInterface(message: "\(id): Could not assign interface for sending multicast on \(socketType.rawValue) socket.")
         }
         
         do {
             try socket?.beginReceiving()
         } catch {
-            throw sACNsACNComponentSocketError.couldNotReceive(message: "\(id): Could not receive on \(socketType.rawValue) socket.")
+            throw sACNComponentSocketError.couldNotReceive(message: "\(id): Could not receive on \(socketType.rawValue) socket.")
         }
         
         switch socketType {
@@ -327,9 +327,9 @@ protocol ComponentSocketDelegate: AnyObject {
 
 /// Source Socket Error
 ///
-/// Enumerates all possible `sACNsACNComponentSocketError` errors.
+/// Enumerates all possible `sACNComponentSocketError` errors.
 ///
-public enum sACNsACNComponentSocketError: LocalizedError {
+public enum sACNComponentSocketError: LocalizedError {
     
     /// It was not possible to enable port reuse.
     case couldNotEnablePortReuse

@@ -267,6 +267,8 @@ final public class sACNSource {
     ///
     /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interfaces must not be empty.
     ///
+    /// - Throws: An error of type `sACNComponentSocketError`.
+    /// 
     public func updateInterfaces(_ newInterfaces: Set<String> = []) throws {
         precondition(!ipMode.usesIPv6() || !newInterfaces.isEmpty, "At least one interface must be provided for IPv6.")
         
@@ -516,6 +518,8 @@ final public class sACNSource {
     /// - Parameters:
     ///    - socket: The socket to start listening.
     ///    - interface: Optional: An optional interface on which to listen (`nil` means all interfaces).
+    ///
+    /// - Throws: An error of type `sACNComponentSocketError`.
     ///
     private func listenForSocket(_ socket: ComponentSocket, on interface: String? = nil) throws {
         socket.delegate = self
