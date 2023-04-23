@@ -246,6 +246,7 @@ final public class sACNSource {
     public func stop() {
         socketDelegateQueue.sync {
             guard _isListening else { return }
+            self._isListening = false
             
             // stops heartbeats
             stopUniverseDiscovery()

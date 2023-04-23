@@ -235,7 +235,8 @@ public class sACNReceiverRaw {
     public func stop() {
         socketDelegateQueue.sync {
             guard _isListening else { return }
-
+            self._isListening = false
+            
             sampleTimer = nil
             stopHeartbeat()
             

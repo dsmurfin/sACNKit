@@ -174,7 +174,8 @@ public class sACNDiscoveryReceiver {
     public func stop() {
         socketDelegateQueue.sync {
             guard _isListening else { return }
-
+            _isListening = false
+            
             stopHeartbeat()
             
             sockets.forEach { interface, socket in
