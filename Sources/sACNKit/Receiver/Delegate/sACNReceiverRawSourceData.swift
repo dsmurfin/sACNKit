@@ -1,7 +1,7 @@
 //
-//  FlagsAndLength.swift
+//  sACNReceiverRawSourceData.swift
 //
-//  Copyright (c) 2022 Daniel Murfin
+//  Copyright (c) 2023 Daniel Murfin
 //
 //  Permission is hereby granted, free of charge, to any person obtaining a copy
 //  of this software and associated documentation files (the "Software"), to deal
@@ -24,34 +24,42 @@
 
 import Foundation
 
-/// Flags And Length
+/// sACN Receiver Raw Source Data.
 ///
-/// As defined in E1.31
-///
-enum FlagsAndLength {
-    /// Combines the first 12 bits of `length` with the first 4 bits of `flags`.
-    ///
-    /// - Parameters:
-    ///    - length: The length of the PDU. (only the first 12 bits are used).
-    ///
-    /// - Returns: Flags and Length.
-    ///
-    static func fromLength(_ length: UInt16) -> UInt16 {
-        let escapedLength = length & 0b0000_1111_1111_1111
-        let escapedFlags  = UInt16(0x07) << 12 & 0b1111_0000_0000_0000
-        return escapedFlags | escapedLength
-    }
+/// Data received from a source.
+public struct sACNReceiverRawSourceData {
     
-    /// Extracts the length from a Flags and Length field.
+    /// The source CID.
+    public var cid: UUID
+    
+    /// The name of the source.
+    public var name: String
+    
+    /// The hostname of the source.
+    public var hostname: String
+    
+    /// The universe received.
+    public var universe: UInt16
+    
+    /// The universe priority received.
+    public var priority: UInt8
+    
+    /// Whether this is preview data.
+    public var preview: Bool
+    
+    /// Whether the sampling is occuring.
     ///
-    /// - Parameters:
-    ///    - flagsAndLength: The flags and length.
-    ///
-    /// - Returns: An optional length value.
-    ///
-    static func toLength(from flagsAndLength: UInt16) -> UInt16? {
-        let escapedLength = flagsAndLength & 0b0000_1111_1111_1111
-        let escapedFlags  = flagsAndLength >> 12
-        return escapedFlags == 7 ? UInt16(escapedLength) : nil
-    }
+    /// A receiver of data for a source that is still sampling may wish to ignore it.
+    public var isSampling: Bool
+    
+    /// The DMX512-A START code.
+    public var startCode: DMX.STARTCode
+    
+    /// The number of values.
+    public var valuesCount: Int
+
+    /// The values received from this source.
+    /// This may be less than 512.
+    public var values: [UInt8]
+    
 }

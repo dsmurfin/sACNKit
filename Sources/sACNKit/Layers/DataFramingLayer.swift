@@ -1,7 +1,7 @@
 //
 //  DataFramingLayer.swift
 //
-//  Copyright (c) 2022 Daniel Murfin
+//  Copyright (c) 2023 Daniel Murfin
 //
 //  Permission is hereby granted, free of charge, to any person obtaining a copy
 //  of this software and associated documentation files (the "Software"), to deal
@@ -27,10 +27,10 @@ import Foundation
 /// Data Framing Layer
 ///
 /// Implements the Data Framing Layer and handles creation and parsing.
-///
 struct DataFramingLayer {
     
     /// The flags and length. 0x7258: 258 = 600 (starting octet 38) = 638.
+    /// This must only be used for constructing packets as received packets may have differing lengths.
     private static let flagsAndLength = Data([0x72, 0x58])
 
     /// Data Framing Layer Vectors
@@ -73,22 +73,22 @@ struct DataFramingLayer {
     private var vector: Vector
     
     /// A name for this source, such as a user specified human-readable string, or serial number for the device.
-    var sourceName: String
+    private (set) var sourceName: String
     
     /// The priority of this source.
-    var priority: UInt8
+    private (set) var priority: UInt8
     
     /// The sequence number for this message.
-    var sequenceNumber: UInt8
+    private (set) var sequenceNumber: UInt8
     
     /// The options for this message.
-    var options: Options
+    private (set) var options: Options
     
     /// The unvierse number for this message.
-    var universe: UInt16
+    private (set) var universe: UInt16
     
     /// The data contained in the layer.
-    private var data: Data
+    private (set) var data: Data
     
     /// Creates a Framing Layer as Data.
     ///
@@ -123,7 +123,7 @@ struct DataFramingLayer {
         guard data.count > Offset.data.rawValue else { throw DataFramingLayerValidationError.lengthOutOfRange }
         
         // the flags and length
-        guard data[Offset.flagsAndLength.rawValue..<Offset.vector.rawValue] == Self.flagsAndLength else {
+        guard let flagsAndLength = data.toFlagsAndLength(atOffset: Offset.flagsAndLength.rawValue), flagsAndLength.length == data.count-Offset.flagsAndLength.rawValue else {
             throw DataFramingLayerValidationError.invalidFlagsAndLength
         }
         // the vector for this layer
@@ -158,10 +158,9 @@ struct DataFramingLayer {
         guard let universe: UInt16 = data.toUInt16(atOffset: Offset.universe.rawValue) else {
             throw DataFramingLayerValidationError.unableToParse(field: "Universe Number")
         }
-        guard Universe.dataUniverseNumbers.contains(universe) else {
+        guard SourceUniverse.dataUniverseNumbers.contains(universe) else {
             throw DataFramingLayerValidationError.invalidUniverse(universe)
         }
-
         // layer data
         let data = data.subdata(in: Offset.data.rawValue..<data.count)
         

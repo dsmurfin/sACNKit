@@ -6,8 +6,8 @@ import PackageDescription
 let package = Package(
     name: "sACNKit",
     platforms: [
-        .iOS(.v10),
-        .macOS(.v10_14),
+        .iOS(.v12),
+        .macOS(.v11),
     ],
     products: [
         .library(

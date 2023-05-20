@@ -1,7 +1,7 @@
 //
 //  UniverseDiscoveryLayer.swift
 //
-//  Copyright (c) 2022 Daniel Murfin
+//  Copyright (c) 2023 Daniel Murfin
 //
 //  Permission is hereby granted, free of charge, to any person obtaining a copy
 //  of this software and associated documentation files (the "Software"), to deal
@@ -27,7 +27,6 @@ import Foundation
 /// Universe Discovery Layer
 ///
 /// Implements the Universe Discovery Layer and handles creation and parsing.
-///
 struct UniverseDiscoveryLayer {
     
     /// The maximum number of universe numbers to include in this layer.
@@ -98,9 +97,9 @@ struct UniverseDiscoveryLayer {
         guard data.count >= Offset.listOfUniverses.rawValue else { throw UniverseDiscoveryLayerValidationError.lengthOutOfRange }
         
         // the flags and length
-        guard let _ = data.toUInt16(atOffset: Offset.flagsAndLength.rawValue) else {
-            throw UniverseDiscoveryLayerValidationError.unableToParse(field: "Flags And Length")
-        }
+        guard let flagsAndLength = data.toFlagsAndLength(atOffset: Offset.flagsAndLength.rawValue), flagsAndLength.length == data.count-Offset.flagsAndLength.rawValue else {
+            throw UniverseDiscoveryLayerValidationError.invalidFlagsAndLength
+        }        
         // the vector for this layer
         guard let vector: UInt32 = data.toUInt32(atOffset: Offset.vector.rawValue) else {
             throw UniverseDiscoveryLayerValidationError.unableToParse(field: "Vector")

@@ -1,7 +1,7 @@
 //
 //  Data+Extension.swift
 //
-//  Copyright (c) 2022 Daniel Murfin
+//  Copyright (c) 2023 Daniel Murfin
 //
 //  Permission is hereby granted, free of charge, to any person obtaining a copy
 //  of this software and associated documentation files (the "Software"), to deal
@@ -27,7 +27,6 @@ import Foundation
 /// Data Extension
 ///
 /// Extensions to `Data`.
-///
 extension Data {
     /// Attempts to create a UInt8 from this data at a specified offset.
     ///
@@ -36,7 +35,7 @@ extension Data {
     ///
     /// - Returns: An optional UInt8 value.
     ///
-    internal func toUInt8(atOffset offset: Int) -> UInt8? {
+    func toUInt8(atOffset offset: Int) -> UInt8? {
         self.withUnsafeBytes { $0.baseAddress?.loadUnaligned(atOffset: offset, as: UInt8.self) }
     }
 
@@ -47,7 +46,7 @@ extension Data {
     ///
     /// - Returns: An optional UInt16 value.
     ///
-    internal func toUInt16(atOffset offset: Int) -> UInt16? {
+    func toUInt16(atOffset offset: Int) -> UInt16? {
         self.withUnsafeBytes { $0.baseAddress?.loadUnaligned(atOffset: offset, as: UInt16.self).bigEndian }
     }
 
@@ -58,7 +57,7 @@ extension Data {
     ///
     /// - Returns: An optional UInt32 value.
     ///
-    internal func toUInt32(atOffset offset: Int) -> UInt32? {
+    func toUInt32(atOffset offset: Int) -> UInt32? {
         self.withUnsafeBytes { $0.baseAddress?.loadUnaligned(atOffset: offset, as: UInt32.self).bigEndian }
     }
     
@@ -69,7 +68,7 @@ extension Data {
     ///
     /// - Returns: An optional UUID value.
     ///
-    internal func toUUID(atOffset offset: Int) -> UUID? {
+    func toUUID(atOffset offset: Int) -> UUID? {
         var bytes = [UInt8]()
         for index in offset..<offset+16 {
             guard let byte = self.toUInt8(atOffset: index) else { return nil }
@@ -86,17 +85,32 @@ extension Data {
     ///
     /// - Returns: An optional String value.
     ///
-    internal func toString(ofLength length: Int, atOffset offset: Int) -> String? {
+    func toString(ofLength length: Int, atOffset offset: Int) -> String? {
         guard offset+length <= self.count else { return nil }
         let data = self.subdata(in: offset..<offset+length)
         return String.init(data: data, encoding: .utf8)?.trimmingCharacters(in: CharacterSet(charactersIn: "\0"))
+    }
+    
+    /// Attempts to access Flags and Length from this data at a specified offset.
+    ///
+    /// - Parameters:
+    ///    - offset: The offset at which to access the value.
+    ///
+    /// - Returns: An optional Flags and Length value.
+    ///
+    func toFlagsAndLength(atOffset offset: Int) -> (flags: UInt16, length: UInt16)? {
+        guard let flagsAndLength = self.toUInt16(atOffset: offset) else { return nil }
+        let flags = flagsAndLength >> 12
+        let shiftLength = flagsAndLength << 4
+        let length = shiftLength >> 4
+        return (flags: flags, length: length)
     }
 
     /// Creates a hex encoded string from this data object.
     ///
     /// - Returns: A hex encoded String representing this data.
     ///
-    internal func hexEncodedString() -> String {
+    func hexEncodedString() -> String {
         return map { String(format: "%02hhx", $0) }.joined()
     }
     
@@ -109,8 +123,7 @@ extension Data {
 /// UInt8 Extension
 ///
 /// Data Extensions to `UInt8`.
-///
-internal extension UInt8 {
+extension UInt8 {
     /// Creates a data object with this value.
     var data: Data {
         var value = self
@@ -123,8 +136,7 @@ internal extension UInt8 {
 /// UInt16 Extension
 ///
 /// Data Extensions to `UInt16`.
-///
-internal extension UInt16 {
+extension UInt16 {
     /// Creates a data object with this value.
     var data: Data {
         var value = self.bigEndian
@@ -137,8 +149,7 @@ internal extension UInt16 {
 /// UInt32 Extension
 ///
 /// Data Extensions to `UInt32`.
-///
-internal extension UInt32 {
+extension UInt32 {
     /// Creates a data object with this value.
     var data: Data {
         var value = self.bigEndian
@@ -151,8 +162,7 @@ internal extension UInt32 {
 /// UUID Extension
 ///
 /// Data Extensions to `UUID`.
-///
-internal extension UUID {
+extension UUID {
     /// Creates a data object with this value.
     var data: Data {
         withUnsafeBytes(of: self.uuid, { Data($0) })
@@ -162,9 +172,7 @@ internal extension UUID {
 /// String Extension
 ///
 /// Data Extensions to `String`.
-///
-
-internal extension String {
+extension String {
     /// Creates a data object with this value but with a fixed length.
     ///
     /// - Parameters:
@@ -220,8 +228,7 @@ internal extension String {
 /// Unsafe Raw Pointer
 ///
 /// Data Extensions to `UnsafeRawPointer`.
-///
-internal extension UnsafeRawPointer {
+extension UnsafeRawPointer {
     /// Loads a value from memory, even it is is unaligned.
     ///
     /// - Parameters:
@@ -236,4 +243,3 @@ internal extension UnsafeRawPointer {
         return buffer.pointee
     }
 }
-

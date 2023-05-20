@@ -1,7 +1,7 @@
 //
 //  RootLayer.swift
 //
-//  Copyright (c) 2022 Daniel Murfin
+//  Copyright (c) 2023 Daniel Murfin
 //
 //  Permission is hereby granted, free of charge, to any person obtaining a copy
 //  of this software and associated documentation files (the "Software"), to deal
@@ -27,7 +27,6 @@ import Foundation
 /// Root Layer
 ///
 /// Implements the Root Layer and handles creation and parsing.
-///
 struct RootLayer {
     
     /// The offset at which length counting starts.
@@ -42,8 +41,9 @@ struct RootLayer {
     /// The packet identifier which begins every sACN message.
     private static let packetIdentifier = Data([0x41, 0x53, 0x43, 0x2d, 0x45, 0x31, 0x2e, 0x31, 0x37, 0x00, 0x00, 0x00])
     
-    /// The flags and length. 0x726e: 26e = 622 (starting octet 16) = 638.
-    private static let flagsAndLength = Data([0x72, 0x6e])
+    /// The flags and length for a data framing layer message. 0x726e: 26e = 622 (starting octet 16) = 638.
+    /// This must only be used for constructing data packets as received packets may have differing lengths.
+    private static let dataFlagsAndLength = Data([0x72, 0x6e])
 
     /// Root Layer Vectors
     ///
@@ -52,7 +52,7 @@ struct RootLayer {
     enum Vector: UInt32 {
         /// Contains a  `DataFramingLayer`.
         case data = 0x00000004
-        /// Contains a  `ExtendedFramingLayer`.
+        /// Contains an  `ExtendedFramingLayer`.
         case extended = 0x00000008
     }
     
@@ -71,13 +71,13 @@ struct RootLayer {
     }
     
     /// The vector describing the data in the layer.
-    private var vector: Vector
+    private (set) var vector: Vector
     
     /// A globally unique identifier (UUID) representing the `Source`, compliant with RFC 4122.
-    var cid: UUID
+    private (set) var cid: UUID
     
     /// The data contained in the layer.
-    private var data: Data
+    private (set) var data: Data
     
     /// Creates a Root Layer as Data.
     ///
@@ -92,7 +92,7 @@ struct RootLayer {
         data.append(contentsOf: RootLayer.preambleSize)
         data.append(contentsOf: RootLayer.postambleSize)
         data.append(contentsOf: RootLayer.packetIdentifier)
-        data.append(contentsOf: RootLayer.flagsAndLength)
+        data.append(contentsOf: RootLayer.dataFlagsAndLength)
         data.append(vector.rawValue.data)
         data.append(cid.data)
         return data
@@ -123,8 +123,7 @@ struct RootLayer {
             throw RootLayerValidationError.invalidPacketIdentifier
         }
         // the flags and length
-        // TODO: This needs to be checked for universe discovery
-        guard data[Offset.flagsAndLength.rawValue..<Offset.vector.rawValue] == Self.flagsAndLength else {
+        guard let flagsAndLength = data.toFlagsAndLength(atOffset: Offset.flagsAndLength.rawValue), flagsAndLength.length == data.count-Offset.flagsAndLength.rawValue else {
             throw RootLayerValidationError.invalidFlagsAndLength
         }
         // the vector for this message
@@ -150,7 +149,7 @@ struct RootLayer {
 ///
 /// Extensions for modifying fields within an existing `RootLayer` stored as `Data`.
 ///
-internal extension Data {
+extension Data {
     /// Replaces the `RootLayer` Flags and Length.
     ///
     /// - Parameters:

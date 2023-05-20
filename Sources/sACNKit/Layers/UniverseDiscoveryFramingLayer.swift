@@ -1,7 +1,7 @@
 //
 //  UniverseDiscoveryFramingLayer.swift
 //
-//  Copyright (c) 2022 Daniel Murfin
+//  Copyright (c) 2023 Daniel Murfin
 //
 //  Permission is hereby granted, free of charge, to any person obtaining a copy
 //  of this software and associated documentation files (the "Software"), to deal
@@ -27,7 +27,6 @@ import Foundation
 /// Universe Discovery Framing Layer
 ///
 /// Implements the Universe Discovery Framing Layer and handles creation and parsing.
-///
 struct UniverseDiscoveryFramingLayer {
 
     /// Universe Discovery Layer Vectors
@@ -47,17 +46,18 @@ struct UniverseDiscoveryFramingLayer {
         case flagsAndLength = 0
         case vector = 2
         case sourceName = 6
-        case data = 70
+        case reserved = 70
+        case data = 74
     }
     
     /// The vector describing the data in the layer.
-    private var vector: Vector
+    private (set) var vector: Vector
     
     /// A name for this source, such as a user specified human-readable string, or serial number for the device.
-    var sourceName: String
+    private (set) var sourceName: String
     
     /// The data contained in the layer.
-    private var data: Data
+    private (set) var data: Data
     
     /// Creates a Framing Layer as Data.
     ///
@@ -88,11 +88,7 @@ struct UniverseDiscoveryFramingLayer {
         guard data.count > Offset.data.rawValue else { throw UniverseDiscoveryFramingLayerValidationError.lengthOutOfRange }
         
         // the flags and length
-        guard let flagsAndLength = data.toUInt16(atOffset: Offset.flagsAndLength.rawValue) else {
-            throw UniverseDiscoveryFramingLayerValidationError.unableToParse(field: "Flags And Length")
-        }
-        // TODO: Validate length and get universes being advertised
-        guard let length = FlagsAndLength.toLength(from: flagsAndLength) else {
+        guard let flagsAndLength = data.toFlagsAndLength(atOffset: Offset.flagsAndLength.rawValue), flagsAndLength.length == data.count-Offset.flagsAndLength.rawValue else {
             throw UniverseDiscoveryFramingLayerValidationError.invalidFlagsAndLength
         }
         // the vector for this layer

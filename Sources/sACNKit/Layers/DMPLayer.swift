@@ -1,7 +1,7 @@
 //
 //  DMPLayer.swift
 //
-//  Copyright (c) 2022 Daniel Murfin
+//  Copyright (c) 2023 Daniel Murfin
 //
 //  Permission is hereby granted, free of charge, to any person obtaining a copy
 //  of this software and associated documentation files (the "Software"), to deal
@@ -27,16 +27,17 @@ import Foundation
 /// DMP Layer
 ///
 /// Implements the DMP Layer and handles creation and parsing.
-///
 struct DMPLayer {
     
     /// The flags and length. 0x720b: 20b = 523 (starting octet 115) = 638
+    /// This must only be used for constructing packets as received packets may have differing lengths.
     private static let flagsAndLength = Data([0x72, 0x0b])
     
     /// The address type and data type, first property address (DMX512-A START Code is at DMP address 0), and address increment.
     private static let addressPropertyBlock = Data([0xa1, 0x00, 0x00, 0x00, 0x01])
     
     /// The number of slots in the message (plus the START Code).
+    /// This must only be used for constructing packets as received packets may have differing lengths.
     private static let propertyValueCount = Data([0x02, 0x01])
 
     /// DMP Layer Vectors
@@ -62,19 +63,8 @@ struct DMPLayer {
         case propertyValues = 10
     }
     
-    /// DMP Layer DMX512-A START Codes
-    ///
-    /// Enumerates the data offset for each field in this layer.
-    ///
-    enum STARTCode: UInt8 {
-        /// Contains dmx level data.
-        case null = 0x00
-        /// Contains per-slot priority data.
-        case perAddressPriority = 0xdd
-    }
-    
     /// The start code for this message.
-    var startCode: STARTCode
+    var startCode: DMX.STARTCode
     
     /// The values for this message.
     var values: [UInt8]
@@ -87,7 +77,7 @@ struct DMPLayer {
     ///
     /// - Returns: A `DMPLayer` as a `Data` object.
     ///
-    static func createAsData(startCode: STARTCode, values: [UInt8]) -> Data {
+    static func createAsData(startCode: DMX.STARTCode, values: [UInt8]) -> Data {
         var data = Data()
         data.append(contentsOf: DMPLayer.flagsAndLength)
         data.append(Vector.setProperty.rawValue.data)
@@ -111,8 +101,8 @@ struct DMPLayer {
         guard data.count > Offset.propertyValues.rawValue+1 else { throw DMPLayerValidationError.lengthOutOfRange }
         
         // the flags and length
-        guard data[Offset.flagsAndLength.rawValue..<Offset.vector.rawValue] == Self.flagsAndLength else {
-            throw DMPLayerValidationError.invalidFlagsAndLength
+        guard let flagsAndLength = data.toFlagsAndLength(atOffset: Offset.flagsAndLength.rawValue), flagsAndLength.length == data.count-Offset.flagsAndLength.rawValue else {
+            throw DataFramingLayerValidationError.invalidFlagsAndLength
         }
         // the vector for this layer
         guard let vector: UInt8 = data.toUInt8(atOffset: Offset.vector.rawValue) else {
@@ -129,15 +119,15 @@ struct DMPLayer {
         guard let propertyValueCount: UInt16 = data.toUInt16(atOffset: Offset.propertyValueCount.rawValue) else {
             throw DMPLayerValidationError.unableToParse(field: "Property Value Count")
         }
-        guard propertyValueCount < 513 else {
+        guard propertyValueCount <= 513 && data.count >= Offset.propertyValues.rawValue + Int(propertyValueCount) else {
             throw DMPLayerValidationError.invalidPropertyValueCount(propertyValueCount)
         }
         // the START Code
-        guard let code: UInt8 = data.toUInt8(atOffset: Offset.propertyValues.rawValue), let STARTCode = STARTCode(rawValue: code) else {
+        guard let code: UInt8 = data.toUInt8(atOffset: Offset.propertyValues.rawValue), let STARTCode = DMX.STARTCode(rawValue: code) else {
             throw DMPLayerValidationError.unableToParse(field: "START Code")
         }
         let propertyValuesOffset = Offset.propertyValues.rawValue+1
-        let values = data.subdata(in: propertyValuesOffset..<propertyValuesOffset+Int(propertyValueCount)).bytes
+        let values = data.subdata(in: propertyValuesOffset..<propertyValuesOffset+Int(propertyValueCount-1)).bytes
 
         return Self(startCode: STARTCode, values: values)
     }
