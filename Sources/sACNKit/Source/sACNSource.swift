@@ -547,7 +547,10 @@ final public class sACNSource {
     
     /// Stops this source's universe discovery heartbeat.
     private func stopUniverseDiscovery() {
-        timerQueue.sync { universeDiscoveryTimer = nil }
+        timerQueue.sync {
+            universeDiscoveryTimer?.cancel()
+            universeDiscoveryTimer = nil
+        }
     }
     
     /// Starts this source's data transmission heartbeat.
@@ -666,7 +669,10 @@ private extension sACNSource {
             // termination of all universes to be removed is complete
             if self.shouldTerminate {
                 // the source should terminate
-                timerQueue.sync { dataTransmitTimer = nil }
+                timerQueue.sync {
+                    dataTransmitTimer?.cancel()
+                    dataTransmitTimer = nil
+                }
                 
                 sockets.forEach { _, socket in
                     socket.stopListening()

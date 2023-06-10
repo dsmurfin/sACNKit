@@ -306,6 +306,7 @@ public class sACNDiscoveryReceiver {
     
     /// Stops the main heartbeat timer.
     private func stopHeartbeat() {
+        heartbeatTimer?.cancel()
         heartbeatTimer = nil
     }
     
