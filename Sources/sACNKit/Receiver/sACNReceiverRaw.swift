@@ -237,6 +237,7 @@ public class sACNReceiverRaw {
             guard _isListening else { return }
             self._isListening = false
             
+            sampleTimer?.cancel()
             sampleTimer = nil
             stopHeartbeat()
             
@@ -390,6 +391,7 @@ public class sACNReceiverRaw {
     
     /// Stops the main heartbeat timer.
     private func stopHeartbeat() {
+        heartbeatTimer?.cancel()
         heartbeatTimer = nil
     }
     
@@ -437,6 +439,7 @@ public class sACNReceiverRaw {
                 
                 self.beginSamplingPeriod(notify: false)
             } else {
+                self.sampleTimer?.cancel()
                 self.sampleTimer = nil
                 
                 // notify sampling has ended
