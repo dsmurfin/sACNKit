@@ -364,14 +364,24 @@ public class sACNReceiverRaw {
         try socket.enableReusePort()
         try socket.startListening(onInterface: interface)
         
-        // attempt to join multicast grousp
+        // attempt to join multicast groups
         if ipMode == .ipv4Only || ipMode == .ipv4And6 {
             let hostname = IPv4.multicastHostname(for: universe)
-            try socket.join(multicastGroup: hostname)
+            do {
+                try socket.join(multicastGroup: hostname)
+            } catch {
+                socket.stopListening()
+                throw error
+            }
         }
         if ipMode == .ipv6Only || ipMode == .ipv4And6 {
             let hostname = IPv6.multicastHostname(for: universe)
-            try socket.join(multicastGroup: hostname)
+            do {
+                try socket.join(multicastGroup: hostname)
+            } catch {
+                socket.stopListening()
+                throw error
+            }
         }
     }
     
