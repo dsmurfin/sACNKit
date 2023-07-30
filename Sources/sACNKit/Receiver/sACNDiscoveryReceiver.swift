@@ -282,11 +282,21 @@ public class sACNDiscoveryReceiver {
         // attempt to join multicast grousp
         if ipMode == .ipv4Only || ipMode == .ipv4And6 {
             let hostname = IPv4.universeDiscoveryHostname
-            try socket.join(multicastGroup: hostname)
+            do {
+                try socket.join(multicastGroup: hostname)
+            } catch {
+                socket.stopListening()
+                throw error
+            }
         }
         if ipMode == .ipv6Only || ipMode == .ipv4And6 {
             let hostname = IPv6.universeDiscoveryHostname
-            try socket.join(multicastGroup: hostname)
+            do {
+                try socket.join(multicastGroup: hostname)
+            } catch {
+                socket.stopListening()
+                throw error
+            }
         }
     }
     

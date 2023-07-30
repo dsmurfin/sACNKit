@@ -153,17 +153,16 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
         }
     }
 
-    /// Starts listening for network data. Binds sockets, and joins multicast groups as neccessary.
+    /// Starts listening for network data. Binds sockets.
     ///
     /// - Parameters:
     ///    - interface: An optional interface on which to bind the socket. It may be a name (e.g. "en1" or "lo0") or the corresponding IP address (e.g. "192.168.4.35").
-    ///    - multicastGroups: An array of multicast group hostnames for this socket.
     ///
     /// - Throws: An error of type `sACNComponentSocketError`.
     ///
     /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interface must not be nil.
     ///
-    func startListening(onInterface interface: String?, multicastGroups: [String] = []) throws {
+    func startListening(onInterface interface: String?) throws {
         precondition(!ipMode.usesIPv6() || interface != nil, "An interface must be provided for IPv6.")
         self.interface = interface
 
@@ -200,15 +199,6 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
             try socket?.beginReceiving()
         } catch {
             throw sACNComponentSocketError.couldNotReceive(message: "\(id): Could not receive on \(socketType.rawValue) socket.")
-        }
-        
-        switch socketType {
-        case .transmit:
-            break
-        case .receive:
-            for group in multicastGroups {
-                try join(multicastGroup: group)
-            }
         }
     }
     
