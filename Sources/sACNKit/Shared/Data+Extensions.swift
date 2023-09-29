@@ -88,7 +88,13 @@ extension Data {
     func toString(ofLength length: Int, atOffset offset: Int) -> String? {
         guard offset+length <= self.count else { return nil }
         let data = self.subdata(in: offset..<offset+length)
-        return String.init(data: data, encoding: .utf8)?.trimmingCharacters(in: CharacterSet(charactersIn: "\0"))
+        let repairedString = String(decoding: data, as: UTF8.self)
+        if let index = repairedString.firstIndex(of: "�") {
+            let prefix = repairedString.prefix(upTo: index)
+            return prefix.trimmingCharacters(in: CharacterSet(charactersIn: "\0"))
+        } else {
+            return repairedString.trimmingCharacters(in: CharacterSet(charactersIn: "\0"))
+        }
     }
     
     /// Attempts to access Flags and Length from this data at a specified offset.
