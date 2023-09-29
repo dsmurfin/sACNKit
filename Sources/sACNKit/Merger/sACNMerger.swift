@@ -168,7 +168,7 @@ public class sACNMerger {
         guard let source = sources[sourceId] else { throw sACNMergerError.noSourceWithIdentifier(sourceId) }
         
         // levels count must be valid and there must be levels
-        guard newLevelsCount > 0 && newLevelsCount <= DMX.addressCount && newLevels.count == DMX.addressCount else { throw sACNMergerError.invalidLevelCount }
+        guard newLevelsCount > 0 && newLevelsCount <= DMX.addressCount && newLevels.count == newLevelsCount else { throw sACNMergerError.invalidLevelCount }
         
         let oldLevelsCount = source.levelCount
         source.levelCount = newLevelsCount
