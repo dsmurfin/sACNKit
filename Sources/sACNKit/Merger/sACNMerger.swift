@@ -610,17 +610,17 @@ public struct sACNMergerConfig {
     /// Whether per-address priority packets should be transmitted.
     ///
     /// This is used if the result of the merge needs to be sent over sACN, otherwise set to `nil`.
-    var transmitPerAddressPriorities: Bool?
+    public var transmitPerAddressPriorities: Bool?
     
     /// The universe priority that should be transmitted.
     ///
     /// This is used if the result of the merge needs to be sent over sACN, otherwise set to `nil`.
-    var universePriority: UInt8?
+    public var universePriority: UInt8?
     
     /// The maximum number of sources this merger will listen to.
     ///
     /// To allow unlimited sources set this to `nil`.
-    var sourceLimit: Int?
+    public var sourceLimit: Int?
     
 }
 
