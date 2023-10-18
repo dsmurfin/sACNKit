@@ -38,12 +38,12 @@ import Foundation
 public class sACNMerger {
     
     /// The unique identifer for this merger (this matches the sACN universe it merges).
-    private (set) var id: UInt16
+    public private (set) var id: UInt16
     
     /// The (512) merged levels.
     ///
     /// Any 'unsourced' slot is set to 0.
-    private (set) var levels: [UInt8]
+    public private (set) var levels: [UInt8]
     
     /// The (512) per-address priorities for each winning slot.
     ///
@@ -53,7 +53,7 @@ public class sACNMerger {
     /// The (512) identifiers (or `nil` if there is no winner) of the winning `MergerSource`s for the merge on a each slot.
     ///
     /// Winning owners are always tracked here.
-    private (set) var winners: [UUID?]
+    public private (set) var winners: [UUID?]
 
     /// Whether per-address priority packets should be transmitted.
     ///
