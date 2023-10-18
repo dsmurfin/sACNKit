@@ -489,7 +489,7 @@ final public class sACNSource {
     ///
     ///  - Throws: An error of type `sACNSourceValidationError`.
     ///
-    func update(levels: [UInt8], in universeNumber: UInt16) throws {
+    public func update(levels: [UInt8], in universeNumber: UInt16) throws {
         try socketDelegateQueue.sync {
             let internalUniverse = self.universes.first(where: { $0.number == universeNumber })
             guard let internalUniverse = internalUniverse else {
