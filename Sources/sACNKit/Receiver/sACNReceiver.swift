@@ -105,18 +105,19 @@ public class sACNReceiver {
     ///    - universe: The universe this receiver listens to.
     ///    - sourceLimit: The number of sources this receiver is able to process. This will be dependent on the hardware on which the receiver is running. Defaults to `4`.
     ///    - filterPreviewData: Optional: Whether source preview data should be filtered out (defaults to `true`).
+    ///    - filtersCIDs: Optional: A list of CIDs which should be ignored (defaults to none).
     ///    - delegateQueue: A delegate queue on which to receive delegate calls from this receiver.
     ///
     /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interfaces must not be empty.
     ///
-    public init?(ipMode: sACNIPMode = .ipv4Only, interfaces: Set<String> = [], universe: UInt16, sourceLimit: Int? = 4, filterPreviewData: Bool = true, delegateQueue: DispatchQueue) {
+    public init?(ipMode: sACNIPMode = .ipv4Only, interfaces: Set<String> = [], universe: UInt16, sourceLimit: Int? = 4, filterPreviewData: Bool = true, filterCIDs: Set<UUID> = [], delegateQueue: DispatchQueue) {
         precondition(!ipMode.usesIPv6() || !interfaces.isEmpty, "At least one interface must be provided for IPv6.")
         
         // the universe provided must be valid
         guard universe.validUniverse() else { return nil }
 
         self.universe = universe
-        receiver = sACNReceiverRaw(ipMode: ipMode, interfaces: interfaces, universe: universe, sourceLimit: sourceLimit, filterPreviewData: filterPreviewData, delegateQueue: delegateQueue)!
+        receiver = sACNReceiverRaw(ipMode: ipMode, interfaces: interfaces, universe: universe, sourceLimit: sourceLimit, filterPreviewData: filterPreviewData, filterCIDs: filterCIDs, delegateQueue: delegateQueue)!
         let config = sACNMergerConfig(sourceLimit: sourceLimit)
         merger = sACNMerger(id: universe, config: config)
         samplingMerger = sACNMerger(id: universe, config: config)

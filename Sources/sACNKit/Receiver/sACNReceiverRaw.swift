@@ -104,6 +104,9 @@ public class sACNReceiverRaw {
     /// An optional limit on the number of sources this receiver accepts.
     private let sourceLimit: Int?
     
+    /// A list of CIDs this receiver should filter.
+    private var filterCIDs: Set<UUID>
+    
     /// Whether this universe is sampling.
     private var sampling: Bool
     
@@ -153,11 +156,12 @@ public class sACNReceiverRaw {
     ///    - universe: The universe this receiver listens to.
     ///    - sourceLimit: The number of sources this receiver is able to process. This will be dependent on the hardware on which the receiver is running. Defaults to `4`.
     ///    - filterPreviewData: Optional: Whether source preview data should be filtered out (defaults to `true`).
+    ///    - filtersCIDs: Optional: A list of CIDs which should be ignored (defaults to none).
     ///    - delegateQueue: A delegate queue on which to receive delegate calls from this receiver.
     ///
     /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interfaces must not be empty.
     ///
-    public init?(ipMode: sACNIPMode = .ipv4Only, interfaces: Set<String> = [], universe: UInt16, sourceLimit: Int? = 4, filterPreviewData: Bool = true, delegateQueue: DispatchQueue) {
+    public init?(ipMode: sACNIPMode = .ipv4Only, interfaces: Set<String> = [], universe: UInt16, sourceLimit: Int? = 4, filterPreviewData: Bool = true, filterCIDs: Set<UUID> = [], delegateQueue: DispatchQueue) {
         precondition(!ipMode.usesIPv6() || !interfaces.isEmpty, "At least one interface must be provided for IPv6.")
         
         // the universe provided must be valid
@@ -189,6 +193,7 @@ public class sACNReceiverRaw {
         self.universe = universe
         self.filterPreviewData = filterPreviewData
         self.sourceLimit = sourceLimit
+        self.filterCIDs = filterCIDs
         self.sampling = false
         self.sources = [:]
         
@@ -523,7 +528,9 @@ extension sACNReceiverRaw {
     private func process(data: Data, ipFamily: ComponentSocketIPFamily, socketId: UUID, hostname: String) {
         do {
             let rootLayer = try RootLayer.parse(fromData: data)
-
+            
+            guard !filterCIDs.contains(rootLayer.cid) else { return }
+            
             switch rootLayer.vector {
             case .extended:
                 // universe sync is not currently handled
