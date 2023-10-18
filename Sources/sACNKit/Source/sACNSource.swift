@@ -478,6 +478,32 @@ final public class sACNSource {
         }
     }
     
+    /// Updates an existing universe with levels.
+    ///
+    /// Values will be checked to see if changes require output changes.
+    /// It is safe to send the same values without impacting output adversely.
+    ///
+    ///  - Parameters:
+    ///     - levels: The new levels (512).
+    ///     - universeNumber: The universe number to update.
+    ///
+    ///  - Throws: An error of type `sACNSourceValidationError`.
+    ///
+    func update(levels: [UInt8], in universeNumber: UInt16) throws {
+        try socketDelegateQueue.sync {
+            let internalUniverse = self.universes.first(where: { $0.number == universeNumber })
+            guard let internalUniverse = internalUniverse else {
+                throw sACNSourceValidationError.universeDoesNotExist
+            }
+            
+            guard !_isListening || !internalUniverse.removeAfterTerminate else {
+                throw sACNSourceValidationError.universeTerminating
+            }
+            
+            try internalUniverse.update(levels: levels, sourceActive: _isListening)
+        }
+    }
+    
     /// Updates a slot of an existing universe with a level and optionally per-slot priority.
     ///
     /// Values will be checked to see if changes require output changes.

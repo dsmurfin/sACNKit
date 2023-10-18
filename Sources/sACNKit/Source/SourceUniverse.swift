@@ -164,6 +164,28 @@ class SourceUniverse: Equatable {
         }
     }
     
+    /// Updates an existing universe with levels.
+    ///
+    ///  - Parameters:
+    ///     - levels: The new levels (512).
+    ///     - isSourceActive: Whether the source is active.
+    ///
+    ///  - Throws: An error of type `sACNSourceValidationError`.
+    ///
+    func update(levels: [UInt8], sourceActive isSourceActive: Bool) throws {
+        guard levels.count == 512 else {
+            throw sACNSourceValidationError.incorrectLevelsCount
+        }
+                
+        if self.levels != levels {
+            self.levels = levels
+            self.dmpLevelsLayer.replacingDMPLayerValues(with: levels)
+            if isSourceActive {
+                dirtyCounter = 3
+            }
+        }
+    }
+    
     /// Updates an existing universe with new priorities and values.
     ///
     ///  - parameters:
