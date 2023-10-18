@@ -82,6 +82,9 @@ final public class sACNReceiverGroup {
     /// An optional limit on the number of sources the receivers in this group accept.
     private let sourceLimit: Int?
     
+    /// A list of CIDs this receiver should filter.
+    private let filterCIDs: Set<UUID>
+    
     /// The receivers, identified by their universe.
     private var receivers: [UInt16: sACNReceiver]
     
@@ -94,17 +97,19 @@ final public class sACNReceiverGroup {
     ///    - interfaces: The network interfaces for this receiver. An interface may be a name (e.g. "en1" or "lo0") or the corresponding IP address (e.g. "192.168.4.35").
     ///    - sourceLimit: The number of sources this receiver is able to process. This will be dependent on the hardware on which the receiver is running. Defaults to `4`.
     ///    - filterPreviewData: Optional: Whether source preview data should be filtered out (defaults to `true`).
+    ///    - filtersCIDs: Optional: A list of CIDs which should be ignored (defaults to none).
     ///    - delegateQueue: A delegate queue on which to receive delegate calls from this receiver.
     ///
     /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interfaces must not be empty.
     ///
-    public init(ipMode: sACNIPMode = .ipv4Only, interfaces: Set<String> = [], sourceLimit: Int? = 4, filterPreviewData: Bool = true, delegateQueue: DispatchQueue) {
+    public init(ipMode: sACNIPMode = .ipv4Only, interfaces: Set<String> = [], sourceLimit: Int? = 4, filterPreviewData: Bool = true, filterCIDs: Set<UUID> = [], delegateQueue: DispatchQueue) {
         precondition(!ipMode.usesIPv6() || !interfaces.isEmpty, "At least one interface must be provided for IPv6.")
 
         self.ipMode = ipMode
         self.interfaces = interfaces
         self.filterPreviewData = filterPreviewData
         self.sourceLimit = sourceLimit
+        self.filterCIDs = filterCIDs
         receivers = [:]
         self.delegateQueue = delegateQueue
     }
@@ -127,7 +132,7 @@ final public class sACNReceiverGroup {
         try delegateQueue.sync { [self] in
             guard receivers[universe] == nil else { return }
             
-            let receiver = sACNReceiver(ipMode: ipMode, interfaces: interfaces, universe: universe, sourceLimit: sourceLimit, filterPreviewData: filterPreviewData, delegateQueue: delegateQueue)!
+            let receiver = sACNReceiver(ipMode: ipMode, interfaces: interfaces, universe: universe, sourceLimit: sourceLimit, filterPreviewData: filterPreviewData, filterCIDs: filterCIDs, delegateQueue: delegateQueue)!
             receivers[universe] = receiver
             receiver.setDelegate(self)
             try receiver.start()
