@@ -228,6 +228,33 @@ class SourceUniverse: Equatable {
         }
     }
     
+    /// Updates an existing universe with new priorities.
+    ///
+    ///  - parameters:
+    ///     - slot: The slot to update.
+    ///     - priority: The per-slot priority for this slot.
+    ///     - isSourceActive: Whether the source is active.
+    ///
+    ///  - Throws: An error of type `sACNSourceValidationError`.
+    ///
+    func update(slot: Int, priority: UInt8, sourceActive isSourceActive: Bool) throws {
+        guard slot < 512 else {
+            throw sACNSourceValidationError.invalidSlotNumber
+        }
+        guard priority.validPriority() else {
+            throw sACNSourceValidationError.invalidPriorities
+        }
+
+        if var priorities = self.priorities, priorities[slot] != priority {
+            priorities[slot] = priority
+            self.dmpPrioritiesLayer.replacingDMPLayerValue(priority, at: slot)
+            if isSourceActive {
+                dirtyPriority = true
+                dirtyCounter = 3
+            }
+        }
+    }
+    
     /// Updates the framing layer data for this universe.
     ///
     ///  - parameters:
