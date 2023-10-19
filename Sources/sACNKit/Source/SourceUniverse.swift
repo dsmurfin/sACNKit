@@ -186,6 +186,32 @@ class SourceUniverse: Equatable {
         }
     }
     
+    /// Updates an existing universe with per-slot priorities.
+    ///
+    ///  - Parameters:
+    ///     - priorities: The new per-slot priorities (512).
+    ///     - isSourceActive: Whether the source is active.
+    ///
+    ///  - Throws: An error of type `sACNSourceValidationError`.
+    ///
+    func update(priorities: [UInt8]?, sourceActive isSourceActive: Bool) throws {
+        if let priorities {
+            guard priorities.count == 512 else {
+                throw sACNSourceValidationError.incorrectPrioritiesCount
+            }
+        }
+
+        if self.priorities != priorities {
+            self.priorities = priorities
+            self.dmpPrioritiesLayer.replacingDMPLayerValues(with: priorities ?? Array(repeating: 0, count: 512))
+            if isSourceActive {
+                dirtyPriority = true
+                dirtyCounter = 3
+            }
+        }
+        
+    }
+    
     /// Updates an existing universe with new priorities and values.
     ///
     ///  - parameters:
