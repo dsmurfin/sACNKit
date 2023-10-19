@@ -240,8 +240,8 @@ class SourceUniverse: Equatable {
             dirty = true
         }
         
-        if var priorities = self.priorities, let priority = priority, priorities[slot] != priority {
-            priorities[slot] = priority
+        if let priorities = self.priorities, let priority = priority, priorities[slot] != priority {
+            self.priorities?[slot] = priority
             self.dmpPrioritiesLayer.replacingDMPLayerValue(priority, at: slot)
             dirty = true
             if isSourceActive {
@@ -271,8 +271,8 @@ class SourceUniverse: Equatable {
             throw sACNSourceValidationError.invalidPriorities
         }
 
-        if var priorities = self.priorities, priorities[slot] != priority {
-            priorities[slot] = priority
+        if let priorities = self.priorities, priorities[slot] != priority {
+            self.priorities?[slot] = priority
             self.dmpPrioritiesLayer.replacingDMPLayerValue(priority, at: slot)
             if isSourceActive {
                 dirtyPriority = true
