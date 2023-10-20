@@ -164,6 +164,54 @@ class SourceUniverse: Equatable {
         }
     }
     
+    /// Updates an existing universe with levels.
+    ///
+    ///  - Parameters:
+    ///     - levels: The new levels (512).
+    ///     - isSourceActive: Whether the source is active.
+    ///
+    ///  - Throws: An error of type `sACNSourceValidationError`.
+    ///
+    func update(levels: [UInt8], sourceActive isSourceActive: Bool) throws {
+        guard levels.count == 512 else {
+            throw sACNSourceValidationError.incorrectLevelsCount
+        }
+                
+        if self.levels != levels {
+            self.levels = levels
+            self.dmpLevelsLayer.replacingDMPLayerValues(with: levels)
+            if isSourceActive {
+                dirtyCounter = 3
+            }
+        }
+    }
+    
+    /// Updates an existing universe with per-slot priorities.
+    ///
+    ///  - Parameters:
+    ///     - priorities: The new per-slot priorities (512).
+    ///     - isSourceActive: Whether the source is active.
+    ///
+    ///  - Throws: An error of type `sACNSourceValidationError`.
+    ///
+    func update(priorities: [UInt8]?, sourceActive isSourceActive: Bool) throws {
+        if let priorities {
+            guard priorities.count == 512 else {
+                throw sACNSourceValidationError.incorrectPrioritiesCount
+            }
+        }
+
+        if self.priorities != priorities {
+            self.priorities = priorities
+            self.dmpPrioritiesLayer.replacingDMPLayerValues(with: priorities ?? Array(repeating: 0, count: 512))
+            if isSourceActive {
+                dirtyPriority = true
+                dirtyCounter = 3
+            }
+        }
+        
+    }
+    
     /// Updates an existing universe with new priorities and values.
     ///
     ///  - parameters:
@@ -192,8 +240,8 @@ class SourceUniverse: Equatable {
             dirty = true
         }
         
-        if var priorities = self.priorities, let priority = priority, priorities[slot] != priority {
-            priorities[slot] = priority
+        if let priorities = self.priorities, let priority = priority, priorities[slot] != priority {
+            self.priorities?[slot] = priority
             self.dmpPrioritiesLayer.replacingDMPLayerValue(priority, at: slot)
             dirty = true
             if isSourceActive {
@@ -203,6 +251,33 @@ class SourceUniverse: Equatable {
         
         if isSourceActive && dirty {
             dirtyCounter = 3
+        }
+    }
+    
+    /// Updates an existing universe with new priorities.
+    ///
+    ///  - parameters:
+    ///     - slot: The slot to update.
+    ///     - priority: The per-slot priority for this slot.
+    ///     - isSourceActive: Whether the source is active.
+    ///
+    ///  - Throws: An error of type `sACNSourceValidationError`.
+    ///
+    func update(slot: Int, priority: UInt8, sourceActive isSourceActive: Bool) throws {
+        guard slot < 512 else {
+            throw sACNSourceValidationError.invalidSlotNumber
+        }
+        guard priority.validPriority() else {
+            throw sACNSourceValidationError.invalidPriorities
+        }
+
+        if let priorities = self.priorities, priorities[slot] != priority {
+            self.priorities?[slot] = priority
+            self.dmpPrioritiesLayer.replacingDMPLayerValue(priority, at: slot)
+            if isSourceActive {
+                dirtyPriority = true
+                dirtyCounter = 3
+            }
         }
     }
     

@@ -478,13 +478,68 @@ final public class sACNSource {
         }
     }
     
+    /// Updates an existing universe with levels.
+    ///
+    /// Values will be checked to see if changes require output changes.
+    /// It is safe to send the same values without impacting output adversely.
+    ///
+    ///  - Parameters:
+    ///     - levels: The new levels (512).
+    ///     - universeNumber: The universe number to update.
+    ///
+    ///  - Throws: An error of type `sACNSourceValidationError`.
+    ///
+    public func updateLevels(_ levels: [UInt8], in universeNumber: UInt16) throws {
+        try socketDelegateQueue.sync {
+            let internalUniverse = self.universes.first(where: { $0.number == universeNumber })
+            guard let internalUniverse = internalUniverse else {
+                throw sACNSourceValidationError.universeDoesNotExist
+            }
+            
+            guard !_isListening || !internalUniverse.removeAfterTerminate else {
+                throw sACNSourceValidationError.universeTerminating
+            }
+            
+            try internalUniverse.update(levels: levels, sourceActive: _isListening)
+        }
+    }
+    
+    /// Updates an existing universe with per-slot priorities.
+    ///
+    /// If `nil` is passed to `priorities`, this source will no longer output
+    /// per-slot priority.
+    ///
+    /// Values will be checked to see if changes require output changes.
+    /// It is safe to send the same values without impacting output adversely.
+    ///
+    ///  - Parameters:
+    ///     - priorities: Optional new per-slot priorities (512).
+    ///     - universeNumber: The universe number to update.
+    ///
+    ///  - Throws: An error of type `sACNSourceValidationError`.
+    ///
+    public func updatePriorities(_ priorities: [UInt8]?, in universeNumber: UInt16) throws {
+        try socketDelegateQueue.sync {
+            let internalUniverse = self.universes.first(where: { $0.number == universeNumber })
+            guard let internalUniverse = internalUniverse else {
+                throw sACNSourceValidationError.universeDoesNotExist
+            }
+            
+            guard !_isListening || !internalUniverse.removeAfterTerminate else {
+                throw sACNSourceValidationError.universeTerminating
+            }
+            
+            try internalUniverse.update(priorities: priorities, sourceActive: _isListening)
+        }
+    }
+    
     /// Updates a slot of an existing universe with a level and optionally per-slot priority.
     ///
     /// Values will be checked to see if changes require output changes.
     /// It is safe to send the same values without impacting output adversely.
     ///
     /// If a priority is provided it will only be processed if per-slot priorities have previously been added using the
-    /// `addUniverse`, or `updateLevels` methods
+    /// `addUniverse`, or `updateLevels(:sACNSourceUniverse)` methods
     ///
     ///  - parameters:
     ///     - slot: The slot to update (0-511).
@@ -506,6 +561,36 @@ final public class sACNSource {
             }
             
             try internalUniverse.update(slot: slot, level: level, priority: priority, sourceActive: _isListening)
+        }
+    }
+    
+    /// Updates a slot of an existing universe with a per-slot priority.
+    ///
+    /// Values will be checked to see if changes require output changes.
+    /// It is safe to send the same values without impacting output adversely.
+    ///
+    /// If a priority is provided it will only be processed if per-slot priorities have previously been added using the
+    /// `addUniverse`, or `updateLevels(:sACNSourceUniverse)` methods
+    ///
+    ///  - parameters:
+    ///     - slot: The slot to update (0-511).
+    ///     - universeNumber: The universe number to update.
+    ///     - priority: The per-slot priority for this slot.
+    ///
+    ///  - Throws: An error of type `sACNSourceValidationError`.
+    ///
+    public func updateSlot(slot: Int, in universeNumber: UInt16, priority: UInt8) throws {
+        try socketDelegateQueue.sync {
+            let internalUniverse = self.universes.first(where: { $0.number == universeNumber })
+            guard let internalUniverse = internalUniverse else {
+                throw sACNSourceValidationError.universeDoesNotExist
+            }
+            
+            guard !_isListening || !internalUniverse.removeAfterTerminate else {
+                throw sACNSourceValidationError.universeTerminating
+            }
+            
+            try internalUniverse.update(slot: slot, priority: priority, sourceActive: _isListening)
         }
     }
     
@@ -821,7 +906,7 @@ public enum sACNSourceValidationError: LocalizedError {
     case invalidSlotNumber
 
     /// A human-readable description of the error useful for logging purposes.
-    var logDescription: String {
+    public var logDescription: String {
         switch self {
         case .sourceStarted:
             return "The source is already started"
