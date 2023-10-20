@@ -53,6 +53,18 @@ final public class sACNSource {
     /// The private socket listening status.
     private var _isListening: Bool
     
+    /// Whether this source should actively output sACN Universe Discovery and Data messages.
+    /// This may be useful for backup scenarios to ensure the source is ready to output as soon as required.
+    ///
+    /// Calling this before `startOutput()` will have no effect.
+    public var shouldOutput: Bool {
+        get { socketDelegateQueue.sync { _shouldOutput } }
+        set { socketDelegateQueue.sync { _shouldOutput = newValue } }
+    }
+    
+    /// The private state of should output.
+    private var _shouldOutput: Bool
+    
     // MARK: Delegate
     
     /// Changes the source delegate of this source to the the object passed.
@@ -179,6 +191,7 @@ final public class sACNSource {
             }
         }
         self._isListening = false
+        self._shouldOutput = false
         
         // delegate
         self.delegateQueue = delegateQueue
@@ -207,11 +220,16 @@ final public class sACNSource {
     
     /// Starts this source.
     ///
-    /// The source will begin transmitting sACN Universe Discovery and Data messages.
+    /// The source will begin transmitting sACN Universe Discovery and Data messages, dependent
+    /// on the state of `shouldOutput`. This may be useful for backup scenarios to ensure the source
+    /// is ready to output as soon as required.
+    ///
+    /// - Parameters:
+    ///    - shouldOutput: Optional: Whether this source should output (defaults to `true`).
     ///
     /// - Throws: An error of type `sACNSourceValidationError` or `sACNComponentSocketError`.
     ///
-    public func start() throws {
+    public func start(shouldOutput: Bool = true) throws {
         try socketDelegateQueue.sync {
             guard !_isListening else {
                 throw sACNSourceValidationError.sourceStarted
@@ -225,6 +243,7 @@ final public class sACNSource {
                 try listenForSocket(socket, on: interface.isEmpty ? nil : interface)
             }
             self._isListening = true
+            self._shouldOutput = shouldOutput
             
             // start heartbeats
             startDataTransmit()
@@ -665,6 +684,8 @@ final public class sACNSource {
 
     /// Sends the Universe Discovery messages for this source.
     private func sendUniverseDiscoveryMessage() {
+        guard _shouldOutput else { return }
+        
         sockets.forEach { interface, socket in
             for message in universeDiscoveryMessages {
                 if ipMode.usesIPv4() {
@@ -734,6 +755,8 @@ private extension sACNSource {
     
     /// Sends the data messages for this source.
     private func sendDataMessages() {
+        guard _shouldOutput else { return }
+
         // remove all universes which are full terminated and should be removed
         let universesToRemove = universes.filter { $0.removeAfterTerminate && $0.shouldTerminate && $0.dirtyCounter < 1 }
         let universesReadyForSocketRemoval = universes.filter { $0.pendingSocketRemoval && $0.dirtyCounter < 1 }
