@@ -369,7 +369,7 @@ public enum sACNReceiverValidationError: LocalizedError {
     case sourceDoesNotExist
 
     /// A human-readable description of the error useful for logging purposes.
-    var logDescription: String {
+    public var logDescription: String {
         switch self {
         case .receiverStarted:
             return "The receiver is already started"

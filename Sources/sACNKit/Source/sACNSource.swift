@@ -906,7 +906,7 @@ public enum sACNSourceValidationError: LocalizedError {
     case invalidSlotNumber
 
     /// A human-readable description of the error useful for logging purposes.
-    var logDescription: String {
+    public var logDescription: String {
         switch self {
         case .sourceStarted:
             return "The source is already started"
