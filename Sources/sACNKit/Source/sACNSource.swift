@@ -237,7 +237,8 @@ final public class sACNSource {
             
             universes.forEach { $0.reset() }
             delegateTransmissionState = nil
-            
+            socketsShouldTerminate = [:]
+
             // begin listening
             try sockets.forEach { interface, socket in
                 try listenForSocket(socket, on: interface.isEmpty ? nil : interface)
@@ -852,6 +853,7 @@ private extension sACNSource {
                 if !socketsShouldTerminate.isEmpty {
                     let framingOptions: DataFramingLayer.Options = [.terminated]
                     var framingLayer = universe.framingLayer
+                    framingLayer.replacingSequence(with: universe.sequence)
                     framingLayer.replacingOptions(with: framingOptions)
                     let levels = rootLayer+framingLayer+dmpLayer
                     socketTerminationMessages.append((universeNumber: universe.number, data: levels))
