@@ -237,7 +237,8 @@ final public class sACNSource {
             
             universes.forEach { $0.reset() }
             delegateTransmissionState = nil
-            
+            socketsShouldTerminate = [:]
+
             // begin listening
             try sockets.forEach { interface, socket in
                 try listenForSocket(socket, on: interface.isEmpty ? nil : interface)
