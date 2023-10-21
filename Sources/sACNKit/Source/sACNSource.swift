@@ -853,6 +853,7 @@ private extension sACNSource {
                 if !socketsShouldTerminate.isEmpty {
                     let framingOptions: DataFramingLayer.Options = [.terminated]
                     var framingLayer = universe.framingLayer
+                    framingLayer.replacingSequence(with: universe.sequence)
                     framingLayer.replacingOptions(with: framingOptions)
                     let levels = rootLayer+framingLayer+dmpLayer
                     socketTerminationMessages.append((universeNumber: universe.number, data: levels))
