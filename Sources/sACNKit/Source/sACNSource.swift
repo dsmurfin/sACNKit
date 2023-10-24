@@ -55,15 +55,32 @@ final public class sACNSource {
     
     /// Whether this source should actively output sACN Universe Discovery and Data messages.
     /// This may be useful for backup scenarios to ensure the source is ready to output as soon as required.
-    ///
-    /// Calling this before `startOutput()` will have no effect.
     public var shouldOutput: Bool {
         get { socketDelegateQueue.sync { _shouldOutput } }
-        set { socketDelegateQueue.sync { _shouldOutput = newValue } }
     }
     
     /// The private state of should output.
     private var _shouldOutput: Bool
+    
+    /// Updates whether this source source should actively output sACN Universe Discovery and Data messages.
+    ///
+    /// This may be useful for backup scenarios to ensure the source is ready to output as soon as required.
+    ///
+    /// Calling this before `startOutput()` will have no effect.
+    ///
+    /// - Parameters:
+    ///    - output: Whether the source should output.
+    ///
+    public func shouldOutput(_ output: Bool) {
+        socketDelegateQueue.sync {
+            guard _shouldOutput != output else { return }
+            if !output {
+                // terminate all universes on all sockets, but keep the sockets and universes present
+                universes.forEach { $0.terminate(remove: false) }
+            }
+            _shouldOutput = output
+        }
+    }
     
     // MARK: Delegate
     
@@ -756,8 +773,6 @@ private extension sACNSource {
     
     /// Sends the data messages for this source.
     private func sendDataMessages() {
-        guard _shouldOutput else { return }
-
         // remove all universes which are full terminated and should be removed
         let universesToRemove = universes.filter { $0.removeAfterTerminate && $0.shouldTerminate && $0.dirtyCounter < 1 }
         let universesReadyForSocketRemoval = universes.filter { $0.pendingSocketRemoval && $0.dirtyCounter < 1 }
@@ -859,7 +874,9 @@ private extension sACNSource {
                     socketTerminationMessages.append((universeNumber: universe.number, data: levels))
                 }
                 
-                universe.incrementSequence()
+                if _shouldOutput || (universe.shouldTerminate && universe.dirtyCounter > 0) {
+                    universe.incrementSequence()
+                }
                 universe.decrementDirty()
             }
             
@@ -873,15 +890,25 @@ private extension sACNSource {
                 let priorities = rootLayer+framingLayer+dmpLayer
                 universeMessages.append((universeNumber: universe.number, data: priorities))
                 
-                universe.incrementSequence()
-                universe.prioritySent()
+                if _shouldOutput || (universe.shouldTerminate && universe.dirtyCounter > 0) {
+                    universe.incrementSequence()
+                    universe.prioritySent()
+                }
             }
             
             universe.incrementCounter()
         }
         
         sockets.forEach { interface, socket in
-            let messages = socketsShouldTerminate[interface] != nil ? socketTerminationMessages : universeMessages
+            let shouldTerminate = socketsShouldTerminate[interface] != nil
+            let messages: [(universeNumber: UInt16, data: Data)] = if shouldTerminate {
+                socketTerminationMessages
+            } else if _shouldOutput {
+                universeMessages
+            } else {
+                []
+            }
+
             for universeMessage in messages {
                 if ipMode.usesIPv4() {
                     let hostname = IPv4.multicastHostname(for: universeMessage.universeNumber)
