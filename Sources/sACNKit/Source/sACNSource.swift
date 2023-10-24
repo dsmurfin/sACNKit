@@ -865,7 +865,6 @@ private extension sACNSource {
                 let dmpLayer = universe.dmpLevelsLayer
 
                 let levels = rootLayer+framingLayer+dmpLayer
-                universeMessages.append((universeNumber: universe.number, data: levels))
                 
                 if !socketsShouldTerminate.isEmpty {
                     let framingOptions: DataFramingLayer.Options = [.terminated]
@@ -877,6 +876,7 @@ private extension sACNSource {
                 }
                 
                 if _shouldOutput || (universe.shouldTerminate && universe.dirtyCounter > 0) {
+                    universeMessages.append((universeNumber: universe.number, data: levels))
                     universe.incrementSequence()
                 }
                 universe.decrementDirty()
@@ -890,9 +890,9 @@ private extension sACNSource {
                 let dmpLayer = universe.dmpPrioritiesLayer
 
                 let priorities = rootLayer+framingLayer+dmpLayer
-                universeMessages.append((universeNumber: universe.number, data: priorities))
                 
                 if _shouldOutput || (universe.shouldTerminate && universe.dirtyCounter > 0) {
+                    universeMessages.append((universeNumber: universe.number, data: priorities))
                     universe.incrementSequence()
                     universe.prioritySent()
                 }
@@ -902,14 +902,7 @@ private extension sACNSource {
         }
         
         sockets.forEach { interface, socket in
-            let shouldTerminate = socketsShouldTerminate[interface] != nil
-            let messages: [(universeNumber: UInt16, data: Data)] = if shouldTerminate {
-                socketTerminationMessages
-            } else if _shouldOutput {
-                universeMessages
-            } else {
-                []
-            }
+            let messages = socketsShouldTerminate[interface] != nil ? socketTerminationMessages : universeMessages
 
             for universeMessage in messages {
                 if ipMode.usesIPv4() {
