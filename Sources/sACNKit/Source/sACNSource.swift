@@ -74,7 +74,9 @@ final public class sACNSource {
     public func shouldOutput(_ output: Bool) {
         socketDelegateQueue.sync {
             guard _shouldOutput != output else { return }
-            if !output {
+            if output {
+                universes.forEach { $0.reset() }
+            } else {
                 // terminate all universes on all sockets, but keep the sockets and universes present
                 universes.forEach { $0.terminate(remove: false) }
             }
