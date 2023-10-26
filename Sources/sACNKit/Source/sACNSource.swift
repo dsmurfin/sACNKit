@@ -322,13 +322,18 @@ final public class sACNSource {
             if existingInterfaces.isEmpty {
                 // not possible for IPv6
                 
-                // terminate all universes on existing sockets, removing the sockets but not the universes
-                let socketIds = sockets.reduce(into: [String: Bool]()) { dict, socket in
-                    dict[socket.key] = true
-                }
-                socketsShouldTerminate = socketIds
-                universes.forEach { universe in
-                    universe.terminateSockets()
+                if universes.isEmpty {
+                    // deinit first stops listening
+                    sockets.removeAll()
+                } else {
+                    // terminate all universes on existing sockets, removing the sockets but not the universes
+                    let socketIds = sockets.reduce(into: [String: Bool]()) { dict, socket in
+                        dict[socket.key] = true
+                    }
+                    socketsShouldTerminate = socketIds
+                    universes.forEach { universe in
+                        universe.terminateSockets()
+                    }
                 }
 
                 // add each new interfaces
@@ -345,13 +350,18 @@ final public class sACNSource {
             } else if newInterfaces.isEmpty {
                 // not possible for IPv6
                 
-                // terminate all universes on existing sockets, removing the sockets but not the universes
-                let socketIds = sockets.reduce(into: [String: Bool]()) { dict, socket in
-                    dict[socket.key] = true
-                }
-                socketsShouldTerminate = socketIds
-                universes.forEach { universe in
-                    universe.terminateSockets()
+                if universes.isEmpty {
+                    // deinit first stops listening
+                    sockets.removeAll()
+                } else {
+                    // terminate all universes on existing sockets, removing the sockets but not the universes
+                    let socketIds = sockets.reduce(into: [String: Bool]()) { dict, socket in
+                        dict[socket.key] = true
+                    }
+                    socketsShouldTerminate = socketIds
+                    universes.forEach { universe in
+                        universe.terminateSockets()
+                    }
                 }
                 
                 // add socket for all interfaces
@@ -370,12 +380,19 @@ final public class sACNSource {
                 // terminate all universes on sockets no longer needed, removing the sockets but not the universes
                 let socketsToRemove = sockets.filter { interfacesToRemove.contains($0.key) }
                 if !socketsToRemove.isEmpty {
-                    let socketIds = socketsToRemove.reduce(into: [String: Bool]()) { dict, socket in
-                        dict[socket.key] = true
-                    }
-                    socketsShouldTerminate = socketIds
-                    universes.forEach { universe in
-                        universe.terminateSockets()
+                    if universes.isEmpty {
+                        for socketToRemove in socketsToRemove.keys {
+                            // deinit first stops listening
+                            sockets.removeValue(forKey: socketToRemove)
+                        }
+                    } else {
+                        let socketIds = socketsToRemove.reduce(into: [String: Bool]()) { dict, socket in
+                            dict[socket.key] = true
+                        }
+                        socketsShouldTerminate = socketIds
+                        universes.forEach { universe in
+                            universe.terminateSockets()
+                        }
                     }
                 }
                 
