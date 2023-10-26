@@ -322,7 +322,7 @@ final public class sACNSource {
             if existingInterfaces.isEmpty {
                 // not possible for IPv6
                 
-                if universes.isEmpty {
+                if universes.isEmpty || !_isListening {
                     // deinit first stops listening
                     sockets.removeAll()
                 } else {
@@ -350,7 +350,7 @@ final public class sACNSource {
             } else if newInterfaces.isEmpty {
                 // not possible for IPv6
                 
-                if universes.isEmpty {
+                if universes.isEmpty || !_isListening {
                     // deinit first stops listening
                     sockets.removeAll()
                 } else {
@@ -380,7 +380,7 @@ final public class sACNSource {
                 // terminate all universes on sockets no longer needed, removing the sockets but not the universes
                 let socketsToRemove = sockets.filter { interfacesToRemove.contains($0.key) }
                 if !socketsToRemove.isEmpty {
-                    if universes.isEmpty {
+                    if universes.isEmpty || !_isListening {
                         for socketToRemove in socketsToRemove.keys {
                             // deinit first stops listening
                             sockets.removeValue(forKey: socketToRemove)
