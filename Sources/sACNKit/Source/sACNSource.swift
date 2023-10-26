@@ -55,15 +55,34 @@ final public class sACNSource {
     
     /// Whether this source should actively output sACN Universe Discovery and Data messages.
     /// This may be useful for backup scenarios to ensure the source is ready to output as soon as required.
-    ///
-    /// Calling this before `startOutput()` will have no effect.
     public var shouldOutput: Bool {
         get { socketDelegateQueue.sync { _shouldOutput } }
-        set { socketDelegateQueue.sync { _shouldOutput = newValue } }
     }
     
     /// The private state of should output.
     private var _shouldOutput: Bool
+    
+    /// Updates whether this source source should actively output sACN Universe Discovery and Data messages.
+    ///
+    /// This may be useful for backup scenarios to ensure the source is ready to output as soon as required.
+    ///
+    /// Calling this before `startOutput()` will have no effect.
+    ///
+    /// - Parameters:
+    ///    - output: Whether the source should output.
+    ///
+    public func shouldOutput(_ output: Bool) {
+        socketDelegateQueue.sync {
+            guard _shouldOutput != output else { return }
+            if output {
+                universes.forEach { $0.reset() }
+            } else {
+                // terminate all universes on all sockets, but keep the sockets and universes present
+                universes.forEach { $0.terminate(remove: false) }
+            }
+            _shouldOutput = output
+        }
+    }
     
     // MARK: Delegate
     
@@ -303,13 +322,18 @@ final public class sACNSource {
             if existingInterfaces.isEmpty {
                 // not possible for IPv6
                 
-                // terminate all universes on existing sockets, removing the sockets but not the universes
-                let socketIds = sockets.reduce(into: [String: Bool]()) { dict, socket in
-                    dict[socket.key] = true
-                }
-                socketsShouldTerminate = socketIds
-                universes.forEach { universe in
-                    universe.terminateSockets()
+                if universes.isEmpty || !_isListening {
+                    // deinit first stops listening
+                    sockets.removeAll()
+                } else {
+                    // terminate all universes on existing sockets, removing the sockets but not the universes
+                    let socketIds = sockets.reduce(into: [String: Bool]()) { dict, socket in
+                        dict[socket.key] = true
+                    }
+                    socketsShouldTerminate = socketIds
+                    universes.forEach { universe in
+                        universe.terminateSockets()
+                    }
                 }
 
                 // add each new interfaces
@@ -326,13 +350,18 @@ final public class sACNSource {
             } else if newInterfaces.isEmpty {
                 // not possible for IPv6
                 
-                // terminate all universes on existing sockets, removing the sockets but not the universes
-                let socketIds = sockets.reduce(into: [String: Bool]()) { dict, socket in
-                    dict[socket.key] = true
-                }
-                socketsShouldTerminate = socketIds
-                universes.forEach { universe in
-                    universe.terminateSockets()
+                if universes.isEmpty || !_isListening {
+                    // deinit first stops listening
+                    sockets.removeAll()
+                } else {
+                    // terminate all universes on existing sockets, removing the sockets but not the universes
+                    let socketIds = sockets.reduce(into: [String: Bool]()) { dict, socket in
+                        dict[socket.key] = true
+                    }
+                    socketsShouldTerminate = socketIds
+                    universes.forEach { universe in
+                        universe.terminateSockets()
+                    }
                 }
                 
                 // add socket for all interfaces
@@ -351,12 +380,19 @@ final public class sACNSource {
                 // terminate all universes on sockets no longer needed, removing the sockets but not the universes
                 let socketsToRemove = sockets.filter { interfacesToRemove.contains($0.key) }
                 if !socketsToRemove.isEmpty {
-                    let socketIds = socketsToRemove.reduce(into: [String: Bool]()) { dict, socket in
-                        dict[socket.key] = true
-                    }
-                    socketsShouldTerminate = socketIds
-                    universes.forEach { universe in
-                        universe.terminateSockets()
+                    if universes.isEmpty || !_isListening {
+                        for socketToRemove in socketsToRemove.keys {
+                            // deinit first stops listening
+                            sockets.removeValue(forKey: socketToRemove)
+                        }
+                    } else {
+                        let socketIds = socketsToRemove.reduce(into: [String: Bool]()) { dict, socket in
+                            dict[socket.key] = true
+                        }
+                        socketsShouldTerminate = socketIds
+                        universes.forEach { universe in
+                            universe.terminateSockets()
+                        }
                     }
                 }
                 
@@ -756,8 +792,6 @@ private extension sACNSource {
     
     /// Sends the data messages for this source.
     private func sendDataMessages() {
-        guard _shouldOutput else { return }
-
         // remove all universes which are full terminated and should be removed
         let universesToRemove = universes.filter { $0.removeAfterTerminate && $0.shouldTerminate && $0.dirtyCounter < 1 }
         let universesReadyForSocketRemoval = universes.filter { $0.pendingSocketRemoval && $0.dirtyCounter < 1 }
@@ -848,7 +882,6 @@ private extension sACNSource {
                 let dmpLayer = universe.dmpLevelsLayer
 
                 let levels = rootLayer+framingLayer+dmpLayer
-                universeMessages.append((universeNumber: universe.number, data: levels))
                 
                 if !socketsShouldTerminate.isEmpty {
                     let framingOptions: DataFramingLayer.Options = [.terminated]
@@ -859,7 +892,10 @@ private extension sACNSource {
                     socketTerminationMessages.append((universeNumber: universe.number, data: levels))
                 }
                 
-                universe.incrementSequence()
+                if _shouldOutput || (universe.shouldTerminate && universe.dirtyCounter > 0) {
+                    universeMessages.append((universeNumber: universe.number, data: levels))
+                    universe.incrementSequence()
+                }
                 universe.decrementDirty()
             }
             
@@ -871,10 +907,12 @@ private extension sACNSource {
                 let dmpLayer = universe.dmpPrioritiesLayer
 
                 let priorities = rootLayer+framingLayer+dmpLayer
-                universeMessages.append((universeNumber: universe.number, data: priorities))
                 
-                universe.incrementSequence()
-                universe.prioritySent()
+                if _shouldOutput || (universe.shouldTerminate && universe.dirtyCounter > 0) {
+                    universeMessages.append((universeNumber: universe.number, data: priorities))
+                    universe.incrementSequence()
+                    universe.prioritySent()
+                }
             }
             
             universe.incrementCounter()
@@ -882,6 +920,7 @@ private extension sACNSource {
         
         sockets.forEach { interface, socket in
             let messages = socketsShouldTerminate[interface] != nil ? socketTerminationMessages : universeMessages
+
             for universeMessage in messages {
                 if ipMode.usesIPv4() {
                     let hostname = IPv4.multicastHostname(for: universeMessage.universeNumber)
