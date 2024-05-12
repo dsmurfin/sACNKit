@@ -30,6 +30,8 @@ import CocoaAsyncSocket
 /// An E1.31-2018 sACN Source which Transmits sACN Messages.
 final public class sACNSource {
 
+    private typealias UniverseData = (universeNumber: UInt16, data: Data)
+    
     // MARK: Socket
     
     /// The Internet Protocol version(s) used by the source.
@@ -464,11 +466,7 @@ final public class sACNSource {
             
             if _isListening {
                 if let internalUniverse = universes.first(where: { $0.number == number }) {
-                    // terminate this universe on all sockets, removing the universe, but keeping the sockets
-                    let socketIds = sockets.reduce(into: [String: Bool]()) { dict, socket in
-                        dict[socket.key] = false
-                    }
-                    socketsShouldTerminate = socketIds
+                    // terminate this universe on all sockets
                     internalUniverse.terminate(remove: true)
                 }
             } else {
@@ -809,6 +807,8 @@ private extension sACNSource {
                 }
             }
             
+            socketsShouldTerminate.removeAll()
+            
             // termination of all universes to be removed is complete
             if self.shouldTerminate {
                 // the source should terminate
@@ -847,8 +847,8 @@ private extension sACNSource {
             universesReadyForSocketRemoval.forEach { $0.terminateSocketsComplete() }
         }
         
-        var universeMessages = [(universeNumber: UInt16, data: Data)]()
-        var socketTerminationMessages = [(universeNumber: UInt16, data: Data)]()
+        var universeMessages = [UniverseData]()
+        var socketTerminationMessages = [UniverseData]()
 
         let rootLayer = rootLayer
             
@@ -883,17 +883,27 @@ private extension sACNSource {
 
                 let levels = rootLayer+framingLayer+dmpLayer
                 
-                if !socketsShouldTerminate.isEmpty {
+                let terminationUniverse: UniverseData?
+                if !socketsShouldTerminate.isEmpty || (universe.shouldTerminate && universe.dirtyCounter > 0) {
                     let framingOptions: DataFramingLayer.Options = [.terminated]
                     var framingLayer = universe.framingLayer
                     framingLayer.replacingSequence(with: universe.sequence)
                     framingLayer.replacingOptions(with: framingOptions)
                     let levels = rootLayer+framingLayer+dmpLayer
-                    socketTerminationMessages.append((universeNumber: universe.number, data: levels))
+                    terminationUniverse = UniverseData(universeNumber: universe.number, data: levels)
+                } else {
+                    terminationUniverse = nil
                 }
                 
-                if _shouldOutput || (universe.shouldTerminate && universe.dirtyCounter > 0) {
-                    universeMessages.append((universeNumber: universe.number, data: levels))
+                if !socketsShouldTerminate.isEmpty, let terminationUniverse {
+                    socketTerminationMessages.append(terminationUniverse)
+                }
+                
+                if universe.shouldTerminate && universe.dirtyCounter > 0, let terminationUniverse {
+                    universeMessages.append(terminationUniverse)
+                    universe.incrementSequence()
+                } else if _shouldOutput {
+                    universeMessages.append(UniverseData(universeNumber: universe.number, data: levels))
                     universe.incrementSequence()
                 }
                 universe.decrementDirty()
