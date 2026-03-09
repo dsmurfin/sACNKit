@@ -187,6 +187,7 @@ public class sACNDiscoveryReceiver {
     ///
     /// Must be called on `socketDelegateQueue`.
     private func _stop() {
+        dispatchPrecondition(condition: .onQueue(socketDelegateQueue))
         guard _isListening else { return }
         _isListening = false
 

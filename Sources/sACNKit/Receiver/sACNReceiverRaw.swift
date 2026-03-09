@@ -253,6 +253,7 @@ public class sACNReceiverRaw {
     ///
     /// Must be called on `socketDelegateQueue`.
     private func _stop() {
+        dispatchPrecondition(condition: .onQueue(socketDelegateQueue))
         guard _isListening else { return }
         self._isListening = false
 
