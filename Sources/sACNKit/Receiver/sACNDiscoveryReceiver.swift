@@ -30,12 +30,15 @@ import Foundation
 ///
 /// An E1.31-2018 sACN Receiver which receives universe discovery messages.
 public class sACNDiscoveryReceiver {
-    
+
     // MARK: Socket
-    
+
+    /// A key used to identify the socket delegate queue for the current execution context.
+    private static let socketDelegateQueueSpecificKey = DispatchSpecificKey<Bool>()
+
     /// The Internet Protocol version(s) used by the receiver.
     private let ipMode: sACNIPMode
-    
+
     /// The queue on which socket notifications occur (also used to protect state).
     private let socketDelegateQueue: DispatchQueue
     
@@ -120,6 +123,7 @@ public class sACNDiscoveryReceiver {
         // sockets
         self.ipMode = ipMode
         let socketDelegateQueue = DispatchQueue(label: "com.danielmurfin.sACNKit.discoveryReceiverSocketDelegate")
+        socketDelegateQueue.setSpecific(key: Self.socketDelegateQueueSpecificKey, value: true)
         self.socketDelegateQueue = socketDelegateQueue
         if interfaces.isEmpty {
             let socket = ComponentSocket(type: .receive, ipMode: ipMode, port: UDP.sdtPort, delegateQueue: socketDelegateQueue)
@@ -172,19 +176,29 @@ public class sACNDiscoveryReceiver {
     ///
     /// The receiver will stop listening for sACN Universe Discovery messages.
     public func stop() {
-        socketDelegateQueue.sync {
-            guard _isListening else { return }
-            _isListening = false
-            
-            stopHeartbeat()
-            
-            sockets.forEach { interface, socket in
-                socket.delegate = nil
-                socket.stopListening()
-            }
-            
-            sources = [:]
+        if DispatchQueue.getSpecific(key: Self.socketDelegateQueueSpecificKey) == true {
+            _stop()
+        } else {
+            socketDelegateQueue.sync { _stop() }
         }
+    }
+
+    /// Performs the stop logic.
+    ///
+    /// Must be called on `socketDelegateQueue`.
+    private func _stop() {
+        dispatchPrecondition(condition: .onQueue(socketDelegateQueue))
+        guard _isListening else { return }
+        _isListening = false
+
+        stopHeartbeat()
+
+        sockets.forEach { interface, socket in
+            socket.delegate = nil
+            socket.stopListening()
+        }
+
+        sources = [:]
     }
     
     /// Updates the interfaces on which this receiver listens for sACN Universe Discovery messages.

@@ -31,12 +31,15 @@ import CocoaAsyncSocket
 final public class sACNSource {
 
     private typealias UniverseData = (universeNumber: UInt16, data: Data)
-    
+
     // MARK: Socket
-    
+
+    /// A key used to identify the socket delegate queue for the current execution context.
+    private static let socketDelegateQueueSpecificKey = DispatchSpecificKey<Bool>()
+
     /// The Internet Protocol version(s) used by the source.
     private let ipMode: sACNIPMode
-    
+
     /// The queue on which socket notifications occur (also used to protect state).
     private let socketDelegateQueue: DispatchQueue
     
@@ -200,6 +203,7 @@ final public class sACNSource {
         // sockets
         self.ipMode = ipMode
         let socketDelegateQueue = DispatchQueue(label: "com.danielmurfin.sACNKit.sourceSocketDelegate")
+        socketDelegateQueue.setSpecific(key: Self.socketDelegateQueueSpecificKey, value: true)
         self.socketDelegateQueue = socketDelegateQueue
         self.socketsShouldTerminate = [:]
         if interfaces.isEmpty {
@@ -285,17 +289,27 @@ final public class sACNSource {
     /// When stopped, this source will no longer transmit sACN messages.
     ///
     public func stop() {
-        socketDelegateQueue.sync {
-            guard _isListening else { return }
-            self._isListening = false
-            
-            // stops heartbeats
-            stopUniverseDiscovery()
-            stopDataTransmit()
-            
-            // stop listening on socket occurs after
-            // final termination is sent
+        if DispatchQueue.getSpecific(key: Self.socketDelegateQueueSpecificKey) == true {
+            _stop()
+        } else {
+            socketDelegateQueue.sync { _stop() }
         }
+    }
+
+    /// Performs the stop logic.
+    ///
+    /// Must be called on `socketDelegateQueue`.
+    private func _stop() {
+        dispatchPrecondition(condition: .onQueue(socketDelegateQueue))
+        guard _isListening else { return }
+        self._isListening = false
+
+        // stops heartbeats
+        stopUniverseDiscovery()
+        stopDataTransmit()
+
+        // stop listening on socket occurs after
+        // final termination is sent
     }
     
     /// Updates the interfaces on which this source transmits for sACN Universe Discovery and Data messages.
