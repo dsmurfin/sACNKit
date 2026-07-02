@@ -55,6 +55,11 @@ Use `sACNReceiverGroup` to receive and merge many universes with a single delega
 `sACNReceiverRaw` for un-merged per-source data. `sACNDiscoveryReceiver` reports sources seen via
 universe discovery, and `sACNMerger` is a standalone HTP / per-address-priority merge engine.
 
+All delegate callbacks are delivered asynchronously on the `delegateQueue` you provide, in the
+order packets were processed. A serial queue is recommended; internal state is safe even if the
+queue is concurrent, and you may call back into a component (for example `information(for:)`)
+from within a callback.
+
 ## Public types
 
 - `sACNSource` - transmit sACN.

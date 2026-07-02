@@ -103,11 +103,12 @@ declares only `iOS`/`macOS`. Three hard blockers plus incidental ones:
 - **Force-unwraps (crash paths):** `Shared/Universe/Source.swift:50` `Host.current().localizedName!`
   (nil on headless/sandboxed macOS); `Receiver/sACNReceiver.swift:120` and
   `Receiver/sACNReceiverGroup.swift:135` force-unwrap a failable `init(...)!`.
-- **Receiver delegate deadlock window:** `sACNReceiverRaw.processDataPacket` delivers via
-  `delegateQueue.sync` (`:642`) while holding `socketDelegateQueue`; a client calling back into the
-  receiver from within a callback can AB/BA deadlock. (TX side uses `delegateQueue.async` - inconsistent.)
-- **Undocumented serial-queue requirement:** `sACNReceiver`/`sACNReceiverGroup` mutate state with no
-  lock of their own - safe only if the client's `delegateQueue` is serial; a concurrent queue races.
+- **Receiver delegate deadlock window** *(fixed in Phase 2)*: `sACNReceiverRaw.processDataPacket`
+  delivered via `delegateQueue.sync` while holding `socketDelegateQueue`; a client calling back into
+  the receiver from within a callback could AB/BA deadlock. Delivery is now `.async`, like TX.
+- **Undocumented serial-queue requirement** *(fixed in Phase 2)*: `sACNReceiver`/`sACNReceiverGroup`
+  mutated state with no lock of their own - safe only if the client's `delegateQueue` was serial.
+  Both now serialize state on internal queues.
 - **Mutable "constants":** `Shared/DMX/DMX.swift:33` `public static var addressCount`; multicast
   prefix statics in `NetworkDefinitions.swift:81,104` are `var` (read-only in practice) - should be `let`.
 - **Hot-path allocation:** `Shared/Data+Extensions.swift` `loadUnaligned` (`:246`, per-call heap
@@ -201,6 +202,12 @@ intended behavior change beyond crash-safety and the one confirmed TX correctnes
 ### Phase 2 - Concurrency Hardening & Sendability (redesign prep)
 **Goal:** make the data model `Sendable`-clean and close the known concurrency-safety gaps *before*
 the actor migration, so the migration is incremental rather than a big-bang.
+
+> **Status: complete** - see docs/modernization/phase-2.md for the executed plan and completion
+> notes (including the strict-concurrency recon inventory that seeds Phase 4). Notable findings
+> during execution: a previously undocumented defect - the PAP-lost callback was delivered directly
+> on the internal socket queue (`ReceiverRawSource.notifyPerAddressLost`) - now fixed; and `Error`
+> already refines `Sendable` (SE-0302), so delegate `Error?` parameters were never a blocker.
 
 - Enable strict concurrency checking incrementally via `swiftSettings`
   (`.enableUpcomingFeature`/`StrictConcurrency` at `.minimal`→`.targeted`).

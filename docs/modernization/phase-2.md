@@ -189,6 +189,42 @@ New suites (`swift-testing`): `ReceiverRawTests.swift`, `ReceiverTests.swift`,
 - `sACNReceiverGroup.remove` gains synchronization only; stop-on-remove semantics (receiver stops
   via deinit on last release) unchanged.
 
+## Completion notes (July 2026)
+
+All workstreams landed. Deviations from this plan and results, in execution order:
+
+- **The stateQueue-targeting-the-client-queue design was rejected empirically.** The plan's Q2
+  approach (internal serial queue with `target: delegateQueue`, sync-down from the client queue
+  assumed inline-safe) is not viable: GCD's deadlock detection **traps with SIGTRAP in
+  `_dispatch_sync_f_slow`** when `sync`ing onto a child queue from its target's context (verified
+  with a minimal standalone reproduction, and caught by the planned `information(for:)`
+  three-context deadlock tests before commit). The risk section's documented fallback was
+  implemented instead: `sACNReceiver` and `sACNReceiverGroup` each own an **independent serial
+  `stateQueue`** (sentinel + `performOnStateQueue`), and delegate notifications **hop asynchronously
+  to the client's delegateQueue** (capture-before-hop). Consequences: callbacks still execute on the
+  client's queue; each type's key is private (no shared hierarchy key); one extra async hop per
+  notification; no `sync` ever crosses component queues.
+- **Additional test seams beyond the plan:** `perAddressPriorityWait` joined `sourceLossTimeout` as
+  an instance timing override (both via the internal `sACNReceiverRaw` initializer);
+  `sACNReceiver.receiver` (the internal raw receiver) was promoted to internal so the merge pipeline
+  is drivable without sockets; `socketsSampling` gained internal read access for sampling-path tests.
+- **Strict-concurrency results:** `targeted` builds **warning-clean** on both targets - no
+  `@preconcurrency` imports were needed (the plan's fallback was unused). CI locks this in with
+  `swift build -Xswiftc -warnings-as-errors`.
+- **Complete-mode recon inventory (the Phase 4 worklist):** 240 diagnostics, all of the expected
+  shape - non-Sendable `self`/`delegate`/`ComponentSocket` captures in `@Sendable` dispatch closures,
+  plus captured-`var` mutations in `checkForSourceLoss`. Per file: `sACNReceiverRaw` 66,
+  `sACNReceiverGroup` 51, `sACNSource` 45, `sACNDiscoveryReceiver` 42, `sACNReceiver` 36. No
+  `@unchecked Sendable` anywhere.
+- **Verification:** 73 tests pass (deterministic, socket-free); the full suite is clean under
+  `swift test --sanitize=thread` locally and in a new CI job; the deadlock regressions were each
+  verified to hang/fail against the pre-fix code before the fix landed; the opt-in loopback test
+  (`SACNKIT_NETWORK_TESTS=1`) passes locally in ~1.5 s (one sampling period).
+- **Doc corrections recorded in MODERNIZATION.md:** the receiver delegate deadlock window and the
+  serial-queue requirement are closed; the newly found wrong-queue PAP-lost delivery
+  (`ReceiverRawSource.notifyPerAddressLost`) is fixed; `Error` already refines `Sendable` (SE-0302),
+  so delegate `Error?` parameters were never a blocker.
+
 ## Key files
 
 `Package.swift`, `Sources/sACNKit/Receiver/sACNReceiverRaw.swift`,

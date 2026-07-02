@@ -19,9 +19,18 @@ jobs:
       - name: Swift version
         run: swift --version
       - name: Build
-        run: swift build
+        # Warnings-as-errors locks in the zero-warning state under StrictConcurrency=targeted.
+        run: swift build -Xswiftc -warnings-as-errors
       - name: Test
         run: swift test
+
+  thread-sanitizer:
+    name: Thread Sanitizer (macOS)
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test with TSan
+        run: swift test --sanitize=thread
 
   format:
     name: Format check
