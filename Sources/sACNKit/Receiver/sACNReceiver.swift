@@ -34,11 +34,15 @@ import Foundation
 /// It also supports per-address priority start code (0xdd) merging.
 public class sACNReceiver {
 
+    /// A key used to identify the state queue for the current execution context.
+    private static let stateQueueSpecificKey = DispatchSpecificKey<Bool>()
+
     /// The universe for this receiver.
     public let universe: UInt16
 
     /// The receiver.
-    private let receiver: sACNReceiverRaw
+    /// Internal to allow tests to drive the merge pipeline without sockets.
+    let receiver: sACNReceiverRaw
 
     /// The merger.
     private let merger: sACNMerger
@@ -68,7 +72,7 @@ public class sACNReceiver {
     ///   - delegate: The delegate to receive notifications.
     ///
     public func setDelegate(_ delegate: sACNReceiverDelegate?) {
-        delegateQueue.sync {
+        performOnStateQueue {
             self.delegate = delegate
         }
     }
@@ -79,7 +83,7 @@ public class sACNReceiver {
     ///   - delegate: The delegate to receive notifications.
     ///
     public func setDebugDelegate(_ delegate: sACNComponentDebugDelegate?) {
-        delegateQueue.sync {
+        performOnStateQueue {
             self.debugDelegate = delegate
         }
     }
@@ -92,6 +96,21 @@ public class sACNReceiver {
 
     /// The queue on which to send delegate notifications.
     private let delegateQueue: DispatchQueue
+
+    /// The serial queue on which state is mutated.
+    ///
+    /// State stays serialized on this queue even if the client's delegate queue is
+    /// concurrent; delegate notifications hop asynchronously to the delegate queue.
+    private let stateQueue: DispatchQueue
+
+    /// Executes work synchronized on the state queue, immediately when already on it.
+    private func performOnStateQueue<T>(_ work: () throws -> T) rethrows -> T {
+        if DispatchQueue.getSpecific(key: Self.stateQueueSpecificKey) == true {
+            try work()
+        } else {
+            try stateQueue.sync { try work() }
+        }
+    }
 
     // MARK: - Initialization
 
@@ -120,10 +139,13 @@ public class sACNReceiver {
         guard universe.validUniverse() else { return nil }
 
         self.universe = universe
+        let stateQueue = DispatchQueue(label: "com.danielmurfin.sACNKit.receiverState-\(universe)")
+        stateQueue.setSpecific(key: Self.stateQueueSpecificKey, value: true)
+        self.stateQueue = stateQueue
         guard
             let receiver = sACNReceiverRaw(
                 ipMode: ipMode, interfaces: interfaces, universe: universe, sourceLimit: sourceLimit, filterPreviewData: filterPreviewData,
-                filterCIDs: filterCIDs, delegateQueue: delegateQueue)
+                filterCIDs: filterCIDs, delegateQueue: stateQueue)
         else { return nil }
         self.receiver = receiver
         let config = sACNMergerConfig(sourceLimit: sourceLimit)
@@ -177,12 +199,12 @@ public class sACNReceiver {
     ///
     /// - Returns: Source information.
     ///
-    /// - Precondition: Must be called on the `delegateQueue` provided an initialization.
+    /// May be called from any queue, including from within delegate callbacks.
     public func information(for sourceId: UUID) throws -> sACNReceiverSource {
-        dispatchPrecondition(condition: .onQueue(delegateQueue))
-
-        guard let source = sources[sourceId] else { throw sACNReceiverValidationError.sourceDoesNotExist }
-        return sACNReceiverSource(receiverSource: source)
+        try performOnStateQueue {
+            guard let source = sources[sourceId] else { throw sACNReceiverValidationError.sourceDoesNotExist }
+            return sACNReceiverSource(receiverSource: source)
+        }
     }
 
     // MARK: Merging
@@ -238,7 +260,8 @@ public class sACNReceiver {
     /// The receiver started sampling.
     private func samplingStarted() {
         isSampling = true
-        delegate?.receiverStartedSampling(self)
+        let delegate = delegate
+        delegateQueue.async { delegate?.receiverStartedSampling(self) }
     }
 
     /// The receiver ended sampling.
@@ -272,7 +295,8 @@ public class sACNReceiver {
             notifyMerge()
         }
 
-        delegate?.receiverEndedSampling(self)
+        let delegate = delegate
+        delegateQueue.async { delegate?.receiverEndedSampling(self) }
     }
 
     /// The receiver lost sources.
@@ -296,7 +320,8 @@ public class sACNReceiver {
             notifyMerge()
         }
 
-        delegate?.receiver(self, lostSources: sourceIds)
+        let delegate = delegate
+        delegateQueue.async { delegate?.receiver(self, lostSources: sourceIds) }
     }
 
     /// The receiver lost per-address priority for a source.
@@ -317,7 +342,8 @@ public class sACNReceiver {
 
     /// The receiver discovered too many sources.
     private func sourceLimitExceeded() {
-        delegate?.receiverExceededSources(self)
+        let delegate = delegate
+        delegateQueue.async { delegate?.receiverExceededSources(self) }
     }
 
     /// Notifies the new merge values.
@@ -326,7 +352,8 @@ public class sACNReceiver {
         let mergedNotification = sACNReceiverMergedData(
             universe: universe, levels: merger.levels, winners: merger.winners, activeSources: activeSources,
             numberOfActiveSources: activeSources.count)
-        delegate?.receiverMergedData(self, mergedData: mergedNotification)
+        let delegate = delegate
+        delegateQueue.async { delegate?.receiverMergedData(self, mergedData: mergedNotification) }
     }
 
 }
@@ -336,7 +363,8 @@ public class sACNReceiver {
 /// sACN Receiver Raw Delegate Conformance.
 extension sACNReceiver: sACNReceiverRawDelegate {
     public func receiver(_ receiver: sACNReceiverRaw, interface: String?, socketDidCloseWithError error: Error?) {
-        delegate?.receiver(self, interface: interface, socketDidCloseWithError: error)
+        let delegate = delegate
+        delegateQueue.async { delegate?.receiver(self, interface: interface, socketDidCloseWithError: error) }
     }
 
     public func receiverReceivedUniverseData(_ receiver: sACNReceiverRaw, sourceData: sACNReceiverRawSourceData) {

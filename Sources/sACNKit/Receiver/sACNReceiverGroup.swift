@@ -35,6 +35,9 @@ import Foundation
 /// To allow discrete settings, instantiate and manage a number of `sACNReceiver`s directly.
 final public class sACNReceiverGroup {
 
+    /// A key used to identify the state queue for the current execution context.
+    private static let stateQueueSpecificKey = DispatchSpecificKey<Bool>()
+
     /// The Internet Protocol version(s) used by the receivers in this group.
     private let ipMode: sACNIPMode
 
@@ -49,7 +52,7 @@ final public class sACNReceiverGroup {
     ///   - delegate: The delegate to receive notifications.
     ///
     public func setDelegate(_ delegate: sACNReceiverGroupDelegate?) {
-        delegateQueue.sync {
+        performOnStateQueue {
             self.delegate = delegate
         }
     }
@@ -60,7 +63,7 @@ final public class sACNReceiverGroup {
     ///   - delegate: The delegate to receive notifications.
     ///
     public func setDebugDelegate(_ delegate: sACNComponentDebugDelegate?) {
-        delegateQueue.sync {
+        performOnStateQueue {
             self.debugDelegate = delegate
         }
     }
@@ -73,6 +76,22 @@ final public class sACNReceiverGroup {
 
     /// The queue on which to send delegate notifications.
     private let delegateQueue: DispatchQueue
+
+    /// The serial queue on which state is mutated.
+    ///
+    /// State stays serialized on this queue even if the client's delegate queue is
+    /// concurrent; delegate notifications hop asynchronously to the delegate queue.
+    /// Child receivers deliver their callbacks on this queue.
+    private let stateQueue: DispatchQueue
+
+    /// Executes work synchronized on the state queue, immediately when already on it.
+    private func performOnStateQueue<T>(_ work: () throws -> T) rethrows -> T {
+        if DispatchQueue.getSpecific(key: Self.stateQueueSpecificKey) == true {
+            try work()
+        } else {
+            try stateQueue.sync { try work() }
+        }
+    }
 
     // MARK: General
 
@@ -115,6 +134,9 @@ final public class sACNReceiverGroup {
         self.filterCIDs = filterCIDs
         receivers = [:]
         self.delegateQueue = delegateQueue
+        let stateQueue = DispatchQueue(label: "com.danielmurfin.sACNKit.receiverGroupState")
+        stateQueue.setSpecific(key: Self.stateQueueSpecificKey, value: true)
+        self.stateQueue = stateQueue
     }
 
     // MARK: Public API
@@ -132,13 +154,13 @@ final public class sACNReceiverGroup {
     public func add(universe: UInt16) throws {
         guard universe.validUniverse() else { throw sACNReceiverValidationError.universeNumberInvalid }
 
-        try delegateQueue.sync { [self] in
+        try performOnStateQueue { [self] in
             guard receivers[universe] == nil else { return }
 
             guard
                 let receiver = sACNReceiver(
                     ipMode: ipMode, interfaces: interfaces, universe: universe, sourceLimit: sourceLimit, filterPreviewData: filterPreviewData,
-                    filterCIDs: filterCIDs, delegateQueue: delegateQueue)
+                    filterCIDs: filterCIDs, delegateQueue: stateQueue)
             else {
                 throw sACNReceiverValidationError.universeNumberInvalid
             }
@@ -156,7 +178,9 @@ final public class sACNReceiverGroup {
     ///    - universe: The universe number to remove.
     ///
     public func remove(universe: UInt16) {
-        receivers.removeValue(forKey: universe)
+        performOnStateQueue {
+            _ = receivers.removeValue(forKey: universe)
+        }
     }
 
     /// Updates the interfaces on which this receiver group listens for sACN Universe Discovery and Data messages.
@@ -172,7 +196,7 @@ final public class sACNReceiverGroup {
     public func updateInterfaces(_ newInterfaces: Set<String> = []) throws {
         precondition(!ipMode.usesIPv6() || !newInterfaces.isEmpty, "At least one interface must be provided for IPv6.")
 
-        try delegateQueue.sync {
+        try performOnStateQueue {
             try receivers.forEach { _, receiver in
                 try receiver.updateInterfaces(newInterfaces)
             }
@@ -188,9 +212,13 @@ final public class sACNReceiverGroup {
     /// - Throws: An `sACNReceiverValidationError` if the source cannot be found.
     ///
     /// - Returns: Source information.
+    ///
+    /// May be called from any queue, including from within delegate callbacks.
     public func information(for sourceId: UUID, on universe: UInt16) throws -> sACNReceiverSource {
-        guard let receiver = receivers[universe] else { throw sACNReceiverValidationError.sourceDoesNotExist }
-        return try receiver.information(for: sourceId)
+        try performOnStateQueue {
+            guard let receiver = receivers[universe] else { throw sACNReceiverValidationError.sourceDoesNotExist }
+            return try receiver.information(for: sourceId)
+        }
     }
 
 }
@@ -200,26 +228,32 @@ final public class sACNReceiverGroup {
 /// sACN Receiver Delegate Conformance.
 extension sACNReceiverGroup: sACNReceiverDelegate {
     public func receiver(_ receiver: sACNReceiver, interface: String?, socketDidCloseWithError error: Error?) {
-        delegate?.receiverGroup(self, interface: interface, socketDidCloseWithError: error, forUniverse: receiver.universe)
+        let delegate = delegate
+        delegateQueue.async { delegate?.receiverGroup(self, interface: interface, socketDidCloseWithError: error, forUniverse: receiver.universe) }
     }
 
     public func receiverMergedData(_ receiver: sACNReceiver, mergedData: sACNReceiverMergedData) {
-        delegate?.receiverGroupMergedData(self, mergedData: mergedData)
+        let delegate = delegate
+        delegateQueue.async { delegate?.receiverGroupMergedData(self, mergedData: mergedData) }
     }
 
     public func receiverStartedSampling(_ receiver: sACNReceiver) {
-        delegate?.receiverGroupStartedSampling(self, forUniverse: receiver.universe)
+        let delegate = delegate
+        delegateQueue.async { delegate?.receiverGroupStartedSampling(self, forUniverse: receiver.universe) }
     }
 
     public func receiverEndedSampling(_ receiver: sACNReceiver) {
-        delegate?.receiverGroupEndedSampling(self, forUniverse: receiver.universe)
+        let delegate = delegate
+        delegateQueue.async { delegate?.receiverGroupEndedSampling(self, forUniverse: receiver.universe) }
     }
 
     public func receiver(_ receiver: sACNReceiver, lostSources: [UUID]) {
-        delegate?.receiverGroup(self, lostSources: lostSources, forUniverse: receiver.universe)
+        let delegate = delegate
+        delegateQueue.async { delegate?.receiverGroup(self, lostSources: lostSources, forUniverse: receiver.universe) }
     }
 
     public func receiverExceededSources(_ receiver: sACNReceiver) {
-        delegate?.receiverGroupExceededSources(self, forUniverse: receiver.universe)
+        let delegate = delegate
+        delegateQueue.async { delegate?.receiverGroupExceededSources(self, forUniverse: receiver.universe) }
     }
 }
