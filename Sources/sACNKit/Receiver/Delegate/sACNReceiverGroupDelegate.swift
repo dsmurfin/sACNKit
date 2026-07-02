@@ -40,7 +40,7 @@ public protocol sACNReceiverGroupDelegate: AnyObject {
 
     /// Called when new data is received from a source for a universe.
     ///
-    /// Note: This call is synchronous, so should be handled quickly.
+    /// Note: This call occurs asynchronously on the delegate queue, in the order packets were processed.
     ///
     /// - Parameters:
     ///    - receiverGroup: The receiver group.

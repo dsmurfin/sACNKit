@@ -237,6 +237,27 @@ struct ReceiverRawTests {
         #expect(!harness.waitForData(timeout: Self.quietTimeout), "a terminated stream should not create a source")
     }
 
+    @Test("A client may call back into the receiver from within a data callback")
+    func reentrantCallbackDoesNotDeadlock() {
+        let harness = makeHarness()
+        let cid = UUID()
+
+        let reentered = DispatchSemaphore(value: 0)
+        harness.delegate.onData = { [weak receiver = harness.receiver] _ in
+            // calling back into the receiver requires its internal queue and
+            // must not deadlock against in-flight packet processing
+            _ = receiver?.isListening
+            receiver?.stop()
+            reentered.signal()
+        }
+
+        harness.inject(dataPacket(cid: cid, sequence: 0))
+        harness.inject(dataPacket(cid: cid, sequence: 1, startCode: .perAddressPriority, values: Array(repeating: 100, count: 512)))
+        #expect(
+            reentered.wait(timeout: .now() + Self.callbackTimeout) == .success,
+            "re-entering the receiver from a data callback must not deadlock")
+    }
+
     @Test("Per-address priority loss is notified exactly once, on the delegate queue")
     func perAddressPriorityLoss() throws {
         let harness = makeHarness()

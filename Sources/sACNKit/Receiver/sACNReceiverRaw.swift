@@ -678,8 +678,7 @@ extension sACNReceiverRaw {
         // only notify if this is not preview data, or if we shouldn't filter it
         guard !previewData || !filterPreviewData else { return }
 
-        // data is provided synchronously
-        delegateQueue.sync { self.delegate?.receiverReceivedUniverseData(self, sourceData: universeData) }
+        delegateQueue.async { self.delegate?.receiverReceivedUniverseData(self, sourceData: universeData) }
     }
 
     /// Decides whether level data should be notified for a source.
