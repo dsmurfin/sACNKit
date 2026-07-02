@@ -8,7 +8,7 @@ standalone HTP / per-address-priority merge engine.
 
 ## Requirements
 
-- Swift 6.2 toolchain (Xcode 17 or newer)
+- Swift 6.2 toolchain (Xcode 26 or newer)
 - iOS 17+ / macOS 14+ / tvOS 17+ / visionOS 1+
 
 > The library is undergoing a phased modernization (SwiftNIO transport, a Swift Concurrency API, and

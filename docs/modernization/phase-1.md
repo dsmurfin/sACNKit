@@ -155,6 +155,35 @@ incrementally. Suites (all `@testable import sACNKit`; layers/merger/SourceUnive
 - Making public `DMX.addressCount` a `let` is technically source-breaking for external mutators (none
   known); acceptable pre-stable.
 
+## Post-review revisions (July 2026)
+
+A review of the completed Phase 1 branch against this plan found the work faithful overall but
+identified gaps, fixed in follow-up commits:
+
+- **The H4 indexing regression test did not cover the bug.** The original test used two *active*
+  universes, a state in which the filtered and full universe arrays are identical, so the pre-fix
+  builder passed it. Replaced with a real present-but-inactive scenario (verified to fail against
+  the pre-fix builder). Note: the public API only reaches "present-but-inactive alongside active"
+  while listening (`shouldOutput(true)` resets every universe; non-termination emission is gated on
+  `_shouldOutput`), so `sACNSource.universes` gained internal read access as a test seam - the same
+  precedent as the `UniverseData` promotion in workstream G.
+- **Missing H1/H4 coverage added:** keep-alive cadence (levels at transmit counters 0/11/22/33, PAP
+  only at counter 0, across a 44-frame cycle); `DataFramingLayer` and `UniverseDiscoveryFramingLayer`
+  round-trips; malformed cases (bad vectors, out-of-range priority, invalid universe, odd
+  universe-list byte count, corrupted ACN packet identifier).
+- **Toolchain floor was not actually enforced.** This plan claimed tools-version 6.0 "requires the
+  Swift 6.2 toolchain" - incorrect: tools-version 6.0 accepts 6.0/6.1 toolchains, and CI's macos-15
+  default Xcode (16.4) ships Swift 6.1. Corrected by bumping to `swift-tools-version: 6.2` and
+  running CI on macos-26 (Xcode 26 = Swift 6.2+). The `swiftLanguageModes: [.v5]` pin is unchanged -
+  language mode is independent of toolchain version. Docs also referred to "Xcode 17", which does
+  not exist (Swift 6.2 ships with Xcode 26); corrected in README and CONTRIBUTING.
+- **Remaining hot-path allocation removed:** `Data.toUUID` (per-CID, per packet) now uses a single
+  stdlib `loadUnaligned(as: uuid_t.self)` instead of a growing byte array + `NSUUID`.
+- **Deferred plan items completed:** `Package.resolved` regenerated (v1 -> version 3 schema); the
+  vestigial `import Network` dropped from `ComponentSocket.swift` (item B).
+- **Accepted deviation:** the swift-format pass reformatted `Vendor/CwlDispatch.swift` despite the
+  "never edit by hand" rule; accepted as mechanical-only, since the file is removed in Phase 3.
+
 ## Key files
 `Package.swift`, `Package.resolved`, `.gitignore`, `.swiftpm/` (untrack), `Shared/Universe/Source.swift`,
 `Shared/MonotonicTimer.swift`, `Shared/DMX/DMX.swift`, `Shared/Definitions/NetworkDefinitions.swift`,
