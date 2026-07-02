@@ -909,8 +909,7 @@ extension sACNSource {
 
         let rootLayer = rootLayer
 
-        for (index, _) in activeUniverses.enumerated() {
-            let universe = universes[index]
+        for universe in activeUniverses {
 
             // should levels be sent?
             let sendLevels: Bool

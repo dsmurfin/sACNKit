@@ -34,6 +34,15 @@ struct LayerTests {
         }
     }
 
+    @Test("DMPLayer parse throws its own error type for a bad flags/length field")
+    func dmpBadFlagsAndLengthErrorType() {
+        var data = DMPLayer.createAsData(startCode: .null, values: Array(repeating: 0, count: 512))
+        data[1] = 0xFF  // corrupt the flags/length so it no longer matches the data
+        #expect(throws: DMPLayerValidationError.self) {
+            try DMPLayer.parse(fromData: data)
+        }
+    }
+
     // MARK: - UniverseDiscoveryLayer (self-round-trips: flags/length are computed on build)
 
     @Test(

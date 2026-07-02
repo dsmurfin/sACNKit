@@ -31,6 +31,17 @@ struct SourceTransmitTests {
         #expect(source.buildDataMessages().messages.count == 0)  // dirty 0, suppressed
     }
 
+    @Test("Every active universe is processed on each build")
+    func allActiveUniversesProcessed() throws {
+        let source = sACNSource(delegateQueue: DispatchQueue(label: "test.source"))
+        try source.addUniverse(sACNSourceUniverse(number: 1, levels: Array(repeating: 0, count: 512)))
+        try source.addUniverse(sACNSourceUniverse(number: 7, levels: Array(repeating: 0, count: 512)))
+        source.shouldOutput(true)
+
+        let numbers = Set(source.buildDataMessages().messages.map { $0.universeNumber })
+        #expect(numbers == [1, 7])
+    }
+
     @Test("Emitted packets carry incrementing sequence numbers")
     func sequenceIncrements() throws {
         let source = try activeSource()

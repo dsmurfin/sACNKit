@@ -34,15 +34,15 @@ import Foundation
 ///
 /// To allow discrete settings, instantiate and manage a number of `sACNReceiver`s directly.
 final public class sACNReceiverGroup {
-    
+
     /// The Internet Protocol version(s) used by the receivers in this group.
     private let ipMode: sACNIPMode
-    
+
     /// The interfaces on which the receivers in this group should receive data.
     private var interfaces: Set<String> = []
-    
+
     // MARK: Delegate
-    
+
     /// Changes the receiver delegate of this receiver to the the object passed.
     ///
     /// - Parameters:
@@ -53,7 +53,7 @@ final public class sACNReceiverGroup {
             self.delegate = delegate
         }
     }
-    
+
     /// Changes the debug delegate of this receiver to the the object passed.
     ///
     /// - Parameters:
@@ -64,32 +64,32 @@ final public class sACNReceiverGroup {
             self.debugDelegate = delegate
         }
     }
-    
+
     /// The delegate which receives notifications from this receiver.
     private weak var delegate: sACNReceiverGroupDelegate?
-    
+
     /// The delegate which receives debug log messages from this receiver.
     private weak var debugDelegate: sACNComponentDebugDelegate?
 
     /// The queue on which to send delegate notifications.
     private let delegateQueue: DispatchQueue
-    
+
     // MARK: General
-    
+
     /// Whether preview data is filtered by this receivers.
     private let filterPreviewData: Bool
-    
+
     /// An optional limit on the number of sources the receivers in this group accept.
     private let sourceLimit: Int?
-    
+
     /// A list of CIDs this receiver should filter.
     private let filterCIDs: Set<UUID>
-    
+
     /// The receivers, identified by their universe.
     private var receivers: [UInt16: sACNReceiver]
-    
+
     // MARK: - Initialization
-    
+
     /// Creates a new receiver to receive sACN for one or more universes.
     ///
     /// - Parameters:
@@ -102,7 +102,10 @@ final public class sACNReceiverGroup {
     ///
     /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interfaces must not be empty.
     ///
-    public init(ipMode: sACNIPMode = .ipv4Only, interfaces: Set<String> = [], sourceLimit: Int? = 4, filterPreviewData: Bool = true, filterCIDs: Set<UUID> = [], delegateQueue: DispatchQueue) {
+    public init(
+        ipMode: sACNIPMode = .ipv4Only, interfaces: Set<String> = [], sourceLimit: Int? = 4, filterPreviewData: Bool = true,
+        filterCIDs: Set<UUID> = [], delegateQueue: DispatchQueue
+    ) {
         precondition(!ipMode.usesIPv6() || !interfaces.isEmpty, "At least one interface must be provided for IPv6.")
 
         self.ipMode = ipMode
@@ -113,9 +116,9 @@ final public class sACNReceiverGroup {
         receivers = [:]
         self.delegateQueue = delegateQueue
     }
-    
+
     // MARK: Public API
-    
+
     /// Adds a new universe to this receiver group.
     ///
     /// The universe number must be valid. If the universe has already been added,
@@ -128,17 +131,23 @@ final public class sACNReceiverGroup {
     ///
     public func add(universe: UInt16) throws {
         guard universe.validUniverse() else { throw sACNReceiverValidationError.universeNumberInvalid }
-        
+
         try delegateQueue.sync { [self] in
             guard receivers[universe] == nil else { return }
-            
-            let receiver = sACNReceiver(ipMode: ipMode, interfaces: interfaces, universe: universe, sourceLimit: sourceLimit, filterPreviewData: filterPreviewData, filterCIDs: filterCIDs, delegateQueue: delegateQueue)!
+
+            guard
+                let receiver = sACNReceiver(
+                    ipMode: ipMode, interfaces: interfaces, universe: universe, sourceLimit: sourceLimit, filterPreviewData: filterPreviewData,
+                    filterCIDs: filterCIDs, delegateQueue: delegateQueue)
+            else {
+                throw sACNReceiverValidationError.universeNumberInvalid
+            }
             receivers[universe] = receiver
             receiver.setDelegate(self)
             try receiver.start()
         }
     }
-    
+
     /// Removes a universe from this receiver group.
     ///
     /// If this universe does not exist, this returns successfully.
@@ -149,7 +158,7 @@ final public class sACNReceiverGroup {
     public func remove(universe: UInt16) {
         receivers.removeValue(forKey: universe)
     }
-    
+
     /// Updates the interfaces on which this receiver group listens for sACN Universe Discovery and Data messages.
     ///
     /// - Parameters:
@@ -169,7 +178,7 @@ final public class sACNReceiverGroup {
             }
         }
     }
-    
+
     /// Retrieves source information such as CID, IP Address and name using a sources identifier.
     ///
     ///- Parameters:
@@ -183,7 +192,7 @@ final public class sACNReceiverGroup {
         guard let receiver = receivers[universe] else { throw sACNReceiverValidationError.sourceDoesNotExist }
         return try receiver.information(for: sourceId)
     }
-    
+
 }
 
 /// sACN Receiver Group Extension
@@ -193,23 +202,23 @@ extension sACNReceiverGroup: sACNReceiverDelegate {
     public func receiver(_ receiver: sACNReceiver, interface: String?, socketDidCloseWithError error: Error?) {
         delegate?.receiverGroup(self, interface: interface, socketDidCloseWithError: error, forUniverse: receiver.universe)
     }
-    
+
     public func receiverMergedData(_ receiver: sACNReceiver, mergedData: sACNReceiverMergedData) {
         delegate?.receiverGroupMergedData(self, mergedData: mergedData)
     }
-    
+
     public func receiverStartedSampling(_ receiver: sACNReceiver) {
         delegate?.receiverGroupStartedSampling(self, forUniverse: receiver.universe)
     }
-    
+
     public func receiverEndedSampling(_ receiver: sACNReceiver) {
         delegate?.receiverGroupEndedSampling(self, forUniverse: receiver.universe)
     }
-    
+
     public func receiver(_ receiver: sACNReceiver, lostSources: [UUID]) {
         delegate?.receiverGroup(self, lostSources: lostSources, forUniverse: receiver.universe)
     }
-    
+
     public func receiverExceededSources(_ receiver: sACNReceiver) {
         delegate?.receiverGroupExceededSources(self, forUniverse: receiver.universe)
     }
