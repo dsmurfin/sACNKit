@@ -97,8 +97,10 @@ final public class sACNSource {
     ///   - delegate: The delegate to receive notifications.
     ///
     public func setDelegate(_ delegate: sACNSourceDelegate?) {
-        delegateQueue.sync {
+        if DispatchQueue.getSpecific(key: Self.socketDelegateQueueSpecificKey) == true {
             self.delegate = delegate
+        } else {
+            socketDelegateQueue.sync { self.delegate = delegate }
         }
     }
 
@@ -108,8 +110,10 @@ final public class sACNSource {
     ///   - delegate: The delegate to receive notifications.
     ///
     public func setDebugDelegate(_ delegate: sACNComponentDebugDelegate?) {
-        delegateQueue.sync {
+        if DispatchQueue.getSpecific(key: Self.socketDelegateQueueSpecificKey) == true {
             self.debugDelegate = delegate
+        } else {
+            socketDelegateQueue.sync { self.debugDelegate = delegate }
         }
     }
 
@@ -281,8 +285,9 @@ final public class sACNSource {
 
             if delegateTransmissionState != true && !universes.isEmpty {
                 delegateTransmissionState = true
+                let delegate = delegate
                 delegateQueue.async {
-                    self.delegate?.transmissionStarted()
+                    delegate?.transmissionStarted()
                 }
             }
         }
@@ -458,8 +463,9 @@ final public class sACNSource {
 
             if _isListening && delegateTransmissionState != true {
                 delegateTransmissionState = true
+                let delegate = delegate
                 delegateQueue.async {
-                    self.delegate?.transmissionStarted()
+                    delegate?.transmissionStarted()
                 }
             }
 
@@ -750,7 +756,8 @@ final public class sACNSource {
             }
         }
 
-        delegateQueue.async { self.debugDelegate?.debugLog("Sending universe discovery message(s) multicast") }
+        let debugDelegate = debugDelegate
+        delegateQueue.async { debugDelegate?.debugLog("Sending universe discovery message(s) multicast") }
     }
 
     // MARK: Build and Update Data
@@ -821,8 +828,9 @@ private extension sACNSource {
             // notify transmission ended (once)
             if delegateTransmissionState != false {
                 delegateTransmissionState = false
+                let delegate = delegate
                 delegateQueue.async {
-                    self.delegate?.transmissionEnded()
+                    delegate?.transmissionEnded()
                 }
             }
 
@@ -1077,7 +1085,8 @@ extension sACNSource: ComponentSocketDelegate {
     ///
     func socket(_ socket: ComponentSocket, socketDidCloseWithError error: Error?) {
         guard error != nil, self._isListening else { return }
-        delegateQueue.async { self.delegate?.source(self, interface: socket.interface, socketDidCloseWithError: error) }
+        let delegate = delegate
+        delegateQueue.async { delegate?.source(self, interface: socket.interface, socketDidCloseWithError: error) }
     }
 
     /// Called when a debug socket log is produced.
@@ -1087,6 +1096,7 @@ extension sACNSource: ComponentSocketDelegate {
     ///    - logMessage: The debug message.
     ///
     func debugLog(for socket: ComponentSocket, with logMessage: String) {
-        delegateQueue.async { self.debugDelegate?.debugSocketLog(logMessage) }
+        let debugDelegate = debugDelegate
+        delegateQueue.async { debugDelegate?.debugSocketLog(logMessage) }
     }
 }

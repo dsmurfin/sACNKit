@@ -243,10 +243,11 @@ struct ReceiverRawTests {
         let cid = UUID()
 
         let reentered = DispatchSemaphore(value: 0)
-        harness.delegate.onData = { [weak receiver = harness.receiver] _ in
+        harness.delegate.onData = { [weak receiver = harness.receiver, weak delegate = harness.delegate] _ in
             // calling back into the receiver requires its internal queue and
             // must not deadlock against in-flight packet processing
             _ = receiver?.isListening
+            receiver?.setDelegate(delegate)
             receiver?.stop()
             reentered.signal()
         }

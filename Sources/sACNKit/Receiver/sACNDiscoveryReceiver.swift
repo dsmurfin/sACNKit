@@ -62,8 +62,10 @@ public class sACNDiscoveryReceiver {
     ///   - delegate: The delegate to receive notifications.
     ///
     public func setDelegate(_ delegate: sACNDiscoveryReceiverDelegate?) {
-        delegateQueue.sync {
+        if DispatchQueue.getSpecific(key: Self.socketDelegateQueueSpecificKey) == true {
             self.delegate = delegate
+        } else {
+            socketDelegateQueue.sync { self.delegate = delegate }
         }
     }
 
@@ -73,8 +75,10 @@ public class sACNDiscoveryReceiver {
     ///   - delegate: The delegate to receive notifications.
     ///
     public func setDebugDelegate(_ delegate: sACNComponentDebugDelegate?) {
-        delegateQueue.sync {
+        if DispatchQueue.getSpecific(key: Self.socketDelegateQueueSpecificKey) == true {
             self.debugDelegate = delegate
+        } else {
+            socketDelegateQueue.sync { self.debugDelegate = delegate }
         }
     }
 
@@ -343,7 +347,8 @@ public class sACNDiscoveryReceiver {
 
         // notify all lost sources
         if !removeLostSources.isEmpty {
-            delegateQueue.async { self.delegate?.discoveryReceiver(self, lostSources: Array(removeLostSources)) }
+            let delegate = delegate
+            delegateQueue.async { delegate?.discoveryReceiver(self, lostSources: Array(removeLostSources)) }
         }
 
         // remove any expired sources
@@ -382,11 +387,14 @@ extension sACNDiscoveryReceiver {
                 break
             }
         } catch let error as RootLayerValidationError {
-            delegateQueue.async { self.debugDelegate?.debugLog(error.logDescription) }
+            let debugDelegate = debugDelegate
+            delegateQueue.async { debugDelegate?.debugLog(error.logDescription) }
         } catch let error as DataFramingLayerValidationError {
-            delegateQueue.async { self.debugDelegate?.debugLog(error.logDescription) }
+            let debugDelegate = debugDelegate
+            delegateQueue.async { debugDelegate?.debugLog(error.logDescription) }
         } catch let error as DMPLayerValidationError {
-            delegateQueue.async { self.debugDelegate?.debugLog(error.logDescription) }
+            let debugDelegate = debugDelegate
+            delegateQueue.async { debugDelegate?.debugLog(error.logDescription) }
         } catch {
             // unknown error
         }
@@ -480,7 +488,8 @@ extension sACNDiscoveryReceiver {
                             source.dirty = false
                             source.lastNotifiedUniverseCount = source.universeCount
                             let info = sACNDiscoveryReceiverSource(cid: cid, name: name, universes: source.universes)
-                            delegateQueue.async { self.delegate?.discoveryReceiverReceivedInfo(self, sourceInformation: info) }
+                            let delegate = delegate
+                            delegateQueue.async { delegate?.discoveryReceiverReceivedInfo(self, sourceInformation: info) }
                         }
                     }
                 }
@@ -531,7 +540,8 @@ extension sACNDiscoveryReceiver: ComponentSocketDelegate {
     ///
     func socket(_ socket: ComponentSocket, socketDidCloseWithError error: Error?) {
         guard error != nil, self._isListening else { return }
-        delegateQueue.async { self.delegate?.discoveryReceiver(self, interface: socket.interface, socketDidCloseWithError: error) }
+        let delegate = delegate
+        delegateQueue.async { delegate?.discoveryReceiver(self, interface: socket.interface, socketDidCloseWithError: error) }
     }
 
     /// Called when a debug socket log is produced.
@@ -541,6 +551,7 @@ extension sACNDiscoveryReceiver: ComponentSocketDelegate {
     ///    - logMessage: The debug message.
     ///
     func debugLog(for socket: ComponentSocket, with logMessage: String) {
-        delegateQueue.async { self.debugDelegate?.debugSocketLog(logMessage) }
+        let debugDelegate = debugDelegate
+        delegateQueue.async { debugDelegate?.debugSocketLog(logMessage) }
     }
 }

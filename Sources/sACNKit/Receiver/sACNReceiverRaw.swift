@@ -72,8 +72,10 @@ public class sACNReceiverRaw {
     ///   - delegate: The delegate to receive notifications.
     ///
     public func setDelegate(_ delegate: sACNReceiverRawDelegate?) {
-        delegateQueue.sync {
+        if DispatchQueue.getSpecific(key: Self.socketDelegateQueueSpecificKey) == true {
             self.delegate = delegate
+        } else {
+            socketDelegateQueue.sync { self.delegate = delegate }
         }
     }
 
@@ -83,8 +85,10 @@ public class sACNReceiverRaw {
     ///   - delegate: The delegate to receive notifications.
     ///
     public func setDebugDelegate(_ delegate: sACNComponentDebugDelegate?) {
-        delegateQueue.sync {
+        if DispatchQueue.getSpecific(key: Self.socketDelegateQueueSpecificKey) == true {
             self.debugDelegate = delegate
+        } else {
+            socketDelegateQueue.sync { self.debugDelegate = delegate }
         }
     }
 
@@ -465,7 +469,8 @@ public class sACNReceiverRaw {
 
         // notify sampling has started
         if notify {
-            delegateQueue.async { self.delegate?.receiverStartedSampling(self) }
+            let delegate = delegate
+            delegateQueue.async { delegate?.receiverStartedSampling(self) }
         }
 
         let timer = DispatchSource.singleTimer(interval: Self.sampleTime, leeway: Self.timingLeeway, queue: Self.timerQueue) { [weak self] in
@@ -500,7 +505,8 @@ public class sACNReceiverRaw {
                 self.sampleTimer = nil
 
                 // notify sampling has ended
-                delegateQueue.async { self.delegate?.receiverEndedSampling(self) }
+                let delegate = delegate
+                delegateQueue.async { delegate?.receiverEndedSampling(self) }
             }
         }
     }
@@ -540,7 +546,8 @@ public class sACNReceiverRaw {
 
         // notify all lost sources
         if !notifyLostSources.isEmpty {
-            delegateQueue.async { self.delegate?.receiver(self, lostSources: Array(notifyLostSources)) }
+            let delegate = delegate
+            delegateQueue.async { delegate?.receiver(self, lostSources: Array(notifyLostSources)) }
         }
 
         // remove any expired sources
@@ -582,11 +589,14 @@ extension sACNReceiverRaw {
                 try processDataPacket(rootLayer: rootLayer, ipFamily: ipFamily, socketId: socketId, hostname: hostname)
             }
         } catch let error as RootLayerValidationError {
-            delegateQueue.async { self.debugDelegate?.debugLog(error.logDescription) }
+            let debugDelegate = debugDelegate
+            delegateQueue.async { debugDelegate?.debugLog(error.logDescription) }
         } catch let error as DataFramingLayerValidationError {
-            delegateQueue.async { self.debugDelegate?.debugLog(error.logDescription) }
+            let debugDelegate = debugDelegate
+            delegateQueue.async { debugDelegate?.debugLog(error.logDescription) }
         } catch let error as DMPLayerValidationError {
-            delegateQueue.async { self.debugDelegate?.debugLog(error.logDescription) }
+            let debugDelegate = debugDelegate
+            delegateQueue.async { debugDelegate?.debugLog(error.logDescription) }
         } catch {
             // unknown error
         }
@@ -678,7 +688,8 @@ extension sACNReceiverRaw {
         // only notify if this is not preview data, or if we shouldn't filter it
         guard !previewData || !filterPreviewData else { return }
 
-        delegateQueue.async { self.delegate?.receiverReceivedUniverseData(self, sourceData: universeData) }
+        let delegate = delegate
+        delegateQueue.async { delegate?.receiverReceivedUniverseData(self, sourceData: universeData) }
     }
 
     /// Decides whether level data should be notified for a source.
@@ -724,7 +735,8 @@ extension sACNReceiverRaw {
             // the source stopped sending per-address priorities but continues to send levels
             if source.markPerAddressPriorityLost() {
                 let cid = source.cid
-                delegateQueue.async { self.delegate?.receiver(self, lostPerAddressPriorityFor: cid) }
+                let delegate = delegate
+                delegateQueue.async { delegate?.receiver(self, lostPerAddressPriorityFor: cid) }
             }
             source.state = .hasLevelsOnly
         }
@@ -781,7 +793,8 @@ extension sACNReceiverRaw {
         if let sourceLimit, sources.count >= sourceLimit {
             if !sourceLimitExceededNotified {
                 sourceLimitExceededNotified = true
-                delegateQueue.async { self.delegate?.receiverExceededSources(self) }
+                let delegate = delegate
+                delegateQueue.async { delegate?.receiverExceededSources(self) }
             }
             return nil
         }
@@ -893,7 +906,8 @@ extension sACNReceiverRaw: ComponentSocketDelegate {
     ///
     func socket(_ socket: ComponentSocket, socketDidCloseWithError error: Error?) {
         guard error != nil, self._isListening else { return }
-        delegateQueue.async { self.delegate?.receiver(self, interface: socket.interface, socketDidCloseWithError: error) }
+        let delegate = delegate
+        delegateQueue.async { delegate?.receiver(self, interface: socket.interface, socketDidCloseWithError: error) }
     }
 
     /// Called when a debug socket log is produced.
@@ -903,6 +917,7 @@ extension sACNReceiverRaw: ComponentSocketDelegate {
     ///    - logMessage: The debug message.
     ///
     func debugLog(for socket: ComponentSocket, with logMessage: String) {
-        delegateQueue.async { self.debugDelegate?.debugSocketLog(logMessage) }
+        let debugDelegate = debugDelegate
+        delegateQueue.async { debugDelegate?.debugSocketLog(logMessage) }
     }
 }
