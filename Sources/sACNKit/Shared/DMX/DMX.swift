@@ -28,10 +28,10 @@ import Foundation
 ///
 /// DMX constants.
 public enum DMX {
-    
+
     /// The number of addresses in a complete DMX512-A packet.
-    public static var addressCount: Int = 512
-    
+    public static let addressCount: Int = 512
+
     /// DMP Layer DMX512-A START Codes
     ///
     /// Enumerates the data offset for each field in this layer.
@@ -42,5 +42,5 @@ public enum DMX {
         /// Contains per-slot priority data.
         case perAddressPriority = 0xdd
     }
-    
+
 }

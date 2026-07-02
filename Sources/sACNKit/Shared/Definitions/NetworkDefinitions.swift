@@ -48,23 +48,23 @@ public enum sACNIPMode: String, CaseIterable {
     case ipv6Only = "IPv6"
     /// The component should use IPv4 and IPv6.
     case ipv4And6 = "IPv4/IPv6"
-    
+
     /// An array of titles for all cases.
     public static var titles: [String] {
-        Self.allCases.map (\.rawValue)
+        Self.allCases.map(\.rawValue)
     }
-    
+
     /// The title for this case.
     public var title: String {
         self.rawValue
     }
-    
+
     /// Does this IP Mode use IPv4?
     ///
     /// - Returns: Whether this case includes IPv4.
     ///
     internal func usesIPv4() -> Bool { self != .ipv6Only }
-    
+
     /// Does this IP Mode use IPv6?
     ///
     /// - Returns: Whether this case includes IPv4.
@@ -78,11 +78,11 @@ public enum sACNIPMode: String, CaseIterable {
 ///
 struct IPv4 {
     /// The prefix of the multicast address used by sACN for multicast messages.
-    private static var multicastMessagePrefix: String = "239.255."
-    
+    private static let multicastMessagePrefix: String = "239.255."
+
     /// The hostname of the multicast address used by sACN for universe discovery messages.
-    static var universeDiscoveryHostname: String = "239.255.250.214"
-    
+    static let universeDiscoveryHostname: String = "239.255.250.214"
+
     /// Attempts to calculate an IPv4 hostname for a multicast message with a certain universe number.
     ///
     /// - Parameters:
@@ -101,10 +101,10 @@ struct IPv4 {
 ///
 struct IPv6 {
     /// The prefix of the multicast address used by sACN for multicast messages.
-    private static var multicastMessagePrefix: String = "ff18::83:00:"
-    
+    private static let multicastMessagePrefix: String = "ff18::83:00:"
+
     /// The hostname of the multicast address used by sACN for universe discovery messages.
-    static var universeDiscoveryHostname: String = "ff18::83:00:fa:d6"
+    static let universeDiscoveryHostname: String = "ff18::83:00:fa:d6"
 
     /// Attempts to calculate an IPv6 hostname for a multicast message with a certain universe number.
     ///

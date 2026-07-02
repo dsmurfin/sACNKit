@@ -41,21 +41,21 @@ public class sACNDiscoveryReceiver {
 
     /// The queue on which socket notifications occur (also used to protect state).
     private let socketDelegateQueue: DispatchQueue
-    
+
     /// The sockets used for communications (one per interface).
     /// The key for each socket is the interface it is bound to (or an empty string for all interfaces).
     private var sockets: [String: ComponentSocket]
-    
+
     /// The socket listening status (thread-safe getter).
     public var isListening: Bool {
         get { socketDelegateQueue.sync { _isListening } }
     }
-    
+
     /// The private socket listening status.
     private var _isListening: Bool
-    
+
     // MARK: Delegate
-    
+
     /// Changes the receiver delegate of this receiver to the the object passed.
     ///
     /// - Parameters:
@@ -66,7 +66,7 @@ public class sACNDiscoveryReceiver {
             self.delegate = delegate
         }
     }
-    
+
     /// Changes the debug delegate of this receiver to the the object passed.
     ///
     /// - Parameters:
@@ -77,37 +77,37 @@ public class sACNDiscoveryReceiver {
             self.debugDelegate = delegate
         }
     }
-    
+
     /// The delegate which receives notifications from this receiver.
     private weak var delegate: sACNDiscoveryReceiverDelegate?
-    
+
     /// The delegate which receives debug log messages from this receiver.
     private weak var debugDelegate: sACNComponentDebugDelegate?
 
     /// The queue on which to send delegate notifications.
     private let delegateQueue: DispatchQueue
-    
+
     // MARK: General
-    
+
     /// The discovered sources and their universes:
     private var sources: [UUID: DiscoveryReceiverSource]
-    
+
     // MARK: Timers
-    
+
     /// The leeway used for timing. Informs the OS how accurate timings should be.
     static let timingLeeway: DispatchTimeInterval = .nanoseconds(1_000_000)
-    
+
     /// The length of time for the main heartbeat (500 ms).
     private static let heartbeatTime: DispatchTimeInterval = DispatchTimeInterval.milliseconds(500)
-    
+
     /// The queue on which timers run.
     static let timerQueue: DispatchQueue = DispatchQueue(label: "com.danielmurfin.sACNKit.discoveryReceiverTimer")
-    
+
     /// The timer used for checking for source loss.
     private var heartbeatTimer: DispatchSourceTimer?
-    
+
     // MARK: - Initialization
-    
+
     /// Creates a new receiver to receive sACN discovery messages.
     ///
     /// - Parameters:
@@ -135,20 +135,20 @@ public class sACNDiscoveryReceiver {
             }
         }
         self._isListening = false
-        
+
         // delegate
         self.delegateQueue = delegateQueue
-        
+
         // general
         self.sources = [:]
     }
-    
+
     deinit {
         stop()
     }
-    
+
     // MARK: Public API
-    
+
     /// Starts this discovery receiver.
     ///
     /// The receiver will begin listening for sACN Universe Discovery messages.
@@ -160,18 +160,18 @@ public class sACNDiscoveryReceiver {
             guard !_isListening else {
                 throw sACNReceiverValidationError.receiverStarted
             }
-            
+
             // begin listening
             try sockets.forEach { interface, socket in
                 try listenForSocket(socket, on: interface.isEmpty ? nil : interface)
             }
             self._isListening = true
-            
+
             // starts the main heartbeat to handle source loss
             startHeartbeat()
         }
     }
-        
+
     /// Stops this receiver.
     ///
     /// The receiver will stop listening for sACN Universe Discovery messages.
@@ -200,7 +200,7 @@ public class sACNDiscoveryReceiver {
 
         sources = [:]
     }
-    
+
     /// Updates the interfaces on which this receiver listens for sACN Universe Discovery messages.
     ///
     /// - Parameters:
@@ -221,10 +221,10 @@ public class sACNDiscoveryReceiver {
                 }
             }()
             guard existingInterfaces != newInterfaces else { return }
-            
+
             if existingInterfaces.isEmpty {
                 // not possible for IPv6
-                
+
                 // remove existing sockets
                 // stops listening on deinit if needed
                 self.sockets.removeAll()
@@ -233,7 +233,7 @@ public class sACNDiscoveryReceiver {
                 for interface in newInterfaces {
                     let socket = ComponentSocket(type: .receive, ipMode: self.ipMode, port: UDP.sdtPort, delegateQueue: self.socketDelegateQueue)
                     sockets[interface] = socket
-                    
+
                     // attempt to listen
                     if _isListening {
                         try listenForSocket(socket, on: interface)
@@ -241,11 +241,11 @@ public class sACNDiscoveryReceiver {
                 }
             } else if newInterfaces.isEmpty {
                 // not possible for IPv6
-                
+
                 // remove existing sockets
                 // stops listening on deinit if needed
                 sockets.removeAll()
-                
+
                 // add socket for all interfaces
                 let socket = ComponentSocket(type: .receive, ipMode: self.ipMode, port: UDP.sdtPort, delegateQueue: self.socketDelegateQueue)
                 sockets[""] = socket
@@ -257,20 +257,18 @@ public class sACNDiscoveryReceiver {
             } else {
                 let interfacesToRemove = existingInterfaces.subtracting(newInterfaces)
                 let interfacesToAdd = newInterfaces.subtracting(existingInterfaces)
-                
+
                 // remove sockets for interfaces no longer needed
                 // stops listening on deinit if needed
                 for interface in interfacesToRemove {
                     sockets.removeValue(forKey: interface)
                 }
-                
+
                 // add each new interface
-                var newSocketIds: [UUID] = []
                 for interface in interfacesToAdd {
                     let socket = ComponentSocket(type: .receive, ipMode: self.ipMode, port: UDP.sdtPort, delegateQueue: self.socketDelegateQueue)
                     sockets[interface] = socket
-                    newSocketIds.append(socket.id)
-                    
+
                     // attempt to listen
                     if _isListening {
                         try listenForSocket(socket, on: interface)
@@ -279,9 +277,9 @@ public class sACNDiscoveryReceiver {
             }
         }
     }
-    
+
     // MARK: General
-    
+
     /// Attempts to start listening for a socket on an optional interface.
     ///
     /// - Parameters:
@@ -292,7 +290,7 @@ public class sACNDiscoveryReceiver {
         socket.delegate = self
         try socket.enableReusePort()
         try socket.startListening(onInterface: interface)
-        
+
         // attempt to join multicast grousp
         if ipMode == .ipv4Only || ipMode == .ipv4And6 {
             let hostname = IPv4.universeDiscoveryHostname
@@ -313,9 +311,9 @@ public class sACNDiscoveryReceiver {
             }
         }
     }
-    
+
     // MARK: Timers
-    
+
     /// Starts the main heartbeat timer, which handles source loss.
     private func startHeartbeat() {
         let timer = DispatchSource.repeatingTimer(interval: Self.heartbeatTime, leeway: Self.timingLeeway, queue: Self.timerQueue) { [weak self] in
@@ -327,13 +325,13 @@ public class sACNDiscoveryReceiver {
         }
         heartbeatTimer = timer
     }
-    
+
     /// Stops the main heartbeat timer.
     private func stopHeartbeat() {
         heartbeatTimer?.cancel()
         heartbeatTimer = nil
     }
-    
+
     /// Checks for source loss.
     private func checkForSourceLoss() {
         var removeLostSources: Set<UUID> = []
@@ -353,7 +351,7 @@ public class sACNDiscoveryReceiver {
             sources.removeValue(forKey: sourceId)
         }
     }
-    
+
 }
 
 // MARK: -
@@ -363,7 +361,7 @@ public class sACNDiscoveryReceiver {
 ///
 /// Packet processing.
 extension sACNDiscoveryReceiver {
-    
+
     /// Processes data as sACN.
     ///
     /// - Parameters:
@@ -393,9 +391,9 @@ extension sACNDiscoveryReceiver {
             // unknown error
         }
     }
-    
+
     // MARK: Extended
-    
+
     /// Processes an sACN extended packet.
     ///
     /// - Parameters:
@@ -408,17 +406,17 @@ extension sACNDiscoveryReceiver {
         do {
             let framingLayer = try UniverseDiscoveryFramingLayer.parse(fromData: rootLayer.data)
             let discoveryLayer = try UniverseDiscoveryLayer.parse(fromData: framingLayer.data)
-            
+
             processUniverseDiscovery(cid: rootLayer.cid, name: framingLayer.sourceName, discoveryLayer: discoveryLayer)
         } catch {
             // try to parse extended sync here if implemented
             // let framingLayer = try UniverseSyncFramingLayer etc.
-            
+
             // throw the error
             throw error
         }
     }
-    
+
     /// Processes an sACN universe discovery packet.
     ///
     /// - Parameters:
@@ -433,11 +431,11 @@ extension sACNDiscoveryReceiver {
 
         if let source = sources[cid] {
             source.resetTimer()
-            
+
             let page = discoveryLayer.page
             let lastPage = discoveryLayer.lastPage
             let universeCount = discoveryLayer.universeList.count
-            
+
             // pages are tracked so notification only occurs when all pages have been received
             // it is assumed pages are received in order from 0 to the last page
             if page != 0 && page != source.nextPage {
@@ -450,17 +448,21 @@ extension sACNDiscoveryReceiver {
                     source.nextUniverseIndex = 0
                     source.nextPage = 0
                 }
-                
+
                 // check if this page modifies the universe list
                 let numberOfRemainingUniverses = source.universeCount - source.nextUniverseIndex
-                let existingUniverseBlock = source.universes.count >= source.nextUniverseIndex+universeCount ? Array(source.universes[source.nextUniverseIndex..<source.nextUniverseIndex+universeCount]) : []
-                if universeCount > numberOfRemainingUniverses || (page == lastPage && universeCount < numberOfRemainingUniverses) || existingUniverseBlock != discoveryLayer.universeList {
+                let existingUniverseBlock =
+                    source.universes.count >= source.nextUniverseIndex + universeCount
+                    ? Array(source.universes[source.nextUniverseIndex..<source.nextUniverseIndex + universeCount]) : []
+                if universeCount > numberOfRemainingUniverses || (page == lastPage && universeCount < numberOfRemainingUniverses)
+                    || existingUniverseBlock != discoveryLayer.universeList
+                {
                     source.dirty = true
-                    
+
                     source.universes.removeSubrange(source.nextUniverseIndex...)
                     source.universes += discoveryLayer.universeList
                     source.universeCount = source.nextUniverseIndex + universeCount
-                    
+
                     if page < lastPage {
                         source.nextUniverseIndex += universeCount
                         source.nextPage += 1
@@ -473,7 +475,7 @@ extension sACNDiscoveryReceiver {
                         if source.dirty {
                             source.dirty = zip(source.universes, source.universes.dropFirst()).allSatisfy { $0 <= $1 }
                         }
-                        
+
                         if source.dirty {
                             source.dirty = false
                             source.lastNotifiedUniverseCount = source.universeCount
@@ -485,7 +487,7 @@ extension sACNDiscoveryReceiver {
             }
         }
     }
-    
+
     /// Creates a new discovery source with the information provided, and starts timer as required.
     ///
     /// - Parameters:
@@ -496,7 +498,7 @@ extension sACNDiscoveryReceiver {
         sources[cid] = source
         source.startTimer()
     }
-    
+
 }
 
 // MARK: -
@@ -515,10 +517,12 @@ extension sACNDiscoveryReceiver: ComponentSocketDelegate {
     ///    - sourcePort: The UDP port of the source of the message.
     ///    - ipFamily: The `ComponentSocketIPFamily` of the source of the message.
     ///
-    func receivedMessage(for socket: ComponentSocket, withData data: Data, sourceHostname: String, sourcePort: UInt16, ipFamily: ComponentSocketIPFamily) {
+    func receivedMessage(
+        for socket: ComponentSocket, withData data: Data, sourceHostname: String, sourcePort: UInt16, ipFamily: ComponentSocketIPFamily
+    ) {
         process(data: data, ipFamily: ipFamily, socketId: socket.id, hostname: sourceHostname)
     }
-    
+
     /// Called when the socket was closed.
     ///
     /// - Parameters:
@@ -529,7 +533,7 @@ extension sACNDiscoveryReceiver: ComponentSocketDelegate {
         guard error != nil, self._isListening else { return }
         delegateQueue.async { self.delegate?.discoveryReceiver(self, interface: socket.interface, socketDidCloseWithError: error) }
     }
-    
+
     /// Called when a debug socket log is produced.
     ///
     /// - Parameters:

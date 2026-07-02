@@ -416,11 +416,9 @@ final public class sACNSource {
                 }
 
                 // add each new interface
-                var newSocketIds: [UUID] = []
                 for interface in interfacesToAdd {
                     let socket = ComponentSocket(type: .transmit, ipMode: ipMode, delegateQueue: socketDelegateQueue)
                     sockets[interface] = socket
-                    newSocketIds.append(socket.id)
                     socketsShouldTerminate.removeValue(forKey: interface)
 
                     // attempt to listen
