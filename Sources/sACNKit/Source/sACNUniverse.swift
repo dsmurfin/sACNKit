@@ -27,7 +27,7 @@ import Foundation
 /// sACN Source Universe
 ///
 /// An sACN universes contains level and priority information.
-public struct sACNSourceUniverse {
+public struct sACNSourceUniverse: Sendable {
 
     /// The universe number.
     public private(set) var number: UInt16

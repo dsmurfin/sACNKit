@@ -1000,7 +1000,7 @@ extension sACNSource {
 ///
 /// Enumerates all possible `sACNSource` parsing errors.
 ///
-public enum sACNSourceValidationError: LocalizedError {
+public enum sACNSourceValidationError: LocalizedError, Sendable {
 
     /// The source is started.
     case sourceStarted

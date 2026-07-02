@@ -396,7 +396,7 @@ extension sACNReceiver: sACNReceiverRawDelegate {
 /// sACN Receiver Validation Error
 ///
 /// Enumerates all possible `sACNReceiver` parsing errors.
-public enum sACNReceiverValidationError: LocalizedError {
+public enum sACNReceiverValidationError: LocalizedError, Sendable {
 
     /// The receiver is started.
     case receiverStarted

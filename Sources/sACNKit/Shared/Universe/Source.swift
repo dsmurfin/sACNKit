@@ -31,7 +31,7 @@ import UIKit
 ///
 /// A stream of E1.31 Packets for a universe is said to be sent from a source.
 /// Sources are uniquely identified by their CID.
-struct Source: Equatable {
+struct Source: Equatable, Sendable {
 
     /// The maximum source name length in bytes.
     static let sourceNameMaxBytes = 64

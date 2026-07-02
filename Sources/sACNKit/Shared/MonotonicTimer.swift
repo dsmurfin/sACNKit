@@ -29,7 +29,7 @@ import Glibc
 
 /// Monotonic Timer
 ///
-class MonotonicTimer {
+struct MonotonicTimer: Sendable {
 
     /// The time at which this timer was reset.
     private var resetTime: UInt64
@@ -56,13 +56,13 @@ class MonotonicTimer {
     /// - Parameters:
     ///    - interval: The interval in milliseconds.
     ///
-    func start(interval: UInt64) {
+    mutating func start(interval: UInt64) {
         self.resetTime = Self.getMilliseconds()
         self.interval = UInt64(interval)
     }
 
     /// Resets this timer with the previously defined interval.
-    func reset() {
+    mutating func reset() {
         resetTime = Self.getMilliseconds()
     }
 

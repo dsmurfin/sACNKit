@@ -27,7 +27,7 @@ import Foundation
 /// Data Framing Layer
 ///
 /// Implements the Data Framing Layer and handles creation and parsing.
-struct DataFramingLayer {
+struct DataFramingLayer: Sendable {
 
     /// The flags and length. 0x7258: 258 = 600 (starting octet 38) = 638.
     /// This must only be used for constructing packets as received packets may have differing lengths.
@@ -59,7 +59,7 @@ struct DataFramingLayer {
     }
 
     /// The options.
-    struct Options: OptionSet {
+    struct Options: OptionSet, Sendable {
         let rawValue: UInt8
 
         static let preview = Options(rawValue: 1 << 7)
@@ -210,7 +210,7 @@ internal extension Data {
 ///
 /// Enumerates all possible `DataFramingLayer` parsing errors.
 ///
-enum DataFramingLayerValidationError: LocalizedError {
+enum DataFramingLayerValidationError: LocalizedError, Sendable {
 
     /// The data is of insufficient length.
     case lengthOutOfRange

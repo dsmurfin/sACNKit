@@ -27,7 +27,7 @@ import Foundation
 /// sACN Receiver Raw Source Data.
 ///
 /// Data received from a source.
-public struct sACNReceiverRawSourceData {
+public struct sACNReceiverRawSourceData: Sendable {
 
     /// The source CID.
     public var cid: UUID

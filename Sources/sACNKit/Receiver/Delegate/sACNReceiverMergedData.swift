@@ -26,7 +26,7 @@ import Foundation
 
 /// sACN Receiver Merged Data
 ///
-public struct sACNReceiverMergedData {
+public struct sACNReceiverMergedData: Sendable {
 
     /// The universe from which data was received (1-63999).
     public var universe: UInt16

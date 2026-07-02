@@ -27,7 +27,7 @@ import Foundation
 /// DMP Layer
 ///
 /// Implements the DMP Layer and handles creation and parsing.
-struct DMPLayer {
+struct DMPLayer: Sendable {
 
     /// The flags and length. 0x720b: 20b = 523 (starting octet 115) = 638
     /// This must only be used for constructing packets as received packets may have differing lengths.
@@ -165,7 +165,7 @@ internal extension Data {
 ///
 /// Enumerates all possible `DMPLayer` parsing errors.
 ///
-enum DMPLayerValidationError: LocalizedError {
+enum DMPLayerValidationError: LocalizedError, Sendable {
 
     /// The data is of insufficient length.
     case lengthOutOfRange

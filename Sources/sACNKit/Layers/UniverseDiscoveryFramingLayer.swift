@@ -27,7 +27,7 @@ import Foundation
 /// Universe Discovery Framing Layer
 ///
 /// Implements the Universe Discovery Framing Layer and handles creation and parsing.
-struct UniverseDiscoveryFramingLayer {
+struct UniverseDiscoveryFramingLayer: Sendable {
 
     /// Universe Discovery Layer Vectors
     ///
@@ -138,7 +138,7 @@ internal extension Data {
 ///
 /// Enumerates all possible `UniverseDiscoveryFramingLayer` parsing errors.
 ///
-enum UniverseDiscoveryFramingLayerValidationError: LocalizedError {
+enum UniverseDiscoveryFramingLayerValidationError: LocalizedError, Sendable {
 
     /// The data is of insufficient length.
     case lengthOutOfRange

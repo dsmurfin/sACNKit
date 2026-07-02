@@ -26,7 +26,7 @@ import Foundation
 
 /// sACN Discovery Receiver Source
 ///
-public struct sACNDiscoveryReceiverSource {
+public struct sACNDiscoveryReceiverSource: Sendable {
 
     /// The CID of the source.
     public var cid: UUID

@@ -278,8 +278,7 @@ struct ReceiverRawTests {
         #expect(harness.delegate.papLostSemaphore.wait(timeout: .now() + Self.quietTimeout) == .timedOut, "loss should only be notified once")
 
         #expect(harness.delegate.lostPerAddressPriority == [cid])
-        let onQueue = try #require(harness.delegate.papLostOnDelegateQueue.first)
-        #expect(onQueue, "per-address priority loss must be delivered on the delegate queue")
+        #expect(harness.delegate.papLostOnDelegateQueue == [true], "per-address priority loss must be delivered on the delegate queue")
     }
 
     @Test("Data callbacks preserve packet order")

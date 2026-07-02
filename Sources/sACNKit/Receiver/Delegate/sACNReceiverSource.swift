@@ -28,7 +28,7 @@ import Foundation
 ///
 /// Useful information about a source discovered by a receiver such as
 /// CID, IP address (hostname) and name.
-public struct sACNReceiverSource {
+public struct sACNReceiverSource: Sendable {
 
     /// The sACN CID of this source.
     public var cid: UUID
