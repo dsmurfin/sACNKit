@@ -56,31 +56,31 @@ enum ComponentSocketIPFamily: String {
 /// Creates a raw socket for network communications, and handles delegate notifications.
 ///
 class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
- 
+
     /// A unique identifier for this socket.
     let id: UUID
-    
+
     /// The raw socket.
     private var socket: GCDAsyncUdpSocket?
-    
+
     /// The type of socket.
     private let socketType: ComponentSocketType
-    
+
     /// The dispatch queue on which the socket sends and receives messages.
     private let socketQueue: DispatchQueue
-    
+
     /// The Internet Protocol version(s) used by the source.
     private let ipMode: sACNIPMode
-    
+
     /// The interface on which to bind this socket.
-    private (set) var interface: String?
-    
+    private(set) var interface: String?
+
     /// The UDP port on which to bind this socket.
     private let port: UInt16
-    
+
     /// The delegate to receive notifications.
     weak var delegate: ComponentSocketDelegate?
-        
+
     /// Creates a new Source Socket.
     ///
     /// Component sockets are used for joining multicast groups, and sending and receiving network data.
@@ -100,7 +100,7 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
         super.init()
         self.socket = GCDAsyncUdpSocket(delegate: self, delegateQueue: delegateQueue, socketQueue: self.socketQueue)
     }
-    
+
     /// Allows other services to reuse the port.
     ///
     /// - Throws: An error of type `sACNComponentSocketError`.
@@ -132,7 +132,7 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
             }
         }
     }
-    
+
     /// Attempts to leave a multicast group.
     ///
     /// - Parameters:
@@ -171,7 +171,8 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
             case .transmit:
                 // only bind on an interface if not multicast receiver
                 try socket?.bind(toPort: port, interface: interface)
-                delegate?.debugLog(for: self, with: "Successfully bound unicast to port: \(socket?.localPort() ?? 0) on interface: \(interface ?? "all")")
+                delegate?.debugLog(
+                    for: self, with: "Successfully bound unicast to port: \(socket?.localPort() ?? 0) on interface: \(interface ?? "all")")
             case .receive:
                 try socket?.bind(toPort: port)
                 delegate?.debugLog(for: self, with: "Successfully bound multicast to port: \(port)")
@@ -179,7 +180,7 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
         } catch {
             throw sACNComponentSocketError.couldNotBind(message: "\(id): Could not bind \(socketType.rawValue) socket.")
         }
-        
+
         do {
             switch socketType {
             case .transmit:
@@ -192,16 +193,17 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
                 break
             }
         } catch {
-            throw sACNComponentSocketError.couldNotAssignMulticastInterface(message: "\(id): Could not assign interface for sending multicast on \(socketType.rawValue) socket.")
+            throw sACNComponentSocketError.couldNotAssignMulticastInterface(
+                message: "\(id): Could not assign interface for sending multicast on \(socketType.rawValue) socket.")
         }
-        
+
         do {
             try socket?.beginReceiving()
         } catch {
             throw sACNComponentSocketError.couldNotReceive(message: "\(id): Could not receive on \(socketType.rawValue) socket.")
         }
     }
-    
+
     /// Stops listening for network data.
     ///
     /// Closes this socket.
@@ -209,7 +211,7 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
     func stopListening() {
         socket?.close()
     }
-    
+
     /// Sends a message to a specific host and port.
     ///
     /// - Parameters:
@@ -220,7 +222,7 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
     func send(message data: Data, host: String, port: UInt16) {
         socket?.send(data, toHost: host, port: port, withTimeout: -1, tag: 0)
     }
-    
+
     /// Safely accesses the type of this socket and returns a string.
     ///
     /// - Returns: A string representing the type of this socket.
@@ -228,40 +230,41 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
     private func socketTypeString() -> String {
         socketType.rawValue.capitalized
     }
-    
+
     // MARK: - GCD Async UDP Socket Delegate
-    
+
     /// GCD Async UDP Socket Delegate
     ///
     /// Implements all required delegate methods for `GCDAsyncUdpSocket`.
     ///
-    
+
     /// Called when the datagram with the given tag has been sent.
     public func udpSocket(_ sock: GCDAsyncUdpSocket, didSendDataWithTag tag: Int) {
         delegate?.debugLog(for: self, with: "\(socketTypeString()) socket did send data")
     }
-    
+
     /// Called if an error occurs while trying to send a datagram. This could be due to a timeout, or something more serious such as the data being too large to fit in a single packet.
     public func udpSocket(_ sock: GCDAsyncUdpSocket, didNotSendDataWithTag tag: Int, dueToError error: Error?) {
-        delegate?.debugLog(for: self, with: "\(socketTypeString()) socket did not send data due to error \(String(describing: error?.localizedDescription))")
+        delegate?.debugLog(
+            for: self, with: "\(socketTypeString()) socket did not send data due to error \(String(describing: error?.localizedDescription))")
     }
-    
+
     /// Called when the socket has received a datagram.
     public func udpSocket(_ sock: GCDAsyncUdpSocket, didReceive data: Data, fromAddress address: Data, withFilterContext filterContext: Any?) {
         guard let hostname = GCDAsyncUdpSocket.host(fromAddress: address) else { return }
         let port = GCDAsyncUdpSocket.port(fromAddress: address)
         let ipFamily: ComponentSocketIPFamily = GCDAsyncUdpSocket.isIPv6Address(address) ? .IPv6 : .IPv4
-        
+
         delegate?.debugLog(for: self, with: "Socket received data of length \(data.count), from \(ipFamily.rawValue) \(hostname):\(port)")
         delegate?.receivedMessage(for: self, withData: data, sourceHostname: hostname, sourcePort: port, ipFamily: ipFamily)
     }
-    
+
     /// Called when the socket is closed.
     public func udpSocketDidClose(_ sock: GCDAsyncUdpSocket, withError error: Error?) {
         delegate?.debugLog(for: self, with: "\(socketTypeString()) socket did close, with error \(String(describing: error?.localizedDescription))")
         delegate?.socket(self, socketDidCloseWithError: error)
     }
-    
+
 }
 
 // MARK: -
@@ -274,7 +277,7 @@ class ComponentSocket: NSObject, GCDAsyncUdpSocketDelegate {
 /// Required methods for objects implementing this delegate.
 ///
 protocol ComponentSocketDelegate: AnyObject {
-    
+
     /// Called when a message has been received.
     ///
     /// - Parameters:
@@ -284,8 +287,9 @@ protocol ComponentSocketDelegate: AnyObject {
     ///    - sourcePort: The UDP port of the source of the message.
     ///    - ipFamily: The `ComponentSocketIPFamily` of the source of the message.
     ///
-    func receivedMessage(for socket: ComponentSocket, withData data: Data, sourceHostname: String, sourcePort: UInt16, ipFamily: ComponentSocketIPFamily)
-    
+    func receivedMessage(
+        for socket: ComponentSocket, withData data: Data, sourceHostname: String, sourcePort: UInt16, ipFamily: ComponentSocketIPFamily)
+
     /// Called when the socket was closed.
     ///
     /// - Parameters:
@@ -293,7 +297,7 @@ protocol ComponentSocketDelegate: AnyObject {
     ///    - error: An optional error which occured when the socket was closed.
     ///
     func socket(_ socket: ComponentSocket, socketDidCloseWithError error: Error?)
-    
+
     /// Called when a debug socket log is produced.
     ///
     /// - Parameters:
@@ -301,7 +305,7 @@ protocol ComponentSocketDelegate: AnyObject {
     ///    - logMessage: The debug message.
     ///
     func debugLog(for socket: ComponentSocket, with logMessage: String)
-    
+
 }
 
 // MARK: -
@@ -312,22 +316,22 @@ protocol ComponentSocketDelegate: AnyObject {
 /// Enumerates all possible `sACNComponentSocketError` errors.
 ///
 public enum sACNComponentSocketError: LocalizedError {
-    
+
     /// It was not possible to enable port reuse.
     case couldNotEnablePortReuse
-    
+
     /// It was not possible to join this multicast group.
     case couldNotJoin(multicastGroup: String)
-    
+
     /// It was not possible to leave this multicast group.
     case couldNotLeave(multicastGroup: String)
-    
+
     /// It was not possible to bind to a port/interface.
     case couldNotBind(message: String)
-    
+
     /// It was not possible to assign the interface on which to send multicast.
     case couldNotAssignMulticastInterface(message: String)
-    
+
     /// It was not possible to start receiving data, e.g. because no bind occured first.
     case couldNotReceive(message: String)
 
@@ -346,5 +350,5 @@ public enum sACNComponentSocketError: LocalizedError {
             return message
         }
     }
-        
+
 }

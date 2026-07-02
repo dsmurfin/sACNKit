@@ -36,10 +36,10 @@ public protocol sACNSourceDelegate: AnyObject {
     ///    - error: An optional error which occured when the socket was closed.
     ///
     func source(_ source: sACNSource, interface: String?, socketDidCloseWithError error: Error?)
-    
+
     /// Notifies the delegate that the source is actively transmitting universe data messages.
     func transmissionStarted()
-    
+
     /// Notifies the delegate that the source has stopped transmitting universe data messages.
     /// Note: This does not indicate that the source is stopped, it could simply be no universes have been added.
     func transmissionEnded()

@@ -28,7 +28,7 @@ import Foundation
 ///
 /// Implements the Universe Discovery Layer and handles creation and parsing.
 struct UniverseDiscoveryLayer {
-    
+
     /// The maximum number of universe numbers to include in this layer.
     static let maxUniverseNumbers = 512
 
@@ -40,7 +40,7 @@ struct UniverseDiscoveryLayer {
         /// Contains a  `UniverseDiscoveryUniverseList`.
         case discoveryUniverseList = 0x00000001
     }
-    
+
     /// Universe Discovery Layer Data Offsets
     ///
     /// Enumerates the data offset for each field in this layer.
@@ -52,16 +52,16 @@ struct UniverseDiscoveryLayer {
         case lastPage = 7
         case listOfUniverses = 8
     }
-    
+
     /// The page number.
     var page: UInt8
-    
+
     /// The last page number.
     var lastPage: UInt8
-    
+
     /// A list of universes.
     var universeList: [UInt16]
-    
+
     /// Creates a Universe Discovery Layer as Data.
     ///
     /// - Parameters:
@@ -73,7 +73,7 @@ struct UniverseDiscoveryLayer {
     ///
     static func createAsData(page: UInt8, lastPage: UInt8, universeList: [UInt16]) -> Data {
         var data = Data()
-        let flagsAndLength = FlagsAndLength.fromLength(UInt16((universeList.count*2)+Self.Offset.listOfUniverses.rawValue))
+        let flagsAndLength = FlagsAndLength.fromLength(UInt16((universeList.count * 2) + Self.Offset.listOfUniverses.rawValue))
         data.append(flagsAndLength.data)
         data.append(Vector.discoveryUniverseList.rawValue.data)
         data.append(page.data)
@@ -83,7 +83,7 @@ struct UniverseDiscoveryLayer {
         }
         return data
     }
-    
+
     /// Attempts to create a Universe Discovery Layer from the data.
     ///
     /// - Parameters:
@@ -95,11 +95,13 @@ struct UniverseDiscoveryLayer {
     ///
     static func parse(fromData data: Data) throws -> Self {
         guard data.count >= Offset.listOfUniverses.rawValue else { throw UniverseDiscoveryLayerValidationError.lengthOutOfRange }
-        
+
         // the flags and length
-        guard let flagsAndLength = data.toFlagsAndLength(atOffset: Offset.flagsAndLength.rawValue), flagsAndLength.length == data.count-Offset.flagsAndLength.rawValue else {
+        guard let flagsAndLength = data.toFlagsAndLength(atOffset: Offset.flagsAndLength.rawValue),
+            flagsAndLength.length == data.count - Offset.flagsAndLength.rawValue
+        else {
             throw UniverseDiscoveryLayerValidationError.invalidFlagsAndLength
-        }        
+        }
         // the vector for this layer
         guard let vector: UInt32 = data.toUInt32(atOffset: Offset.vector.rawValue) else {
             throw UniverseDiscoveryLayerValidationError.unableToParse(field: "Vector")
@@ -118,7 +120,7 @@ struct UniverseDiscoveryLayer {
 
         // universe numbers data
         let universeNumbersData = data.subdata(in: Offset.listOfUniverses.rawValue..<data.count)
-        
+
         // the remaining data should be a multiple of universe number's size
         guard universeNumbersData.count.isMultiple(of: 2) else { throw UniverseDiscoveryLayerValidationError.invalidUniverseNumbers }
         var universeNumbers = [UInt16]()
@@ -126,10 +128,10 @@ struct UniverseDiscoveryLayer {
             guard let universeNumber = universeNumbersData.toUInt16(atOffset: offset) else { continue }
             universeNumbers.append(universeNumber)
         }
-        
+
         return Self(page: page, lastPage: lastPage, universeList: universeNumbers)
     }
-    
+
 }
 
 /// Universe Discovery Layer Validation Error
@@ -137,19 +139,19 @@ struct UniverseDiscoveryLayer {
 /// Enumerates all possible `UniverseDiscoveryLayer` parsing errors.
 ///
 enum UniverseDiscoveryLayerValidationError: LocalizedError {
-    
+
     /// The data is of insufficient length.
     case lengthOutOfRange
-    
+
     /// The flags and length does not match that specified for E1.31.
     case invalidFlagsAndLength
-    
+
     /// The `Vector` is not recognized.
     case invalidVector(_ vector: UInt32)
-    
+
     /// The universe numbers list is invalid.
     case invalidUniverseNumbers
-    
+
     /// A field could not be parsed from the data.
     case unableToParse(field: String)
 
@@ -168,5 +170,5 @@ enum UniverseDiscoveryLayerValidationError: LocalizedError {
             return "Unable to parse \(field) in Universe Discovery Layer."
         }
     }
-        
+
 }

@@ -27,27 +27,27 @@ import Foundation
 /// Receiver Source
 ///
 class ReceiverRawSource {
-    
+
     /// The unique identifier of this source.
     let cid: UUID
-    
+
     /// The hostname being used for this source.
     /// Packets are ignored that originate from the same source (CID) from a different hostname (or IP family).
     let hostname: String
-    
+
     /// The `ComponentSocketIPFamily` being used for this source.
     /// Packets are ignored that originate from the same source (CID) over another family (or interface).
     let ipFamily: ComponentSocketIPFamily
-    
+
     /// The name of this source.
     var name: String
-    
+
     /// The current last received sequence number.
     var sequence: UInt8
-    
+
     /// Whether the source is terminated.
     var terminated: Bool
-    
+
     /// Enumerates the possible states of this source.
     enum State {
         case waitingForLevels
@@ -55,36 +55,36 @@ class ReceiverRawSource {
         case hasLevelsOnly
         case hasLevelsAndPAP
     }
-    
+
     /// The state of this source.
     var state: State
-    
+
     /// Enumerates the possible availability states of this source.
     enum Available {
         case unknown
         case offline
         case online
     }
-    
+
     /// Whether DMX has been received since the last sources check.
     var dmxReceivedSinceLastTick: Bool
-    
+
     // MARK: Timers
-    
+
     /// The timer use to detect source loss.
     private var packetTimer: MonotonicTimer
-    
+
     /// The timer use to detect source loss.
     private var papTimer: MonotonicTimer
-    
+
     // MARK: Notification
-    
+
     /// Whether this source has been notified as lost.
-    private (set) var notifiedLost: Bool
-    
+    private(set) var notifiedLost: Bool
+
     /// Whether this source has been notified as per-address lost.
-    private (set) var notifiedPerAddressLost: Bool
-    
+    private(set) var notifiedPerAddressLost: Bool
+
     init(cid: UUID, hostname: String, ipFamily: ComponentSocketIPFamily, name: String, sequence: UInt8, state: State) {
         self.cid = cid
         self.hostname = hostname
@@ -99,9 +99,9 @@ class ReceiverRawSource {
         notifiedLost = false
         notifiedPerAddressLost = false
     }
-    
+
     // MARK: Per-address priority
-    
+
     /// Starts a per-address priority timer to wait for per-address priorities, or discover per-address priority loss.
     ///
     /// - Parameters:
@@ -110,25 +110,25 @@ class ReceiverRawSource {
     func startPAPTimer(withInterval interval: UInt64) {
         papTimer.start(interval: UInt64(interval))
     }
-    
+
     /// Resets the per-address priority timer.
     func resetPAPTimer() {
         papTimer.reset()
     }
-    
+
     /// Whether the per-address priority timer has expired.
     var isPAPTimerExpired: Bool {
         papTimer.isExpired()
     }
-    
+
     // MARK: Data loss
-    
+
     /// Marks this source as terminated.
     func markTerminated() {
         terminated = true
         startPacketTimer(instant: true)
     }
-    
+
     /// Starts a packet timer to discover data loss.
     ///
     /// - Parameters:
@@ -137,17 +137,17 @@ class ReceiverRawSource {
     func startPacketTimer(instant: Bool = false) {
         packetTimer.start(interval: instant ? 0 : sACNReceiverRaw.sourceLossTimeout)
     }
-    
+
     /// Resets the packet priority timer.
     func resetPacketTimer() {
         packetTimer.reset()
     }
-    
+
     /// Whether the packet timer has expired.
     var isPacketTimerExpired: Bool {
         packetTimer.isExpired()
     }
-    
+
     /// The available status of this source.
     ///
     /// Queying this state also marks the source as not having received
@@ -161,7 +161,7 @@ class ReceiverRawSource {
             return .unknown
         }
     }
-    
+
     /// Notifies this source as having lost per-address priority if it has not already been notified.
     ///
     /// - Parameters:
@@ -173,5 +173,5 @@ class ReceiverRawSource {
         notifiedPerAddressLost = true
         delegate?.receiver(receiver, lostPerAddressPriorityFor: cid)
     }
-    
+
 }

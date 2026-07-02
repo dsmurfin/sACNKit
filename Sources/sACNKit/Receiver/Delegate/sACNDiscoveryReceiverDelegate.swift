@@ -36,7 +36,7 @@ public protocol sACNDiscoveryReceiverDelegate: AnyObject {
     ///    - error: An optional error which occured when the socket was closed.
     ///
     func discoveryReceiver(_ receiver: sACNDiscoveryReceiver, interface: String?, socketDidCloseWithError error: Error?)
-    
+
     /// Called when new discovered universes are received for a source.
     ///
     /// - Parameters:
@@ -44,7 +44,7 @@ public protocol sACNDiscoveryReceiverDelegate: AnyObject {
     ///    - sourceInformation: The source information received.
     ///
     func discoveryReceiverReceivedInfo(_ receiver: sACNDiscoveryReceiver, sourceInformation: sACNDiscoveryReceiverSource)
-    
+
     /// Called when the receiver loses one or more sources.
     ///
     /// Source loss is coalesced to reduce notifications.

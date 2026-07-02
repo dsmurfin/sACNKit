@@ -27,19 +27,19 @@ import Foundation
 /// Merger Source
 ///
 class MergerSource {
-    
+
     /// The unique identifer for this merger source.
     var id: UUID
-    
+
     /// The (512) DMX512-A NULL start code (0x00) levels.
     var levels: [UInt8]
-    
+
     /// The number of levels being used.
     ///
     /// Some sources don't use all 512 levels, so this tells us how many levels
     /// in `levels` to use.
     var levelCount: Int
-    
+
     /// The sACN universe priority.
     var universePriority: UInt8
 
@@ -48,14 +48,14 @@ class MergerSource {
     /// If the source uses universe priority `usingUniversePriority` will be true,
     /// and this contains the universe priority in every slot (used for the merge).
     var addressPriorities: [UInt8]
-    
+
     /// Whether the source is using universe priority.
     var usingUniversePriority: Bool
 
     var perAddressPriorityCount: Int
-    
+
     var universePriorityUninitialized: Bool
-    
+
     init(id: UUID?) {
         self.id = id ?? UUID()
         self.levels = Array(repeating: 0, count: DMX.addressCount)
@@ -66,5 +66,5 @@ class MergerSource {
         self.perAddressPriorityCount = 0
         self.universePriorityUninitialized = true
     }
-    
+
 }

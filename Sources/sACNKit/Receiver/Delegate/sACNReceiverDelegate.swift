@@ -36,7 +36,7 @@ public protocol sACNReceiverDelegate: AnyObject {
     ///    - error: An optional error which occured when the socket was closed.
     ///
     func receiver(_ receiver: sACNReceiver, interface: String?, socketDidCloseWithError error: Error?)
-    
+
     /// Called when new data is received from a source for a universe.
     ///
     /// Note: This call is synchronous, so should be handled quickly.
@@ -46,7 +46,7 @@ public protocol sACNReceiverDelegate: AnyObject {
     ///    - universeData: The universe data received.
     ///
     func receiverMergedData(_ receiver: sACNReceiver, mergedData: sACNReceiverMergedData)
-    
+
     /// Called when the receiver begins sampling.
     ///
     /// This may occur when it is started, or when interfaces are changed.
@@ -55,7 +55,7 @@ public protocol sACNReceiverDelegate: AnyObject {
     ///    - receiver: The receiver.
     ///
     func receiverStartedSampling(_ receiver: sACNReceiver)
-    
+
     /// Called when the receiver ends sampling.
     ///
     /// - Parameters:

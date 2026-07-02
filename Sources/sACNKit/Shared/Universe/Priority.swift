@@ -30,16 +30,16 @@ import Foundation
 internal extension UInt8 {
     /// The minimum permitted value for priority.
     static let minPriority: UInt8 = 0
-    
+
     /// The maximum permitted value for priority.
     static let maxPriority: UInt8 = 200
-    
+
     /// The default value for priority; used where not specified.
     static let defaultPriority: UInt8 = 100
-    
+
     /// The range of valid priorities.
     static let validPriorities: ClosedRange<UInt8> = minPriority...maxPriority
-    
+
     /// Determines whether this priority is valid.
     ///
     /// - Returns: Whether this priority is valid.
@@ -47,7 +47,7 @@ internal extension UInt8 {
     func validPriority() -> Bool {
         return UInt8.minPriority...UInt8.maxPriority ~= self
     }
-    
+
     /// Calculates the nearest valid priority to the one specified.
     ///
     /// - Returns: A valid priority nearest to the value specified.

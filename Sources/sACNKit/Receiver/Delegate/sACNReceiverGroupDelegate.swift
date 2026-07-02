@@ -37,7 +37,7 @@ public protocol sACNReceiverGroupDelegate: AnyObject {
     ///    - universe: The universe.
     ///
     func receiverGroup(_ receiverGroup: sACNReceiverGroup, interface: String?, socketDidCloseWithError error: Error?, forUniverse universe: UInt16)
-    
+
     /// Called when new data is received from a source for a universe.
     ///
     /// Note: This call is synchronous, so should be handled quickly.
@@ -47,7 +47,7 @@ public protocol sACNReceiverGroupDelegate: AnyObject {
     ///    - universeData: The universe data received.
     ///
     func receiverGroupMergedData(_ receiverGroup: sACNReceiverGroup, mergedData: sACNReceiverMergedData)
-    
+
     /// Called when the receiver group begins sampling.
     ///
     /// This may occur when it is started, or when interfaces are changed.
@@ -57,7 +57,7 @@ public protocol sACNReceiverGroupDelegate: AnyObject {
     ///    - universe: The universe.
     ///
     func receiverGroupStartedSampling(_ receiverGroup: sACNReceiverGroup, forUniverse universe: UInt16)
-    
+
     /// Called when the receiver group ends sampling.
     ///
     /// - Parameters:

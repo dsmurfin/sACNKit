@@ -35,14 +35,14 @@ public protocol sACNComponentProtocolErrorDelegate: AnyObject {
     ///    - errorDescription: A human-readable description of the error.
     ///
     func layerError(_ errorDescription: String)
-    
+
     /// Notifies the delegate of sequence errors.
     ///
     /// - Parameters:
     ///    - errorDescription: A human-readable description of the error.
     ///
     func sequenceError(_ errorDescription: String)
-    
+
     /// Notifies the delegate of unknown errors.
     ///
     /// - Parameters:
@@ -65,7 +65,7 @@ public protocol sACNComponentDebugDelegate: AnyObject {
     ///    - logMessage: A human-readable log message.
     ///
     func debugLog(_ logMessage: String)
-    
+
     /// Notifies the delegate of a new socket debug log entry.
     ///
     /// - Parameters:

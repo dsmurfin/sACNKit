@@ -27,21 +27,21 @@ import Foundation
 /// sACN Receiver Merged Data
 ///
 public struct sACNReceiverMergedData {
-    
+
     /// The universe from which data was received (1-63999).
     public var universe: UInt16
-    
+
     /// The (512) levels received.
     public var levels: [UInt8]
-    
+
     /// The (512) optional winners for each level.
     public var winners: [UUID?]
-    
+
     /// The identifiers of the sources.
     public var activeSources: [UUID]
-    
+
     /// The number of active sources.
     /// This should always be equal to the size of `activeSources`.
-    public  var numberOfActiveSources: Int
-    
+    public var numberOfActiveSources: Int
+
 }

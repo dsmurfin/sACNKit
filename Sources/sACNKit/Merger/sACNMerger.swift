@@ -36,40 +36,40 @@ import Foundation
 ///
 /// Important: All calls to this class should be performed on the same `DispatchQueue`.
 public class sACNMerger {
-    
+
     /// The unique identifer for this merger (this matches the sACN universe it merges).
-    public private (set) var id: UInt16
-    
+    public private(set) var id: UInt16
+
     /// The (512) merged levels.
     ///
     /// Any 'unsourced' slot is set to 0.
-    public private (set) var levels: [UInt8]
-    
+    public private(set) var levels: [UInt8]
+
     /// The (512) per-address priorities for each winning slot.
     ///
     /// Winning priorities are always tracked here, even if not using per-address priority.
     private var perAddressPriorities: [UInt8]
-    
+
     /// The (512) identifiers (or `nil` if there is no winner) of the winning `MergerSource`s for the merge on a each slot.
     ///
     /// Winning owners are always tracked here.
-    public private (set) var winners: [UUID?]
+    public private(set) var winners: [UUID?]
 
     /// Whether per-address priority packets should be transmitted.
     ///
     /// This is used if the result of the merge needs to be sent over sACN, otherwise set to `nil`.
     private var perAddressPrioritiesActive: Bool?
-    
+
     /// The universe priority that should be transmitted.
     ///
     /// This is used if the result of the merge needs to be sent over sACN, otherwise set to `nil`.
     private var universePriority: UInt8?
-    
+
     /// The maximum number of sources this merger will listen to.
     ///
     /// To allow unlimited sources set this to `nil`.
     private var sourceLimit: Int?
-    
+
     /// The sources added to this merger.
     private var sources: [UUID: MergerSource]
 
@@ -81,7 +81,7 @@ public class sACNMerger {
     ///
     /// - Parameters:
     ///    - config: The `MergerConfig` to be used to configure the merger.
-    ///    
+    ///
     public init(id: UInt16, config: sACNMergerConfig? = nil) {
         self.id = id
         self.levels = Array(repeating: 0, count: DMX.addressCount)
@@ -94,9 +94,9 @@ public class sACNMerger {
         }
         self.sources = [:]
     }
-    
+
     // MARK: Add / Remove
-    
+
     /// Adds a new source to the merger, if the maximum number of sources hasn't been reached.
     ///
     /// - Parameters:
@@ -114,7 +114,7 @@ public class sACNMerger {
         let source = MergerSource(id: sourceId)
         sources[sourceId] = source
     }
-    
+
     /// Removes the source from the merger.
     ///
     /// This causes the merger to recalculate its output.
@@ -127,13 +127,13 @@ public class sACNMerger {
     ///
     public func removeSource(identified sourceId: UUID) throws {
         guard let source = sources[sourceId] else { throw sACNMergerError.noSourceWithIdentifier(sourceId) }
-        
+
         // merge the source with unsourced priorities to remove this source from the merge output
         source.addressPriorities = Array(repeating: 0, count: DMX.addressCount)
         for index in 0..<DMX.addressCount {
             mergeNewPriority(using: source, at: index)
         }
-        
+
         // also update universe priority and per-address priority active outputs if needed
         if let perAddressPrioritiesActive, perAddressPrioritiesActive && !source.usingUniversePriority {
             source.usingUniversePriority = true
@@ -143,13 +143,13 @@ public class sACNMerger {
             source.universePriority = 0
             recalculateUniversePriority()
         }
-        
+
         // now that output no longer refers to this source, remove it
         sources.removeValue(forKey: sourceId)
     }
-    
+
     // MARK: Update
-    
+
     /// Updates the levels for a source.
     ///
     /// This causes the merger to recalculate its output. The source will only be included in the merge
@@ -166,13 +166,15 @@ public class sACNMerger {
     ///
     public func updateLevelsForSource(identified sourceId: UUID, newLevels: [UInt8], newLevelsCount: Int) throws {
         guard let source = sources[sourceId] else { throw sACNMergerError.noSourceWithIdentifier(sourceId) }
-        
+
         // levels count must be valid and there must be levels
-        guard newLevelsCount > 0 && newLevelsCount <= DMX.addressCount && newLevels.count == newLevelsCount else { throw sACNMergerError.invalidLevelCount }
-        
+        guard newLevelsCount > 0 && newLevelsCount <= DMX.addressCount && newLevels.count == newLevelsCount else {
+            throw sACNMergerError.invalidLevelCount
+        }
+
         let oldLevelsCount = source.levelCount
         source.levelCount = newLevelsCount
-        
+
         if newLevelsCount != oldLevelsCount || (newLevels.prefix(newLevelsCount) != source.levels.prefix(newLevelsCount)) {
             if sources.count == 1 {
                 updateLevelsSingleSource(using: source, newLevels: newLevels, oldLevelsCount: oldLevelsCount, newLevelsCount: newLevelsCount)
@@ -181,7 +183,7 @@ public class sACNMerger {
             }
         }
     }
-    
+
     /// Updates the per-address priorities for a source.
     ///
     /// This causes the merger to recalculate its output. The source will only be included in the merge
@@ -199,26 +201,34 @@ public class sACNMerger {
     ///
     public func updatePAPForSource(identified sourceId: UUID, newPriorities: [UInt8], newPrioritiesCount: Int) throws {
         guard let source = sources[sourceId] else { throw sACNMergerError.noSourceWithIdentifier(sourceId) }
-        
+
         // priorities count must be valid and there must be priorities
-        guard newPrioritiesCount > 0 && newPrioritiesCount <= DMX.addressCount && newPriorities.count == newPrioritiesCount else { throw sACNMergerError.invalidLevelCount }
-        
+        guard newPrioritiesCount > 0 && newPrioritiesCount <= DMX.addressCount && newPriorities.count == newPrioritiesCount else {
+            throw sACNMergerError.invalidLevelCount
+        }
+
         let oldPerAddressPrioritiesCount = source.perAddressPriorityCount
         source.perAddressPriorityCount = newPrioritiesCount
-        
-        if newPrioritiesCount != oldPerAddressPrioritiesCount || (newPriorities.prefix(newPrioritiesCount) != source.addressPriorities.prefix(newPrioritiesCount)) {
+
+        if newPrioritiesCount != oldPerAddressPrioritiesCount
+            || (newPriorities.prefix(newPrioritiesCount) != source.addressPriorities.prefix(newPrioritiesCount))
+        {
             source.usingUniversePriority = false
             if perAddressPrioritiesActive != nil {
                 perAddressPrioritiesActive = true
             }
             if sources.count == 1 {
-                updatePAPSingleSource(using: source, newPriorities: newPriorities, oldPrioritiesCount: oldPerAddressPrioritiesCount, newPrioritiesCount: newPrioritiesCount)
+                updatePAPSingleSource(
+                    using: source, newPriorities: newPriorities, oldPrioritiesCount: oldPerAddressPrioritiesCount,
+                    newPrioritiesCount: newPrioritiesCount)
             } else {
-                updatePAPMultiSource(using: source, newPriorities: newPriorities, oldPrioritiesCount: oldPerAddressPrioritiesCount, newPrioritiesCount: newPrioritiesCount)
+                updatePAPMultiSource(
+                    using: source, newPriorities: newPriorities, oldPrioritiesCount: oldPerAddressPrioritiesCount,
+                    newPrioritiesCount: newPrioritiesCount)
             }
         }
     }
-    
+
     /// Updates the universe priority for a source.
     ///
     /// This causes the merger to recalculate its output. The source will only be included in the merge if it has priority for that slot.
@@ -235,11 +245,11 @@ public class sACNMerger {
     ///
     public func updateUniversePriorityForSource(identified sourceId: UUID, priority: UInt8) throws {
         guard let source = sources[sourceId] else { throw sACNMergerError.noSourceWithIdentifier(sourceId) }
-        
+
         // only continue if the universe priority is different or uninitialized
         guard universePriority != source.universePriority || source.universePriorityUninitialized else { return }
         source.universePriorityUninitialized = false
-        
+
         // is this the curent universe priority output?
         let wasMax: Bool = {
             if let universePriority, source.universePriority >= universePriority {
@@ -247,23 +257,23 @@ public class sACNMerger {
             }
             return false
         }()
-        
+
         let singleSource = sources.count == 1
-        
+
         // update the universe priority for the source
         source.universePriority = priority
-        
+
         // if there are no per-address priorities
         if source.usingUniversePriority {
             let perAddressPriority = priority == 0 ? 1 : priority
-            
+
             if singleSource {
                 updateUniversePrioritySingleSource(using: source, newPriority: perAddressPriority)
             } else {
                 updateUniversePriorityMultiSource(using: source, newPriority: perAddressPriority)
             }
         }
-        
+
         // also update the universe priority output if needed
         if let universePriority {
             if singleSource || priority >= universePriority {
@@ -274,7 +284,7 @@ public class sACNMerger {
             }
         }
     }
-    
+
     /// Removes the per-address priorities for a source.
     ///
     /// This causes the merger to recalculate its output. The source will only be included in the merge
@@ -290,25 +300,26 @@ public class sACNMerger {
     ///
     public func removePAP(forSourceIdentified sourceId: UUID) throws {
         guard let source = sources[sourceId] else { throw sACNMergerError.noSourceWithIdentifier(sourceId) }
-        
+
         // mark the source as using universe priority
         let papWasActive = !source.usingUniversePriority
         source.usingUniversePriority = true
-        
+
         // merge the levels again (this time using universe priority)
-        source.addressPriorities.replaceSubrange(0..<DMX.addressCount, with: repeatElement(source.universePriority == 0 ? 1 : source.universePriority, count: DMX.addressCount))        
+        source.addressPriorities.replaceSubrange(
+            0..<DMX.addressCount, with: repeatElement(source.universePriority == 0 ? 1 : source.universePriority, count: DMX.addressCount))
         for slot in 0..<DMX.addressCount {
             mergeNewPriority(using: source, at: slot)
         }
-        
+
         // update the per-address priority active output if needed
         if perAddressPrioritiesActive != nil && papWasActive {
             recalculatePerAddressPrioritiesActive()
         }
     }
-    
+
     // MARK: Access
-    
+
     /// Returns an optional source for the identifier provided.
     ///
     /// - Parameters:
@@ -318,9 +329,9 @@ public class sACNMerger {
     func source(identified id: UUID) -> MergerSource? {
         return sources[id]
     }
-    
+
     // MARK: - Private
-    
+
     /// Copies new levels into the source and the outputs.
     ///
     /// Assumes all parameters are valid and there is only one source.
@@ -334,19 +345,19 @@ public class sACNMerger {
     private func updateLevelsSingleSource(using source: MergerSource, newLevels: [UInt8], oldLevelsCount: Int, newLevelsCount: Int) {
         // replace the levels for this source
         source.levels.replaceSubrange(0..<newLevelsCount, with: newLevels)
-        
+
         // replace the merge levels
         for slot in 0..<newLevelsCount where perAddressPriorities[slot] > 0 {
             levels[slot] = newLevels[slot]
         }
-        
+
         // if there are less levels than last time, make the rest 0
         if oldLevelsCount > newLevelsCount {
-            source.levels.replaceSubrange(newLevelsCount..<oldLevelsCount, with: Array(repeating: 0, count: oldLevelsCount-newLevelsCount))
-            levels.replaceSubrange(newLevelsCount..<oldLevelsCount, with: Array(repeating: 0, count: oldLevelsCount-newLevelsCount))
+            source.levels.replaceSubrange(newLevelsCount..<oldLevelsCount, with: Array(repeating: 0, count: oldLevelsCount - newLevelsCount))
+            levels.replaceSubrange(newLevelsCount..<oldLevelsCount, with: Array(repeating: 0, count: oldLevelsCount - newLevelsCount))
         }
     }
-    
+
     /// Updates the source levels and recalculates outputs.
     ///
     /// Assumes all parameters are valid and there are multiple sources.
@@ -360,21 +371,21 @@ public class sACNMerger {
     private func updateLevelsMultiSource(using source: MergerSource, newLevels: [UInt8], oldLevelsCount: Int, newLevelsCount: Int) {
         // replace the levels for this source
         source.levels.replaceSubrange(0..<newLevelsCount, with: newLevels)
-        
+
         // merge levels
         for slot in 0..<newLevelsCount {
             mergeNewLevel(using: source, at: slot)
         }
-        
+
         // if there are less levels than last time, merge to new levels
         if oldLevelsCount > newLevelsCount {
-            source.levels.replaceSubrange(newLevelsCount..<oldLevelsCount, with: Array(repeating: 0, count: oldLevelsCount-newLevelsCount))
+            source.levels.replaceSubrange(newLevelsCount..<oldLevelsCount, with: Array(repeating: 0, count: oldLevelsCount - newLevelsCount))
             for slot in newLevelsCount..<oldLevelsCount {
                 mergeNewLevel(using: source, at: slot)
             }
         }
     }
-    
+
     /// Copies new per-address priorities into the source and the outputs.
     ///
     /// Also updates winner and outputs.
@@ -405,16 +416,18 @@ public class sACNMerger {
 
         // if there are less priorities than last time, make the rest 0
         if oldPrioritiesCount > newPrioritiesCount {
-            source.addressPriorities.replaceSubrange(newPrioritiesCount..<oldPrioritiesCount, with: Array(repeating: 0, count: oldPrioritiesCount-newPrioritiesCount))
-            perAddressPriorities.replaceSubrange(newPrioritiesCount..<oldPrioritiesCount, with: Array(repeating: 0, count: oldPrioritiesCount-newPrioritiesCount))
-            
+            source.addressPriorities.replaceSubrange(
+                newPrioritiesCount..<oldPrioritiesCount, with: Array(repeating: 0, count: oldPrioritiesCount - newPrioritiesCount))
+            perAddressPriorities.replaceSubrange(
+                newPrioritiesCount..<oldPrioritiesCount, with: Array(repeating: 0, count: oldPrioritiesCount - newPrioritiesCount))
+
             for slot in newPrioritiesCount..<oldPrioritiesCount {
                 levels[slot] = 0
                 winners[slot] = nil
             }
         }
     }
-    
+
     /// Updates the source per-address priorities and recalculates outputs.
     ///
     /// Assumes all parameters are valid and there are multiple sources.
@@ -436,14 +449,15 @@ public class sACNMerger {
 
         // if there are less priorities than last time, make the rest 0
         if oldPrioritiesCount > newPrioritiesCount {
-            source.addressPriorities.replaceSubrange(newPrioritiesCount..<oldPrioritiesCount, with: Array(repeating: 0, count: oldPrioritiesCount-newPrioritiesCount))
-            
+            source.addressPriorities.replaceSubrange(
+                newPrioritiesCount..<oldPrioritiesCount, with: Array(repeating: 0, count: oldPrioritiesCount - newPrioritiesCount))
+
             for slot in newPrioritiesCount..<oldPrioritiesCount {
                 mergeNewPriority(using: source, at: slot)
             }
         }
     }
-    
+
     /// Copies the new universe priority (converted to per-address priorities) into the source and the outputs.
     ///
     /// Also updates winner and outputs.
@@ -461,10 +475,10 @@ public class sACNMerger {
             perAddressPriorities[slot] = newPriority
             winners[slot] = source.id
         }
-        
+
         levels.replaceSubrange(0..<DMX.addressCount, with: source.levels)
     }
-    
+
     /// Updates the source universe priority (converted to per-address priorities) and recalculates outputs.
     ///
     /// Assumes all parameters are valid, there are multiple sources and universe priority changed.
@@ -480,9 +494,9 @@ public class sACNMerger {
             mergeNewPriority(using: source, at: slot)
         }
     }
-    
+
     // MARK: Merge Slot
-    
+
     /// Merges a source's new level on a slot.
     ///
     /// This assumes the priority has not changed since the last merge.
@@ -522,7 +536,9 @@ public class sACNMerger {
         } else if source.id != winners[slot] {
             // if this source is not the current winner but has the same priority
             // take ownership if it has a higher level
-            if source.addressPriorities[slot] > 0 && source.addressPriorities[slot] == perAddressPriorities[slot] && source.levels[slot] > levels[slot] {
+            if source.addressPriorities[slot] > 0 && source.addressPriorities[slot] == perAddressPriorities[slot]
+                && source.levels[slot] > levels[slot]
+            {
                 levels[slot] = source.levels[slot]
                 winners[slot] = source.id
                 perAddressPriorities[slot] = source.addressPriorities[slot]
@@ -533,9 +549,9 @@ public class sACNMerger {
             recalculateWinningPriority(using: source, at: slot)
         }
     }
-    
+
     // MARK: Recalculate
-    
+
     /// Recalculates the winning level for a slot.
     ///
     /// This assumes the priority has not changed since the last merge.
@@ -547,7 +563,7 @@ public class sACNMerger {
     private func recalculateWinningLevel(using source: MergerSource, at slot: Int) {
         // make this source the winner
         levels[slot] = source.levels[slot]
-        
+
         // check if any other sources beat the current source
         for otherSource in sources.values where otherSource.id != source.id {
             let candidateLevel = otherSource.levels[slot]
@@ -557,7 +573,7 @@ public class sACNMerger {
             }
         }
     }
-    
+
     /// Recalculates the winning priority for a slot.
     ///
     /// This assumes the level has not changed since the last merge.
@@ -569,83 +585,85 @@ public class sACNMerger {
     private func recalculateWinningPriority(using source: MergerSource, at slot: Int) {
         // make this source the winner
         perAddressPriorities[slot] = source.addressPriorities[slot]
-        
+
         // when unsourced (priority 0) set the level to 0 and no winner
         if source.addressPriorities[slot] == 0 {
             levels[slot] = 0
             winners[slot] = nil
         }
-        
+
         // check if any other source beat the current source
         for otherSource in sources.values where otherSource.id != source.id {
-            if otherSource.addressPriorities[slot] > perAddressPriorities[slot] || (otherSource.addressPriorities[slot] == perAddressPriorities[slot] && otherSource.levels[slot] > levels[slot]) {
+            if otherSource.addressPriorities[slot] > perAddressPriorities[slot]
+                || (otherSource.addressPriorities[slot] == perAddressPriorities[slot] && otherSource.levels[slot] > levels[slot])
+            {
                 levels[slot] = otherSource.levels[slot]
                 winners[slot] = otherSource.id
                 perAddressPriorities[slot] = otherSource.addressPriorities[slot]
             }
         }
     }
-    
+
     /// Recalculates the value of per-address priorities active.
     ///
     /// This should only be called after first checking whether `perAddressPrioritiesActive` is not `nil`.
     private func recalculatePerAddressPrioritiesActive() {
         perAddressPrioritiesActive = sources.contains(where: { !$0.value.usingUniversePriority })
     }
-    
+
     /// Recalculates the value of universe priority.
     ///
     /// This should only be called after first checking whether `universePriority` is not `nil`.
     private func recalculateUniversePriority() {
         universePriority = sources.max { a, b in a.value.universePriority < b.value.universePriority }?.value.universePriority ?? 0
     }
-    
+
 }
 
 /// Merger Config
 ///
 /// Optionally used for initial configuration of a merger.
 public struct sACNMergerConfig {
-    
+
     /// Whether per-address priority packets should be transmitted.
     ///
     /// This is used if the result of the merge needs to be sent over sACN, otherwise set to `nil`.
     public var transmitPerAddressPriorities: Bool?
-    
+
     /// The universe priority that should be transmitted.
     ///
     /// This is used if the result of the merge needs to be sent over sACN, otherwise set to `nil`.
     public var universePriority: UInt8?
-    
+
     /// The maximum number of sources this merger will listen to.
     ///
     /// To allow unlimited sources set this to `nil`.
     public var sourceLimit: Int?
-    
+
 }
 
 /// Merger Error
-/// 
+///
 public enum sACNMergerError: Error {
-    
+
     /// There is already a merger with the universe requested.
     case mergerExistsWithUniverse(_ universe: UInt16)
-    
+
     /// No merger was found with this universe.
     case noMergerWithUniverse(_ universe: UInt16)
-    
+
     // MARK: Source
-    
+
     /// There is already a merger source with the identifier requested.
     case sourceExistsWithIdentifier(_ id: UUID)
-    
+
     /// No merger source was found with this identifer.
     case noSourceWithIdentifier(_ id: UUID)
-    
+
     /// There are already the maximum specified number of sources for this merger.
     case sourceLimitReached
-    
+
     /// The level count provided is invalid or no levels were provided.
     case invalidLevelCount
-    
+
 }

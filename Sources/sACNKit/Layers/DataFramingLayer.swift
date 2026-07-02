@@ -28,7 +28,7 @@ import Foundation
 ///
 /// Implements the Data Framing Layer and handles creation and parsing.
 struct DataFramingLayer {
-    
+
     /// The flags and length. 0x7258: 258 = 600 (starting octet 38) = 638.
     /// This must only be used for constructing packets as received packets may have differing lengths.
     private static let flagsAndLength = Data([0x72, 0x58])
@@ -41,7 +41,7 @@ struct DataFramingLayer {
         /// Contains a  `DMPLayer`.
         case data = 0x00000002
     }
-    
+
     /// Data Framing Layer Data Offsets
     ///
     /// Enumerates the data offset for each field in this layer.
@@ -57,7 +57,7 @@ struct DataFramingLayer {
         case universe = 75
         case data = 77
     }
-    
+
     /// The options.
     struct Options: OptionSet {
         let rawValue: UInt8
@@ -65,31 +65,31 @@ struct DataFramingLayer {
         static let preview = Options(rawValue: 1 << 7)
         static let terminated = Options(rawValue: 1 << 6)
         static let forceSync = Options(rawValue: 1 << 5)
-        
+
         static let none: Options = []
     }
-    
+
     /// The vector describing the data in the layer.
     private var vector: Vector
-    
+
     /// A name for this source, such as a user specified human-readable string, or serial number for the device.
-    private (set) var sourceName: String
-    
+    private(set) var sourceName: String
+
     /// The priority of this source.
-    private (set) var priority: UInt8
-    
+    private(set) var priority: UInt8
+
     /// The sequence number for this message.
-    private (set) var sequenceNumber: UInt8
-    
+    private(set) var sequenceNumber: UInt8
+
     /// The options for this message.
-    private (set) var options: Options
-    
+    private(set) var options: Options
+
     /// The unvierse number for this message.
-    private (set) var universe: UInt16
-    
+    private(set) var universe: UInt16
+
     /// The data contained in the layer.
-    private (set) var data: Data
-    
+    private(set) var data: Data
+
     /// Creates a Framing Layer as Data.
     ///
     /// - Parameters:
@@ -109,7 +109,7 @@ struct DataFramingLayer {
         data.append(universe.data)
         return data
     }
-    
+
     /// Attempts to create a Data Framing Layer from the data.
     ///
     /// - Parameters:
@@ -121,9 +121,11 @@ struct DataFramingLayer {
     ///
     static func parse(fromData data: Data) throws -> Self {
         guard data.count > Offset.data.rawValue else { throw DataFramingLayerValidationError.lengthOutOfRange }
-        
+
         // the flags and length
-        guard let flagsAndLength = data.toFlagsAndLength(atOffset: Offset.flagsAndLength.rawValue), flagsAndLength.length == data.count-Offset.flagsAndLength.rawValue else {
+        guard let flagsAndLength = data.toFlagsAndLength(atOffset: Offset.flagsAndLength.rawValue),
+            flagsAndLength.length == data.count - Offset.flagsAndLength.rawValue
+        else {
             throw DataFramingLayerValidationError.invalidFlagsAndLength
         }
         // the vector for this layer
@@ -163,10 +165,12 @@ struct DataFramingLayer {
         }
         // layer data
         let data = data.subdata(in: Offset.data.rawValue..<data.count)
-        
-        return Self(vector: validVector, sourceName: sourceName, priority: priority, sequenceNumber: sequenceNumber, options: Options(rawValue: options), universe: universe, data: data)
+
+        return Self(
+            vector: validVector, sourceName: sourceName, priority: priority, sequenceNumber: sequenceNumber, options: Options(rawValue: options),
+            universe: universe, data: data)
     }
-    
+
 }
 
 /// Data Framing Layer Data Extension
@@ -182,7 +186,7 @@ internal extension Data {
     mutating func replacingSequence(with sequence: UInt8) {
         self[DataFramingLayer.Offset.sequenceNumber.rawValue] = sequence
     }
-    
+
     /// Replaces the `DataFramingLayer` options.
     ///
     /// - Parameters:
@@ -191,7 +195,7 @@ internal extension Data {
     mutating func replacingOptions(with options: DataFramingLayer.Options) {
         self[DataFramingLayer.Offset.options.rawValue] = options.rawValue
     }
-    
+
     /// Replaces the `DataFramingLayer` options.
     ///
     /// - Parameters:
@@ -207,22 +211,22 @@ internal extension Data {
 /// Enumerates all possible `DataFramingLayer` parsing errors.
 ///
 enum DataFramingLayerValidationError: LocalizedError {
-    
+
     /// The data is of insufficient length.
     case lengthOutOfRange
-    
+
     /// The flags and length does not match that specified for E1.31.
     case invalidFlagsAndLength
-    
+
     /// The `Vector` is not recognized.
     case invalidVector(_ vector: UInt32)
-    
+
     /// The priority is not recognized.
     case invalidPriority(_ priority: UInt8)
-    
+
     /// The universe is not recognized.
     case invalidUniverse(_ universe: UInt16)
-    
+
     /// A field could not be parsed from the data.
     case unableToParse(field: String)
 
@@ -243,6 +247,5 @@ enum DataFramingLayerValidationError: LocalizedError {
             return "Unable to parse \(field) in Data Framing Layer."
         }
     }
-        
-}
 
+}

@@ -29,26 +29,26 @@ import Foundation
 /// Useful information about a source discovered by a receiver such as
 /// CID, IP address (hostname) and name.
 public struct sACNReceiverSource {
-    
+
     /// The sACN CID of this source.
     public var cid: UUID
-    
+
     /// The hostname of the source.
     public var hostname: String
-    
+
     /// The name of the source.
     public var name: String
-    
+
     /// Whether this source is currently sampling.
     public var isSampling: Bool
-    
+
     init(receiverSource: ReceiverSource) {
         cid = receiverSource.cid
         hostname = receiverSource.hostname
         name = receiverSource.name
         isSampling = receiverSource.sampling
     }
-    
+
 }
 
 /// sACN Receiver Extension

@@ -41,7 +41,7 @@ public class sACNReceiverRaw {
 
     /// The queue on which socket notifications occur (also used to protect state).
     private let socketDelegateQueue: DispatchQueue
-    
+
     /// The identifiers of sockets and their sampling status.
     ///
     /// The presence of a socket identifier indicates it is either sampling or waiting to sample.
@@ -50,21 +50,21 @@ public class sACNReceiverRaw {
     /// If this receiver is set to listen on all interfaces there will only be a single socket.
     /// Sampling occurs for this socket only.
     private var socketsSampling: [UUID: Bool]
-    
+
     /// The sockets used for communications (one per interface).
     /// The key for each socket is the interface it is bound to (or an empty string for all interfaces).
     private var sockets: [String: ComponentSocket]
-    
+
     /// The socket listening status (thread-safe getter).
     public var isListening: Bool {
         get { socketDelegateQueue.sync { _isListening } }
     }
-    
+
     /// The private socket listening status.
     private var _isListening: Bool
-    
+
     // MARK: Delegate
-    
+
     /// Changes the receiver delegate of this receiver to the the object passed.
     ///
     /// - Parameters:
@@ -75,7 +75,7 @@ public class sACNReceiverRaw {
             self.delegate = delegate
         }
     }
-    
+
     /// Changes the debug delegate of this receiver to the the object passed.
     ///
     /// - Parameters:
@@ -86,69 +86,69 @@ public class sACNReceiverRaw {
             self.debugDelegate = delegate
         }
     }
-    
+
     /// The delegate which receives notifications from this receiver.
     private weak var delegate: sACNReceiverRawDelegate?
-    
+
     /// The delegate which receives debug log messages from this receiver.
     private weak var debugDelegate: sACNComponentDebugDelegate?
 
     /// The queue on which to send delegate notifications.
     private let delegateQueue: DispatchQueue
-    
+
     // MARK: General
 
     /// The sACN universe this receiver observes.
     let universe: UInt16
-    
+
     /// Whether preview data is filtered by this receiver.
     private let filterPreviewData: Bool
-    
+
     /// An optional limit on the number of sources this receiver accepts.
     private let sourceLimit: Int?
-    
+
     /// A list of CIDs this receiver should filter.
     private var filterCIDs: Set<UUID>
-    
+
     /// Whether this universe is sampling.
     private var sampling: Bool
-    
+
     /// The sources that have been received.
     private var sources: [UUID: ReceiverRawSource]
-    
+
     // MARK: Timers
-    
+
     /// The leeway used for timing. Informs the OS how accurate timings should be.
     static let timingLeeway: DispatchTimeInterval = .nanoseconds(0)
-    
+
     /// The sACN network data loss timeout (2500 ms).
     static let sourceLossTimeout: UInt64 = 2500
-    
+
     /// How long to wait for a per-address priority start code (0xdd) packet when discovering a source (1500 ms).
     static let perAddressPriorityWait: UInt64 = 1500
-    
+
     /// The length of time to sample a new universe (1500 ms).
     private static let sampleTime: DispatchTimeInterval = DispatchTimeInterval.milliseconds(1500)
-    
+
     /// The length of time for the main heartbeat (500 ms).
     private static let heartbeatTime: DispatchTimeInterval = DispatchTimeInterval.milliseconds(500)
-    
+
     /// The queue on which timers run.
     static let timerQueue: DispatchQueue = DispatchQueue(label: "com.danielmurfin.sACNKit.receiverTimer")
-    
+
     /// The timer used for sampling of sources.
     private var sampleTimer: DispatchSourceTimer?
-    
+
     /// The timer used for checking for source loss and checks.
     private var heartbeatTimer: DispatchSourceTimer?
-    
+
     // MARK: Notification
-    
+
     /// Whether source limit exceeded has been notified.
     private var sourceLimitExceededNotified: Bool
-    
+
     // MARK: - Initialization
-    
+
     /// Creates a new receiver using an interface and delegate queue, and optionally an IP Mode.
     ///
     /// If the universe provided is not valid, this initializes to nil.
@@ -164,12 +164,15 @@ public class sACNReceiverRaw {
     ///
     /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interfaces must not be empty.
     ///
-    public init?(ipMode: sACNIPMode = .ipv4Only, interfaces: Set<String> = [], universe: UInt16, sourceLimit: Int? = 4, filterPreviewData: Bool = true, filterCIDs: Set<UUID> = [], delegateQueue: DispatchQueue) {
+    public init?(
+        ipMode: sACNIPMode = .ipv4Only, interfaces: Set<String> = [], universe: UInt16, sourceLimit: Int? = 4, filterPreviewData: Bool = true,
+        filterCIDs: Set<UUID> = [], delegateQueue: DispatchQueue
+    ) {
         precondition(!ipMode.usesIPv6() || !interfaces.isEmpty, "At least one interface must be provided for IPv6.")
-        
+
         // the universe provided must be valid
         guard universe.validUniverse() else { return nil }
-        
+
         // sockets
         self.ipMode = ipMode
         let socketDelegateQueue = DispatchQueue(label: "com.danielmurfin.sACNKit.receiverSocketDelegate-\(universe)")
@@ -189,10 +192,10 @@ public class sACNReceiverRaw {
             }
         }
         self._isListening = false
-        
+
         // delegate
         self.delegateQueue = delegateQueue
-        
+
         // general
         self.universe = universe
         self.filterPreviewData = filterPreviewData
@@ -200,17 +203,17 @@ public class sACNReceiverRaw {
         self.filterCIDs = filterCIDs
         self.sampling = false
         self.sources = [:]
-        
+
         // notification
         self.sourceLimitExceededNotified = false
     }
-    
+
     deinit {
         stop()
     }
-    
+
     // MARK: Public API
-    
+
     /// Starts this receiver.
     ///
     /// The receiver will begin listening for sACN Data messages.
@@ -222,22 +225,22 @@ public class sACNReceiverRaw {
             guard !_isListening else {
                 throw sACNReceiverValidationError.receiverStarted
             }
-            
+
             // begin listening
             try sockets.forEach { interface, socket in
                 try listenForSocket(socket, on: interface.isEmpty ? nil : interface)
             }
             self._isListening = true
-            
+
             // starts the main heartbeat to handle source loss
             // and other checks
             startHeartbeat()
-            
+
             // begin sampling for this universe
             beginSamplingPeriod()
         }
     }
-        
+
     /// Stops this receiver.
     ///
     /// The receiver will stop listening for sACN Data messages.
@@ -269,7 +272,7 @@ public class sACNReceiverRaw {
         sampling = false
         sources = [:]
     }
-    
+
     /// Updates the interfaces on which this receiver listens for sACN Data messages.
     ///
     /// - Parameters:
@@ -290,10 +293,10 @@ public class sACNReceiverRaw {
                 }
             }()
             guard existingInterfaces != newInterfaces else { return }
-            
+
             if existingInterfaces.isEmpty {
                 // not possible for IPv6
-                
+
                 // remove existing sockets
                 // stops listening on deinit if needed
                 self.sockets.removeAll()
@@ -302,7 +305,7 @@ public class sACNReceiverRaw {
                 for interface in newInterfaces {
                     let socket = ComponentSocket(type: .receive, ipMode: self.ipMode, port: UDP.sdtPort, delegateQueue: self.socketDelegateQueue)
                     sockets[interface] = socket
-                    
+
                     // attempt to listen
                     if _isListening {
                         try listenForSocket(socket, on: interface)
@@ -317,11 +320,11 @@ public class sACNReceiverRaw {
                 self.beginSamplingPeriod()
             } else if newInterfaces.isEmpty {
                 // not possible for IPv6
-                
+
                 // remove existing sockets
                 // stops listening on deinit if needed
                 sockets.removeAll()
-                
+
                 // add socket for all interfaces
                 let socket = ComponentSocket(type: .receive, ipMode: self.ipMode, port: UDP.sdtPort, delegateQueue: self.socketDelegateQueue)
                 sockets[""] = socket
@@ -333,45 +336,45 @@ public class sACNReceiverRaw {
                 if _isListening {
                     try listenForSocket(socket)
                 }
-                
+
                 // begin sampling again (if not already sampling)
                 self.beginSamplingPeriod()
             } else {
                 let interfacesToRemove = existingInterfaces.subtracting(newInterfaces)
                 let interfacesToAdd = newInterfaces.subtracting(existingInterfaces)
-                
+
                 // remove sockets for interfaces no longer needed
                 // stops listening on deinit if needed
                 for interface in interfacesToRemove {
                     sockets.removeValue(forKey: interface)
                 }
-                
+
                 // add each new interface
                 var newSocketIds: [UUID] = []
                 for interface in interfacesToAdd {
                     let socket = ComponentSocket(type: .receive, ipMode: self.ipMode, port: UDP.sdtPort, delegateQueue: self.socketDelegateQueue)
                     sockets[interface] = socket
                     newSocketIds.append(socket.id)
-                    
+
                     // attempt to listen
                     if _isListening {
                         try listenForSocket(socket, on: interface)
                     }
                 }
-                
+
                 let sample = sampleTimer == nil
                 for socketId in newSocketIds {
                     socketsSampling[socketId] = sample
                 }
-                
+
                 // begin sampling again (if not already sampling)
                 self.beginSamplingPeriod()
             }
         }
     }
-    
+
     // MARK: General
-    
+
     /// Attempts to start listening for a socket on an optional interface.
     ///
     /// - Parameters:
@@ -382,7 +385,7 @@ public class sACNReceiverRaw {
         socket.delegate = self
         try socket.enableReusePort()
         try socket.startListening(onInterface: interface)
-        
+
         // attempt to join multicast groups
         if ipMode == .ipv4Only || ipMode == .ipv4And6 {
             let hostname = IPv4.multicastHostname(for: universe)
@@ -403,9 +406,9 @@ public class sACNReceiverRaw {
             }
         }
     }
-    
+
     // MARK: Timers
-    
+
     /// Starts the main heartbeat timer, which handles source loss and other checks.
     private func startHeartbeat() {
         let timer = DispatchSource.repeatingTimer(interval: Self.heartbeatTime, leeway: Self.timingLeeway, queue: Self.timerQueue) { [weak self] in
@@ -417,13 +420,13 @@ public class sACNReceiverRaw {
         }
         heartbeatTimer = timer
     }
-    
+
     /// Stops the main heartbeat timer.
     private func stopHeartbeat() {
         heartbeatTimer?.cancel()
         heartbeatTimer = nil
     }
-    
+
     /// Begins the initial sampling period for this universe.
     ///
     /// - Parameters:
@@ -434,12 +437,12 @@ public class sACNReceiverRaw {
 
         guard !sampling else { return }
         sampling = true
-        
+
         // notify sampling has started
         if notify {
             delegateQueue.async { self.delegate?.receiverStartedSampling(self) }
         }
-        
+
         let timer = DispatchSource.singleTimer(interval: Self.sampleTime, leeway: Self.timingLeeway, queue: Self.timerQueue) { [weak self] in
             if let _ = self?.sampleTimer {
                 self?.endedSamplingPeriod()
@@ -447,36 +450,36 @@ public class sACNReceiverRaw {
         }
         self.sampleTimer = timer
     }
-    
+
     /// Ends the initial sampling period for this universe.
     private func endedSamplingPeriod() {
         socketDelegateQueue.sync {
             sampling = false
-            
+
             // remove any sockets which were sampling
             let keys = socketsSampling.filter { $0.value == true }.map { $0.key }
             keys.forEach { key in
                 socketsSampling.removeValue(forKey: key)
             }
-            
+
             // any sockets left should now be sampling
             if !socketsSampling.isEmpty {
                 let keys = socketsSampling.keys
                 keys.forEach { key in
                     socketsSampling.updateValue(true, forKey: key)
                 }
-                
+
                 self.beginSamplingPeriod(notify: false)
             } else {
                 self.sampleTimer?.cancel()
                 self.sampleTimer = nil
-                
+
                 // notify sampling has ended
                 delegateQueue.async { self.delegate?.receiverEndedSampling(self) }
             }
         }
     }
-    
+
     /// Checks for source loss.
     private func checkForSourceLoss() {
         var notifyLostSources: Set<UUID> = []
@@ -499,7 +502,7 @@ public class sACNReceiverRaw {
                 let available = source.available()
                 switch available {
                 case .offline:
-                    // notify this source was 
+                    // notify this source was
                     notifyLostSources.insert(id)
                     removeLostSources.insert(id)
                 case .online:
@@ -509,18 +512,18 @@ public class sACNReceiverRaw {
                 }
             }
         }
-        
+
         // notify all lost sources
         if !notifyLostSources.isEmpty {
             delegateQueue.async { self.delegate?.receiver(self, lostSources: Array(notifyLostSources)) }
         }
-        
+
         // remove any expired sources
         removeLostSources.forEach { sourceId in
             sources.removeValue(forKey: sourceId)
         }
     }
-    
+
 }
 
 // MARK: -
@@ -530,7 +533,7 @@ public class sACNReceiverRaw {
 ///
 /// Packet processing.
 extension sACNReceiverRaw {
-    
+
     /// Processes data as sACN.
     ///
     /// - Parameters:
@@ -542,9 +545,9 @@ extension sACNReceiverRaw {
     private func process(data: Data, ipFamily: ComponentSocketIPFamily, socketId: UUID, hostname: String) {
         do {
             let rootLayer = try RootLayer.parse(fromData: data)
-            
+
             guard !filterCIDs.contains(rootLayer.cid) else { return }
-            
+
             switch rootLayer.vector {
             case .extended:
                 // universe sync is not currently handled
@@ -563,9 +566,9 @@ extension sACNReceiverRaw {
             // unknown error
         }
     }
-    
+
     // MARK: Data
-    
+
     /// Processes an sACN data packet.
     ///
     /// - Parameters:
@@ -576,10 +579,10 @@ extension sACNReceiverRaw {
     ///
     private func processDataPacket(rootLayer: RootLayer, ipFamily: ComponentSocketIPFamily, socketId: UUID, hostname: String) throws {
         let framingLayer = try DataFramingLayer.parse(fromData: rootLayer.data)
-        
+
         // the universe must match this receiver
         guard universe == framingLayer.universe else { return }
-        
+
         // reject a message on a socket which is pending sampling
         let isSampling: Bool
         if !socketsSampling.isEmpty {
@@ -588,29 +591,29 @@ extension sACNReceiverRaw {
         } else {
             isSampling = false
         }
-        
+
         var notify = false
-        
+
         let universeData: sACNReceiverRawSourceData?
         let previewData = framingLayer.options.contains(.preview)
         if let existingSource = sources[rootLayer.cid] {
             // reject packets from a different IP family or hostname
             guard existingSource.ipFamily == ipFamily && existingSource.hostname == hostname else { return }
-            
+
             // check if the stream is terminated
             if framingLayer.options.contains(.terminated) {
                 existingSource.markTerminated()
             }
-            
+
             // also handles the source being terminated previously but not yet been removed
             guard !existingSource.terminated else { return }
-            
+
             // the sequence must be valid
             guard validSequence(framingLayer.sequenceNumber, previousSequence: existingSource.sequence) else { return }
             existingSource.sequence = framingLayer.sequenceNumber
-            
+
             let dmpLayer = try DMPLayer.parse(fromData: framingLayer.data)
-            
+
             // based on the timecode update timers
             switch dmpLayer.startCode {
             case .null:
@@ -618,30 +621,42 @@ extension sACNReceiverRaw {
             case .perAddressPriority:
                 processPerAddressPriority(for: existingSource, notify: &notify)
             }
-            
+
             // construct data only if it should be notified
-            universeData = notify ? sACNReceiverRawSourceData(cid: rootLayer.cid, name: framingLayer.sourceName, hostname: hostname, universe: universe, priority: framingLayer.priority, preview: previewData, isSampling: isSampling, startCode: dmpLayer.startCode, valuesCount: dmpLayer.values.count, values: dmpLayer.values) : nil
+            universeData =
+                notify
+                ? sACNReceiverRawSourceData(
+                    cid: rootLayer.cid, name: framingLayer.sourceName, hostname: hostname, universe: universe, priority: framingLayer.priority,
+                    preview: previewData, isSampling: isSampling, startCode: dmpLayer.startCode, valuesCount: dmpLayer.values.count,
+                    values: dmpLayer.values) : nil
         } else if !framingLayer.options.contains(.terminated) {
             // process new source data
             let dmpLayer = try DMPLayer.parse(fromData: framingLayer.data)
-            let source = createSource(cid: rootLayer.cid, name: framingLayer.sourceName, hostname: hostname, ipFamily: ipFamily, sequence: framingLayer.sequenceNumber, startCode: dmpLayer.startCode, notify: &notify)
+            let source = createSource(
+                cid: rootLayer.cid, name: framingLayer.sourceName, hostname: hostname, ipFamily: ipFamily, sequence: framingLayer.sequenceNumber,
+                startCode: dmpLayer.startCode, notify: &notify)
             sources[rootLayer.cid] = source
-            
+
             // construct data only if it should be notified
-            universeData = notify ? sACNReceiverRawSourceData(cid: rootLayer.cid, name: framingLayer.sourceName, hostname: hostname, universe: universe, priority: framingLayer.priority, preview: previewData, isSampling: isSampling, startCode: dmpLayer.startCode, valuesCount: dmpLayer.values.count, values: dmpLayer.values) : nil
+            universeData =
+                notify
+                ? sACNReceiverRawSourceData(
+                    cid: rootLayer.cid, name: framingLayer.sourceName, hostname: hostname, universe: universe, priority: framingLayer.priority,
+                    preview: previewData, isSampling: isSampling, startCode: dmpLayer.startCode, valuesCount: dmpLayer.values.count,
+                    values: dmpLayer.values) : nil
         } else {
             universeData = nil
         }
-        
+
         guard let universeData else { return }
-        
+
         // only notify if this is not preview data, or if we shouldn't filter it
         guard !previewData || !filterPreviewData else { return }
-        
+
         // data is provided synchronously
         delegateQueue.sync { self.delegate?.receiverReceivedUniverseData(self, sourceData: universeData) }
     }
-    
+
     /// Decides whether level data should be notified for a source.
     ///
     /// - Parameters:
@@ -651,11 +666,11 @@ extension sACNReceiverRaw {
     private func processLevels(for source: ReceiverRawSource, notify: inout Bool) {
         // notify universe data during and after the sampling period
         notify = true
-        
+
         // we received something (even if it's invalid)
         source.dmxReceivedSinceLastTick = true
         source.startPacketTimer()
-        
+
         let currentSourceState = source.state
         switch currentSourceState {
         case .waitingForLevels:
@@ -687,7 +702,7 @@ extension sACNReceiverRaw {
             source.state = .hasLevelsOnly
         }
     }
-    
+
     /// Decides whether per-address priority data should be notified for a source.
     ///
     /// - Parameters:
@@ -696,7 +711,7 @@ extension sACNReceiverRaw {
     ///
     private func processPerAddressPriority(for source: ReceiverRawSource, notify: inout Bool) {
         notify = true
-        
+
         let currentSourceState = source.state
         switch currentSourceState {
         case .waitingForLevels:
@@ -711,7 +726,7 @@ extension sACNReceiverRaw {
             source.resetPAPTimer()
         }
     }
-    
+
     /// Creates a new source with the information provided, and starts timer for per-address
     /// priority and source loss as required.
     ///
@@ -729,10 +744,12 @@ extension sACNReceiverRaw {
     ///
     /// - Returns: An optional `ReceiverSource`.
     ///
-    private func createSource(cid: UUID, name: String, hostname: String, ipFamily: ComponentSocketIPFamily, sequence: UInt8, startCode: DMX.STARTCode, notify: inout Bool) -> ReceiverRawSource? {
+    private func createSource(
+        cid: UUID, name: String, hostname: String, ipFamily: ComponentSocketIPFamily, sequence: UInt8, startCode: DMX.STARTCode, notify: inout Bool
+    ) -> ReceiverRawSource? {
         // notify universe data during and after the sampling period
         notify = true
-        
+
         // if there is a source limit it must not have been reached
         if let sourceLimit, sources.count >= sourceLimit {
             if !sourceLimitExceededNotified {
@@ -741,7 +758,7 @@ extension sACNReceiverRaw {
             }
             return nil
         }
-        
+
         let state: ReceiverRawSource.State = {
             if sampling {
                 switch startCode {
@@ -759,10 +776,10 @@ extension sACNReceiverRaw {
                 }
             }
         }()
-        
+
         let source = ReceiverRawSource(cid: cid, hostname: hostname, ipFamily: ipFamily, name: name, sequence: sequence, state: state)
         source.startPacketTimer()
-        
+
         if sampling {
             switch startCode {
             case .null:
@@ -781,15 +798,15 @@ extension sACNReceiverRaw {
                 break
             }
         }
-        
+
         // do not notify during sampling if this is per-address priority
         if (sampling && startCode == .perAddressPriority) || !sampling {
             notify = false
         }
-        
+
         return source
     }
-    
+
     /// Removes a single source from this receiver.
     ///
     /// - Parameters:
@@ -798,13 +815,13 @@ extension sACNReceiverRaw {
     private func removeSource(withCid cid: UUID) {
         sources.removeValue(forKey: cid)
     }
-    
+
     /// Removes all sources from this receiver.
     private func removeAllSources() {
         sourceLimitExceededNotified = false
         sources = [:]
     }
-    
+
     /// Checks if a sequence number is valid in relation to the previous number.
     ///
     /// - Parameters:
@@ -815,7 +832,7 @@ extension sACNReceiverRaw {
         let seqnumCmp = Int8(bitPattern: newSequence) &- Int8(bitPattern: previousSequence)
         return (seqnumCmp > 0 || seqnumCmp <= -20)
     }
-    
+
 }
 
 // MARK: -
@@ -834,10 +851,12 @@ extension sACNReceiverRaw: ComponentSocketDelegate {
     ///    - sourcePort: The UDP port of the source of the message.
     ///    - ipFamily: The `ComponentSocketIPFamily` of the source of the message.
     ///
-    func receivedMessage(for socket: ComponentSocket, withData data: Data, sourceHostname: String, sourcePort: UInt16, ipFamily: ComponentSocketIPFamily) {
+    func receivedMessage(
+        for socket: ComponentSocket, withData data: Data, sourceHostname: String, sourcePort: UInt16, ipFamily: ComponentSocketIPFamily
+    ) {
         process(data: data, ipFamily: ipFamily, socketId: socket.id, hostname: sourceHostname)
     }
-    
+
     /// Called when the socket was closed.
     ///
     /// - Parameters:
@@ -848,7 +867,7 @@ extension sACNReceiverRaw: ComponentSocketDelegate {
         guard error != nil, self._isListening else { return }
         delegateQueue.async { self.delegate?.receiver(self, interface: socket.interface, socketDidCloseWithError: error) }
     }
-    
+
     /// Called when a debug socket log is produced.
     ///
     /// - Parameters:

@@ -27,22 +27,22 @@ import Foundation
 /// Receiver Source
 ///
 class ReceiverSource {
-    
+
     /// The sACN CID of this source.
     var cid: UUID
-    
+
     /// The hostname of the source.
     var hostname: String
-    
+
     /// The name of the source.
     var name: String
-    
+
     /// Whether only per-address priority data has been received (waiting for levels).
     var pending: Bool
-    
+
     /// Whether this source is currently sampling.
     var sampling: Bool
-    
+
     init(sourceData: sACNReceiverRawSourceData, pending: Bool) {
         self.cid = sourceData.cid
         self.hostname = sourceData.hostname
@@ -50,5 +50,5 @@ class ReceiverSource {
         self.pending = pending
         self.sampling = sourceData.isSampling
     }
-    
+
 }
