@@ -683,7 +683,10 @@ extension sACNReceiverRaw {
         case .hasLevelsAndPAP:
             guard source.isPAPTimerExpired else { break }
             // the source stopped sending per-address priorities but continues to send levels
-            source.notifyPerAddressLost(using: delegate, from: self)
+            if source.markPerAddressPriorityLost() {
+                let cid = source.cid
+                delegateQueue.async { self.delegate?.receiver(self, lostPerAddressPriorityFor: cid) }
+            }
             source.state = .hasLevelsOnly
         }
     }
