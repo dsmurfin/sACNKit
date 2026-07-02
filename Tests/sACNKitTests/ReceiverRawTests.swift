@@ -28,9 +28,11 @@ struct ReceiverRawTests {
         let dataSemaphore = DispatchSemaphore(value: 0)
         let samplingStartedSemaphore = DispatchSemaphore(value: 0)
         let samplingEndedSemaphore = DispatchSemaphore(value: 0)
+        let papLostSemaphore = DispatchSemaphore(value: 0)
         private(set) var data: [sACNReceiverRawSourceData] = []
         private(set) var dataOnDelegateQueue: [Bool] = []
         private(set) var lostPerAddressPriority: [UUID] = []
+        private(set) var papLostOnDelegateQueue: [Bool] = []
         var onData: ((sACNReceiverRawSourceData) -> Void)?
 
         func receiver(_ receiver: sACNReceiverRaw, interface: String?, socketDidCloseWithError error: Error?) {}
@@ -54,6 +56,8 @@ struct ReceiverRawTests {
 
         func receiver(_ receiver: sACNReceiverRaw, lostPerAddressPriorityFor source: UUID) {
             lostPerAddressPriority.append(source)
+            papLostOnDelegateQueue.append(DispatchQueue.getSpecific(key: ReceiverRawTests.delegateQueueKey) == true)
+            papLostSemaphore.signal()
         }
 
         func receiverExceededSources(_ receiver: sACNReceiverRaw) {}
@@ -231,6 +235,29 @@ struct ReceiverRawTests {
         let harness = makeHarness()
         harness.inject(dataPacket(cid: UUID(), sequence: 0, options: .terminated))
         #expect(!harness.waitForData(timeout: Self.quietTimeout), "a terminated stream should not create a source")
+    }
+
+    @Test("Per-address priority loss is notified exactly once, on the delegate queue")
+    func perAddressPriorityLoss() throws {
+        let harness = makeHarness()
+        let cid = UUID()
+        var sequence = establishSource(cid: cid, in: harness)
+
+        // let the per-address priority timer expire, then send levels only
+        usleep(120_000)
+        harness.inject(dataPacket(cid: cid, sequence: sequence))
+        sequence &+= 1
+        #expect(harness.delegate.papLostSemaphore.wait(timeout: .now() + Self.callbackTimeout) == .success)
+        #expect(harness.waitForData(), "the levels which triggered the loss should still be delivered")
+
+        // further levels packets must not notify loss again
+        harness.inject(dataPacket(cid: cid, sequence: sequence))
+        #expect(harness.waitForData())
+        #expect(harness.delegate.papLostSemaphore.wait(timeout: .now() + Self.quietTimeout) == .timedOut, "loss should only be notified once")
+
+        #expect(harness.delegate.lostPerAddressPriority == [cid])
+        let onQueue = try #require(harness.delegate.papLostOnDelegateQueue.first)
+        #expect(onQueue, "per-address priority loss must be delivered on the delegate queue")
     }
 
     @Test("Data callbacks preserve packet order")

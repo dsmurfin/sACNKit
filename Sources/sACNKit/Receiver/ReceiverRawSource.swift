@@ -169,16 +169,14 @@ class ReceiverRawSource {
         }
     }
 
-    /// Notifies this source as having lost per-address priority if it has not already been notified.
+    /// Marks this source as having lost per-address priority.
     ///
-    /// - Parameters:
-    ///    - delegate: The optional `sACNReceiverDelegate` to notify.
-    ///    - receiver: The receiver which this call is associated with.
+    /// - Returns: Whether this is the first loss, and should therefore be notified.
     ///
-    func notifyPerAddressLost(using delegate: sACNReceiverRawDelegate?, from receiver: sACNReceiverRaw) {
-        guard !notifiedPerAddressLost else { return }
+    func markPerAddressPriorityLost() -> Bool {
+        guard !notifiedPerAddressLost else { return false }
         notifiedPerAddressLost = true
-        delegate?.receiver(receiver, lostPerAddressPriorityFor: cid)
+        return true
     }
 
 }
