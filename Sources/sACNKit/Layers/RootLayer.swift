@@ -28,19 +28,19 @@ import Foundation
 ///
 /// Implements the Root Layer and handles creation and parsing.
 struct RootLayer {
-    
+
     /// The offset at which length counting starts.
     static let lengthCountOffset = Offset.flagsAndLength.rawValue
-    
+
     /// The preamble size.
     private static let preambleSize = Data([0x00, 0x10])
-    
+
     /// The postamble size.
     private static let postambleSize = Data([0x00, 0x00])
-    
+
     /// The packet identifier which begins every sACN message.
     private static let packetIdentifier = Data([0x41, 0x53, 0x43, 0x2d, 0x45, 0x31, 0x2e, 0x31, 0x37, 0x00, 0x00, 0x00])
-    
+
     /// The flags and length for a data framing layer message. 0x726e: 26e = 622 (starting octet 16) = 638.
     /// This must only be used for constructing data packets as received packets may have differing lengths.
     private static let dataFlagsAndLength = Data([0x72, 0x6e])
@@ -55,7 +55,7 @@ struct RootLayer {
         /// Contains an  `ExtendedFramingLayer`.
         case extended = 0x00000008
     }
-    
+
     /// Root Layer Data Offsets
     ///
     /// Enumerates the data offset for each field in this layer.
@@ -69,16 +69,16 @@ struct RootLayer {
         case cid = 22
         case data = 38
     }
-    
+
     /// The vector describing the data in the layer.
-    private (set) var vector: Vector
-    
+    private(set) var vector: Vector
+
     /// A globally unique identifier (UUID) representing the `Source`, compliant with RFC 4122.
-    private (set) var cid: UUID
-    
+    private(set) var cid: UUID
+
     /// The data contained in the layer.
-    private (set) var data: Data
-    
+    private(set) var data: Data
+
     /// Creates a Root Layer as Data.
     ///
     /// - Parameters:
@@ -97,7 +97,7 @@ struct RootLayer {
         data.append(cid.data)
         return data
     }
-    
+
     /// Attempts to create a Root Layer from the data.
     ///
     /// - Parameters:
@@ -109,7 +109,7 @@ struct RootLayer {
     ///
     static func parse(fromData data: Data) throws -> Self {
         guard data.count > Offset.data.rawValue else { throw RootLayerValidationError.lengthOutOfRange }
-        
+
         // the preamble size
         guard data[..<Offset.postAmble.rawValue] == Self.preambleSize else {
             throw RootLayerValidationError.invalidPreamblePostambleSize
@@ -123,7 +123,9 @@ struct RootLayer {
             throw RootLayerValidationError.invalidPacketIdentifier
         }
         // the flags and length
-        guard let flagsAndLength = data.toFlagsAndLength(atOffset: Offset.flagsAndLength.rawValue), flagsAndLength.length == data.count-Offset.flagsAndLength.rawValue else {
+        guard let flagsAndLength = data.toFlagsAndLength(atOffset: Offset.flagsAndLength.rawValue),
+            flagsAndLength.length == data.count - Offset.flagsAndLength.rawValue
+        else {
             throw RootLayerValidationError.invalidFlagsAndLength
         }
         // the vector for this message
@@ -139,10 +141,10 @@ struct RootLayer {
         }
         // layer data
         let data = data.subdata(in: Offset.data.rawValue..<data.count)
-        
+
         return Self(vector: validVector, cid: cid, data: data)
     }
-    
+
 }
 
 /// Root Layer Data Extension
@@ -157,7 +159,7 @@ extension Data {
     ///
     mutating func replacingRootLayerFlagsAndLength(with length: UInt16) {
         let flagsAndLength = FlagsAndLength.fromLength(length)
-        self.replaceSubrange(RootLayer.Offset.flagsAndLength.rawValue...RootLayer.Offset.flagsAndLength.rawValue+1, with: flagsAndLength.data)
+        self.replaceSubrange(RootLayer.Offset.flagsAndLength.rawValue...RootLayer.Offset.flagsAndLength.rawValue + 1, with: flagsAndLength.data)
     }
 }
 
@@ -166,22 +168,22 @@ extension Data {
 /// Enumerates all possible `RootLayer` parsing errors.
 ///
 enum RootLayerValidationError: LocalizedError {
-    
+
     /// The data is of insufficient length.
     case lengthOutOfRange
-    
+
     /// The preamble or postamble size does not match that specified for E1.31.
     case invalidPreamblePostambleSize
-    
+
     /// The packet identifier does not match that specified for E1.31.
     case invalidPacketIdentifier
-    
+
     /// The flags and length does not match that specified for E1.31.
     case invalidFlagsAndLength
-    
+
     /// The `Vector` is not recognized.
     case invalidVector(_ vector: UInt32)
-    
+
     /// A field could not be parsed from the data.
     case unableToParse(field: String)
 
@@ -202,5 +204,5 @@ enum RootLayerValidationError: LocalizedError {
             return "Unable to parse \(field) in Root Layer."
         }
     }
-        
+
 }

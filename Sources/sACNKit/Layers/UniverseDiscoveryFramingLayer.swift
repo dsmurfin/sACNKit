@@ -37,7 +37,7 @@ struct UniverseDiscoveryFramingLayer {
         /// Contains a  `ExtendedDiscoveryLayer`.
         case extendedDiscovery = 0x00000002
     }
-    
+
     /// Universe Discovery Layer Data Offsets
     ///
     /// Enumerates the data offset for each field in this layer.
@@ -49,16 +49,16 @@ struct UniverseDiscoveryFramingLayer {
         case reserved = 70
         case data = 74
     }
-    
+
     /// The vector describing the data in the layer.
-    private (set) var vector: Vector
-    
+    private(set) var vector: Vector
+
     /// A name for this source, such as a user specified human-readable string, or serial number for the device.
-    private (set) var sourceName: String
-    
+    private(set) var sourceName: String
+
     /// The data contained in the layer.
-    private (set) var data: Data
-    
+    private(set) var data: Data
+
     /// Creates a Framing Layer as Data.
     ///
     /// - Parameters:
@@ -74,7 +74,7 @@ struct UniverseDiscoveryFramingLayer {
         data.append(contentsOf: [0x00, 0x00, 0x00, 0x00])
         return data
     }
-    
+
     /// Attempts to create a Universe Discovery Framing Layer from the data.
     ///
     /// - Parameters:
@@ -86,9 +86,11 @@ struct UniverseDiscoveryFramingLayer {
     ///
     static func parse(fromData data: Data) throws -> Self {
         guard data.count > Offset.data.rawValue else { throw UniverseDiscoveryFramingLayerValidationError.lengthOutOfRange }
-        
+
         // the flags and length
-        guard let flagsAndLength = data.toFlagsAndLength(atOffset: Offset.flagsAndLength.rawValue), flagsAndLength.length == data.count-Offset.flagsAndLength.rawValue else {
+        guard let flagsAndLength = data.toFlagsAndLength(atOffset: Offset.flagsAndLength.rawValue),
+            flagsAndLength.length == data.count - Offset.flagsAndLength.rawValue
+        else {
             throw UniverseDiscoveryFramingLayerValidationError.invalidFlagsAndLength
         }
         // the vector for this layer
@@ -98,7 +100,7 @@ struct UniverseDiscoveryFramingLayer {
         guard let validVector = Vector.init(rawValue: vector) else {
             throw UniverseDiscoveryFramingLayerValidationError.invalidVector(vector)
         }
-        
+
         // the name of this source
         guard let sourceName: String = data.toString(ofLength: Source.sourceNameMaxBytes, atOffset: Offset.sourceName.rawValue) else {
             throw UniverseDiscoveryFramingLayerValidationError.unableToParse(field: "Source Name")
@@ -108,10 +110,10 @@ struct UniverseDiscoveryFramingLayer {
 
         // layer data
         let data = data.subdata(in: Offset.data.rawValue..<data.count)
-        
+
         return Self(vector: validVector, sourceName: sourceName, data: data)
     }
-    
+
 }
 
 /// Universe Discovery Framing Layer Data Extension
@@ -126,7 +128,9 @@ internal extension Data {
     ///
     mutating func replacingUniverseDiscoveryFramingFlagsAndLength(with length: UInt16) {
         let flagsAndLength = FlagsAndLength.fromLength(length)
-        self.replaceSubrange(UniverseDiscoveryFramingLayer.Offset.flagsAndLength.rawValue...UniverseDiscoveryFramingLayer.Offset.flagsAndLength.rawValue+1, with: flagsAndLength.data)
+        self.replaceSubrange(
+            UniverseDiscoveryFramingLayer.Offset.flagsAndLength.rawValue...UniverseDiscoveryFramingLayer.Offset.flagsAndLength.rawValue + 1,
+            with: flagsAndLength.data)
     }
 }
 
@@ -135,16 +139,16 @@ internal extension Data {
 /// Enumerates all possible `UniverseDiscoveryFramingLayer` parsing errors.
 ///
 enum UniverseDiscoveryFramingLayerValidationError: LocalizedError {
-    
+
     /// The data is of insufficient length.
     case lengthOutOfRange
-    
+
     /// The flags and length does not match that specified for E1.31.
     case invalidFlagsAndLength
-    
+
     /// The `Vector` is not recognized.
     case invalidVector(_ vector: UInt32)
-    
+
     /// A field could not be parsed from the data.
     case unableToParse(field: String)
 
@@ -161,6 +165,5 @@ enum UniverseDiscoveryFramingLayerValidationError: LocalizedError {
             return "Unable to parse \(field) in Universe Discovery Framing Layer."
         }
     }
-        
-}
 
+}

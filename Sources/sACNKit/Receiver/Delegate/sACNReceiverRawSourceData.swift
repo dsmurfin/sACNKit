@@ -28,38 +28,38 @@ import Foundation
 ///
 /// Data received from a source.
 public struct sACNReceiverRawSourceData {
-    
+
     /// The source CID.
     public var cid: UUID
-    
+
     /// The name of the source.
     public var name: String
-    
+
     /// The hostname of the source.
     public var hostname: String
-    
+
     /// The universe received.
     public var universe: UInt16
-    
+
     /// The universe priority received.
     public var priority: UInt8
-    
+
     /// Whether this is preview data.
     public var preview: Bool
-    
+
     /// Whether the sampling is occuring.
     ///
     /// A receiver of data for a source that is still sampling may wish to ignore it.
     public var isSampling: Bool
-    
+
     /// The DMX512-A START code.
     public var startCode: DMX.STARTCode
-    
+
     /// The number of values.
     public var valuesCount: Int
 
     /// The values received from this source.
     /// This may be less than 512.
     public var values: [UInt8]
-    
+
 }

@@ -27,14 +27,14 @@ import Foundation
 /// sACN Discovery Receiver Source
 ///
 public struct sACNDiscoveryReceiverSource {
-    
+
     /// The CID of the source.
     public var cid: UUID
 
     /// The name of the source.
     public var name: String
-    
+
     /// The universes found for this source.
     public var universes: [UInt16]
-    
+
 }

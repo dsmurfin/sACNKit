@@ -36,7 +36,7 @@ public protocol sACNReceiverRawDelegate: AnyObject {
     ///    - error: An optional error which occured when the socket was closed.
     ///
     func receiver(_ receiver: sACNReceiverRaw, interface: String?, socketDidCloseWithError error: Error?)
-    
+
     /// Called when new data is received from a source for a universe.
     ///
     /// Note: This call is synchronous, so should be handled quickly.
@@ -46,7 +46,7 @@ public protocol sACNReceiverRawDelegate: AnyObject {
     ///    - sourceData: The universe data received.
     ///
     func receiverReceivedUniverseData(_ receiver: sACNReceiverRaw, sourceData: sACNReceiverRawSourceData)
-    
+
     /// Called when the receiver begins sampling.
     ///
     /// This may occur when it is started, or when interfaces are changed.
@@ -55,7 +55,7 @@ public protocol sACNReceiverRawDelegate: AnyObject {
     ///    - receiver: The receiver.
     ///
     func receiverStartedSampling(_ receiver: sACNReceiverRaw)
-    
+
     /// Called when the receiver ends sampling.
     ///
     /// - Parameters:
@@ -74,7 +74,7 @@ public protocol sACNReceiverRawDelegate: AnyObject {
     func receiver(_ receiver: sACNReceiverRaw, lostSources: [UUID])
 
     /// Called when the receiver loses per-address priority for a source.
-    /// 
+    ///
     /// - Parameters:
     ///    - receiver: The receiver.
     ///    - source: The source which lost per-address priority.
@@ -88,5 +88,3 @@ public protocol sACNReceiverRawDelegate: AnyObject {
     ///
     func receiverExceededSources(_ receiver: sACNReceiverRaw)
 }
-
-

@@ -28,14 +28,14 @@ import Foundation
 ///
 /// Implements the DMP Layer and handles creation and parsing.
 struct DMPLayer {
-    
+
     /// The flags and length. 0x720b: 20b = 523 (starting octet 115) = 638
     /// This must only be used for constructing packets as received packets may have differing lengths.
     private static let flagsAndLength = Data([0x72, 0x0b])
-    
+
     /// The address type and data type, first property address (DMX512-A START Code is at DMP address 0), and address increment.
     private static let addressPropertyBlock = Data([0xa1, 0x00, 0x00, 0x00, 0x01])
-    
+
     /// The number of slots in the message (plus the START Code).
     /// This must only be used for constructing packets as received packets may have differing lengths.
     private static let propertyValueCount = Data([0x02, 0x01])
@@ -48,7 +48,7 @@ struct DMPLayer {
         /// Contains a Set Property message.
         case setProperty = 0x02
     }
-    
+
     /// DMP Layer Data Offsets
     ///
     /// Enumerates the data offset for each field in this layer.
@@ -62,13 +62,13 @@ struct DMPLayer {
         case propertyValueCount = 8
         case propertyValues = 10
     }
-    
+
     /// The start code for this message.
     var startCode: DMX.STARTCode
-    
+
     /// The values for this message.
     var values: [UInt8]
-    
+
     /// Creates a DMP Layer as Data.
     ///
     /// - Parameters:
@@ -87,7 +87,7 @@ struct DMPLayer {
         data.append(contentsOf: values)
         return data
     }
-    
+
     /// Attempts to create a DMP Layer from the data.
     ///
     /// - Parameters:
@@ -98,11 +98,13 @@ struct DMPLayer {
     /// - Returns: A valid `DMPLayer`.
     ///
     static func parse(fromData data: Data) throws -> Self {
-        guard data.count > Offset.propertyValues.rawValue+1 else { throw DMPLayerValidationError.lengthOutOfRange }
-        
+        guard data.count > Offset.propertyValues.rawValue + 1 else { throw DMPLayerValidationError.lengthOutOfRange }
+
         // the flags and length
-        guard let flagsAndLength = data.toFlagsAndLength(atOffset: Offset.flagsAndLength.rawValue), flagsAndLength.length == data.count-Offset.flagsAndLength.rawValue else {
-            throw DataFramingLayerValidationError.invalidFlagsAndLength
+        guard let flagsAndLength = data.toFlagsAndLength(atOffset: Offset.flagsAndLength.rawValue),
+            flagsAndLength.length == data.count - Offset.flagsAndLength.rawValue
+        else {
+            throw DMPLayerValidationError.invalidFlagsAndLength
         }
         // the vector for this layer
         guard let vector: UInt8 = data.toUInt8(atOffset: Offset.vector.rawValue) else {
@@ -126,12 +128,12 @@ struct DMPLayer {
         guard let code: UInt8 = data.toUInt8(atOffset: Offset.propertyValues.rawValue), let STARTCode = DMX.STARTCode(rawValue: code) else {
             throw DMPLayerValidationError.unableToParse(field: "START Code")
         }
-        let propertyValuesOffset = Offset.propertyValues.rawValue+1
-        let values = data.subdata(in: propertyValuesOffset..<propertyValuesOffset+Int(propertyValueCount-1)).bytes
+        let propertyValuesOffset = Offset.propertyValues.rawValue + 1
+        let values = data.subdata(in: propertyValuesOffset..<propertyValuesOffset + Int(propertyValueCount - 1)).bytes
 
         return Self(startCode: STARTCode, values: values)
     }
-    
+
 }
 
 /// DMP Layer Data Extension
@@ -145,9 +147,9 @@ internal extension Data {
     ///    - values: The values to be replaced in the layer.
     ///
     mutating func replacingDMPLayerValues(with values: [UInt8]) {
-        self.replaceSubrange(DMPLayer.Offset.propertyValues.rawValue+1..<DMPLayer.Offset.propertyValues.rawValue+1+values.count, with: values)
+        self.replaceSubrange(DMPLayer.Offset.propertyValues.rawValue + 1..<DMPLayer.Offset.propertyValues.rawValue + 1 + values.count, with: values)
     }
-    
+
     /// Replaces the `DMPLayer` value at a specific offset.
     ///
     /// - Parameters:
@@ -155,7 +157,7 @@ internal extension Data {
     ///    - offset: The offset of the value to be replaced.
     ///
     mutating func replacingDMPLayerValue(_ value: UInt8, at offset: Int) {
-        self[DMPLayer.Offset.propertyValues.rawValue+offset+1] = value
+        self[DMPLayer.Offset.propertyValues.rawValue + offset + 1] = value
     }
 }
 
@@ -164,22 +166,22 @@ internal extension Data {
 /// Enumerates all possible `DMPLayer` parsing errors.
 ///
 enum DMPLayerValidationError: LocalizedError {
-    
+
     /// The data is of insufficient length.
     case lengthOutOfRange
-    
+
     /// The flags and length does not match that specified for E1.31.
     case invalidFlagsAndLength
-    
+
     /// The `Vector` is not recognized.
     case invalidVector(_ vector: UInt8)
-    
+
     /// The address propert block does not match that specified for E1.31.
     case invalidAddressPropertyBlock
-    
+
     /// The property value count is not recognized.
     case invalidPropertyValueCount(_ count: UInt16)
-    
+
     /// A field could not be parsed from the data.
     case unableToParse(field: String)
 
@@ -200,6 +202,5 @@ enum DMPLayerValidationError: LocalizedError {
             return "Unable to parse \(field) in DMP Layer."
         }
     }
-        
-}
 
+}

@@ -28,24 +28,24 @@ import Foundation
 ///
 /// An sACN universes contains level and priority information.
 public struct sACNSourceUniverse {
-    
+
     /// The universe number.
-    public private (set) var number: UInt16
-    
+    public private(set) var number: UInt16
+
     /// The per-packet priority.
-    public private (set) var priority: UInt8?
-    
+    public private(set) var priority: UInt8?
+
     /// The level data (512).
-    public private (set) var levels: [UInt8]
-    
+    public private(set) var levels: [UInt8]
+
     /// The priority (per-slot) data (512).
-    public private (set) var priorities: [UInt8]?
-    
+    public private(set) var priorities: [UInt8]?
+
     /// Whether this universe uses per-slot priority.
     public var usesPerSlotPriority: Bool {
         return priorities != nil
     }
-    
+
     /// Initializes a universe with an optional per-packet priority and an array of levels.
     /// If less than 512 levels are provided levels will be padded to 512.
     /// If more than 512 levels are provided, levels will be truncated to 512.
@@ -59,14 +59,14 @@ public struct sACNSourceUniverse {
     public init(number: UInt16, priority: UInt8? = nil, levels: [UInt8], priorities: [UInt8]? = nil) {
         self.number = number.nearestValidUniverse()
         self.priority = priority?.nearestValidPriority()
-        
+
         // truncate, then pad levels
         var validLevels = levels.prefix(DMX.addressCount)
         for _ in validLevels.count..<DMX.addressCount {
             validLevels.append(0)
         }
         self.levels = Array(validLevels)
-        
+
         // truncate, then pad slot priorities
         if let priorities = priorities {
             var validPriorities = priorities.prefix(DMX.addressCount)
@@ -76,7 +76,7 @@ public struct sACNSourceUniverse {
             self.priorities = validPriorities.map { $0.validPriority() ? $0 : UInt8.defaultPriority }
         }
     }
-    
+
     /// Updates the per-packet priority.
     ///
     /// - Parameters:
@@ -85,7 +85,7 @@ public struct sACNSourceUniverse {
     public mutating func updatePriority(_ priority: UInt8) {
         self.priority = priority.nearestValidPriority()
     }
-    
+
     /// Updates all levels.
     ///
     /// If less than 512 levels are provided levels will be padded with zeros to 512.
@@ -101,7 +101,7 @@ public struct sACNSourceUniverse {
         }
         self.levels = Array(validLevels)
     }
-    
+
     /// Updates all levels with a complete set of 512 new levels.
     ///
     /// - Parameters:
@@ -113,7 +113,7 @@ public struct sACNSourceUniverse {
         precondition(levels.count == DMX.addressCount, "A set of 512 levels must be provided.")
         self.levels = levels
     }
-    
+
     /// Updates all priorities.
     ///
     /// If less than 512 priorities (per-slot) are provided priorities will be padded with defaults to 512.
@@ -128,7 +128,7 @@ public struct sACNSourceUniverse {
         }
         self.priorities = validPriorities.map { $0.validPriority() ? $0 : UInt8.defaultPriority }
     }
-    
+
     /// Updates all priorities (per-slot) with a complete set of 512 new priorities.
     ///
     /// - Parameters:
@@ -140,14 +140,14 @@ public struct sACNSourceUniverse {
         precondition(priorities.count == DMX.addressCount, "A complete set of 512 priorities must be provided.")
         self.priorities = priorities
     }
-    
+
 }
 
 /// sACN Source Universe Extension
 ///
 /// Equatable conformance.
 extension sACNSourceUniverse: Equatable {
-    public static func ==(lhs: sACNSourceUniverse, rhs: sACNSourceUniverse) -> Bool {
+    public static func == (lhs: sACNSourceUniverse, rhs: sACNSourceUniverse) -> Bool {
         return lhs.number == rhs.number
     }
 }

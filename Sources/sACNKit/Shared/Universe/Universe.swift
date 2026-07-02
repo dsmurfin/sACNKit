@@ -27,11 +27,11 @@ import Foundation
 /// Universe
 ///
 enum Universe {
-    
+
     /// The range of data universe numbers.
     static let dataUniverseNumbers: ClosedRange<UInt16> = UInt16.validUniverses
-    
+
     /// The universe number used for discovery.
     static let discoveryUniverseNumber: UInt16 = 64214
-    
+
 }

@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "modernization-*"]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Build & Test (macOS)
+    # macos-26 defaults to Xcode 26, whose toolchain satisfies the package's Swift 6.2 floor.
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v7
+      - name: Swift version
+        run: swift --version
+      - name: Build
+        run: swift build
+      - name: Test
+        run: swift test
+
+  format:
+    name: Format check
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v7
+      - name: swift-format lint
+        run: swift format lint --strict --recursive --configuration .swift-format Sources Tests
+
+# Linux (and, best-effort, Android / Windows) CI is added in Phase 3, once the
+# SwiftNIO migration removes the Objective-C CocoaAsyncSocket dependency that
+# currently prevents the package from building off-Apple. See MODERNIZATION.md.

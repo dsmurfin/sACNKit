@@ -38,10 +38,10 @@ enum FlagsAndLength {
     ///
     static func fromLength(_ length: UInt16) -> UInt16 {
         let escapedLength = length & 0b0000_1111_1111_1111
-        let escapedFlags  = UInt16(0x07) << 12 & 0b1111_0000_0000_0000
+        let escapedFlags = UInt16(0x07) << 12 & 0b1111_0000_0000_0000
         return escapedFlags | escapedLength
     }
-    
+
     /// Extracts the length from a Flags and Length field.
     ///
     /// - Parameters:
@@ -51,7 +51,7 @@ enum FlagsAndLength {
     ///
     static func toLength(from flagsAndLength: UInt16) -> UInt16? {
         let escapedLength = flagsAndLength & 0b0000_1111_1111_1111
-        let escapedFlags  = flagsAndLength >> 12
+        let escapedFlags = flagsAndLength >> 12
         return escapedFlags == 7 ? UInt16(escapedLength) : nil
     }
 }

@@ -36,7 +36,7 @@ extension Data {
     /// - Returns: An optional UInt8 value.
     ///
     func toUInt8(atOffset offset: Int) -> UInt8? {
-        self.withUnsafeBytes { $0.baseAddress?.loadUnaligned(atOffset: offset, as: UInt8.self) }
+        self.withUnsafeBytes { $0.baseAddress?.loadUnaligned(fromByteOffset: offset, as: UInt8.self) }
     }
 
     /// Attempts to create a UInt16 from this data at a specified offset.
@@ -47,7 +47,7 @@ extension Data {
     /// - Returns: An optional UInt16 value.
     ///
     func toUInt16(atOffset offset: Int) -> UInt16? {
-        self.withUnsafeBytes { $0.baseAddress?.loadUnaligned(atOffset: offset, as: UInt16.self).bigEndian }
+        self.withUnsafeBytes { $0.baseAddress?.loadUnaligned(fromByteOffset: offset, as: UInt16.self).bigEndian }
     }
 
     /// Attempts to create a UInt32 from this data at a specified offset.
@@ -58,9 +58,9 @@ extension Data {
     /// - Returns: An optional UInt32 value.
     ///
     func toUInt32(atOffset offset: Int) -> UInt32? {
-        self.withUnsafeBytes { $0.baseAddress?.loadUnaligned(atOffset: offset, as: UInt32.self).bigEndian }
+        self.withUnsafeBytes { $0.baseAddress?.loadUnaligned(fromByteOffset: offset, as: UInt32.self).bigEndian }
     }
-    
+
     /// Attempts to create a UUID from this data at a specified offset.
     ///
     /// - Parameters:
@@ -69,14 +69,12 @@ extension Data {
     /// - Returns: An optional UUID value.
     ///
     func toUUID(atOffset offset: Int) -> UUID? {
-        var bytes = [UInt8]()
-        for index in offset..<offset+16 {
-            guard let byte = self.toUInt8(atOffset: index) else { return nil }
-            bytes.append(byte)
+        guard offset >= 0, offset + 16 <= count else { return nil }
+        return withUnsafeBytes { buffer in
+            buffer.baseAddress.map { UUID(uuid: $0.loadUnaligned(fromByteOffset: offset, as: uuid_t.self)) }
         }
-        return NSUUID(uuidBytes: bytes) as UUID
     }
-    
+
     /// Attempts to create a String of a certain length from this data at a specified offset.
     ///
     /// - Parameters:
@@ -86,8 +84,8 @@ extension Data {
     /// - Returns: An optional String value.
     ///
     func toString(ofLength length: Int, atOffset offset: Int) -> String? {
-        guard offset+length <= self.count else { return nil }
-        let data = self.subdata(in: offset..<offset+length)
+        guard offset + length <= self.count else { return nil }
+        let data = self.subdata(in: offset..<offset + length)
         let repairedString = String(decoding: data, as: UTF8.self)
         if let index = repairedString.firstIndex(of: "�") {
             let prefix = repairedString.prefix(upTo: index)
@@ -96,7 +94,7 @@ extension Data {
             return repairedString.trimmingCharacters(in: CharacterSet(charactersIn: "\0"))
         }
     }
-    
+
     /// Attempts to access Flags and Length from this data at a specified offset.
     ///
     /// - Parameters:
@@ -119,7 +117,7 @@ extension Data {
     func hexEncodedString() -> String {
         return map { String(format: "%02hhx", $0) }.joined()
     }
-    
+
     /// The data object as an array of bytes (`[UInt8]`).
     var bytes: [UInt8] {
         return [UInt8](self)
@@ -189,19 +187,19 @@ extension String {
     func data(paddedTo length: Int) -> Data {
         // get the first maxLength valid unicode bytes
         var truncatedString = self.truncated(toMaxBytes: length)
-        
+
         // pad if neccessary
         for _ in truncatedString.utf8.count..<length {
             truncatedString.append("\0")
         }
-        
+
         if let data = truncatedString.data(using: .utf8) {
             return data
         } else {
             return Data((0..<length).map { _ in UInt8(0) })
         }
     }
-    
+
     /// Creates a string truncated to a safe Unicode boundary to a maximum number of bytes.
     ///
     /// - Parameters:
@@ -211,7 +209,7 @@ extension String {
     ///
     func truncated(toMaxBytes maxBytes: Int) -> String {
         guard let data = self.data(using: .utf8) else { return "" }
-        
+
         // if the string bytes aren't greater just return it
         guard data.count > maxBytes else { return self }
 
@@ -221,31 +219,12 @@ extension String {
 
             // ensure the data would not be longer than max bytes
             guard bytesCount + data.count <= maxBytes else {
-                let previousIndex = self.index(self.startIndex, offsetBy: index-1)
+                let previousIndex = self.index(self.startIndex, offsetBy: index - 1)
                 return String(self[...previousIndex])
             }
 
             bytesCount += data.count
         }
         return ""
-    }
-}
-
-/// Unsafe Raw Pointer
-///
-/// Data Extensions to `UnsafeRawPointer`.
-extension UnsafeRawPointer {
-    /// Loads a value from memory, even it is is unaligned.
-    ///
-    /// - Parameters:
-    ///    - offset: The offset at which to load the value.
-    ///    - type: The type to be loaded.
-    ///
-    func loadUnaligned<T>(atOffset offset: Int, as: T.Type) -> T {
-        assert(_isPOD(T.self)) // relies on the type being POD (no refcounting or other management)
-        let buffer = UnsafeMutablePointer<T>.allocate(capacity: 1)
-        defer { buffer.deallocate() }
-        memcpy(buffer, self+offset, MemoryLayout<T>.size)
-        return buffer.pointee
     }
 }
