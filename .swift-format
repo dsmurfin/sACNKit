@@ -1,0 +1,11 @@
+{
+  "indentConditionalCompilationBlocks" : false,
+  "indentation" : {
+    "spaces" : 4
+  },
+  "lineLength" : 150,
+  "rules" : {
+    "ReplaceForEachWithForLoop" : false
+  },
+  "version" : 1
+}
