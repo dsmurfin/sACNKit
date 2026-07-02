@@ -85,7 +85,13 @@ class ReceiverRawSource {
     /// Whether this source has been notified as per-address lost.
     private(set) var notifiedPerAddressLost: Bool
 
-    init(cid: UUID, hostname: String, ipFamily: ComponentSocketIPFamily, name: String, sequence: UInt8, state: State) {
+    /// The network data loss timeout used for the packet timer.
+    private let sourceLossTimeout: UInt64
+
+    init(
+        cid: UUID, hostname: String, ipFamily: ComponentSocketIPFamily, name: String, sequence: UInt8, state: State,
+        sourceLossTimeout: UInt64 = sACNReceiverRaw.sourceLossTimeout
+    ) {
         self.cid = cid
         self.hostname = hostname
         self.ipFamily = ipFamily
@@ -98,6 +104,7 @@ class ReceiverRawSource {
         self.papTimer = MonotonicTimer()
         notifiedLost = false
         notifiedPerAddressLost = false
+        self.sourceLossTimeout = sourceLossTimeout
     }
 
     // MARK: Per-address priority
@@ -135,7 +142,7 @@ class ReceiverRawSource {
     ///    - instant: Whether this timer should occur instantly.
     ///
     func startPacketTimer(instant: Bool = false) {
-        packetTimer.start(interval: instant ? 0 : sACNReceiverRaw.sourceLossTimeout)
+        packetTimer.start(interval: instant ? 0 : sourceLossTimeout)
     }
 
     /// Resets the packet priority timer.

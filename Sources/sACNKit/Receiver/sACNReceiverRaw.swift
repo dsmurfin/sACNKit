@@ -40,7 +40,8 @@ public class sACNReceiverRaw {
     private let ipMode: sACNIPMode
 
     /// The queue on which socket notifications occur (also used to protect state).
-    private let socketDelegateQueue: DispatchQueue
+    /// Internal to allow tests to drive packet processing on the correct queue.
+    let socketDelegateQueue: DispatchQueue
 
     /// The identifiers of sockets and their sampling status.
     ///
@@ -49,7 +50,7 @@ public class sACNReceiverRaw {
     ///
     /// If this receiver is set to listen on all interfaces there will only be a single socket.
     /// Sampling occurs for this socket only.
-    private var socketsSampling: [UUID: Bool]
+    private(set) var socketsSampling: [UUID: Bool]
 
     /// The sockets used for communications (one per interface).
     /// The key for each socket is the interface it is bound to (or an empty string for all interfaces).
@@ -127,6 +128,12 @@ public class sACNReceiverRaw {
     /// How long to wait for a per-address priority start code (0xdd) packet when discovering a source (1500 ms).
     static let perAddressPriorityWait: UInt64 = 1500
 
+    /// The network data loss timeout for this receiver (defaults to `Self.sourceLossTimeout`; overridable for tests).
+    let sourceLossTimeout: UInt64
+
+    /// The per-address priority wait for this receiver (defaults to `Self.perAddressPriorityWait`; overridable for tests).
+    let perAddressPriorityWait: UInt64
+
     /// The length of time to sample a new universe (1500 ms).
     private static let sampleTime: DispatchTimeInterval = DispatchTimeInterval.milliseconds(1500)
 
@@ -164,9 +171,23 @@ public class sACNReceiverRaw {
     ///
     /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interfaces must not be empty.
     ///
-    public init?(
+    public convenience init?(
         ipMode: sACNIPMode = .ipv4Only, interfaces: Set<String> = [], universe: UInt16, sourceLimit: Int? = 4, filterPreviewData: Bool = true,
         filterCIDs: Set<UUID> = [], delegateQueue: DispatchQueue
+    ) {
+        self.init(
+            ipMode: ipMode, interfaces: interfaces, universe: universe, sourceLimit: sourceLimit, filterPreviewData: filterPreviewData,
+            filterCIDs: filterCIDs, delegateQueue: delegateQueue, sourceLossTimeout: Self.sourceLossTimeout,
+            perAddressPriorityWait: Self.perAddressPriorityWait)
+    }
+
+    /// Creates a new receiver, additionally allowing the timing constants to be overridden.
+    ///
+    /// Internal seam so tests can exercise timing-driven behavior quickly.
+    ///
+    init?(
+        ipMode: sACNIPMode, interfaces: Set<String>, universe: UInt16, sourceLimit: Int?, filterPreviewData: Bool,
+        filterCIDs: Set<UUID>, delegateQueue: DispatchQueue, sourceLossTimeout: UInt64, perAddressPriorityWait: UInt64
     ) {
         precondition(!ipMode.usesIPv6() || !interfaces.isEmpty, "At least one interface must be provided for IPv6.")
 
@@ -206,6 +227,10 @@ public class sACNReceiverRaw {
 
         // notification
         self.sourceLimitExceededNotified = false
+
+        // timing
+        self.sourceLossTimeout = sourceLossTimeout
+        self.perAddressPriorityWait = perAddressPriorityWait
     }
 
     deinit {
@@ -432,7 +457,7 @@ public class sACNReceiverRaw {
     /// - Parameters:
     ///    - notify: Whether to notify sampling has started (defaults to `true`).
     ///
-    private func beginSamplingPeriod(notify: Bool = true) {
+    func beginSamplingPeriod(notify: Bool = true) {
         dispatchPrecondition(condition: .onQueue(socketDelegateQueue))
 
         guard !sampling else { return }
@@ -452,7 +477,7 @@ public class sACNReceiverRaw {
     }
 
     /// Ends the initial sampling period for this universe.
-    private func endedSamplingPeriod() {
+    func endedSamplingPeriod() {
         socketDelegateQueue.sync {
             sampling = false
 
@@ -481,7 +506,7 @@ public class sACNReceiverRaw {
     }
 
     /// Checks for source loss.
-    private func checkForSourceLoss() {
+    func checkForSourceLoss() {
         var notifyLostSources: Set<UUID> = []
         var removeLostSources: Set<UUID> = []
         sources.forEach { id, source in
@@ -542,7 +567,7 @@ extension sACNReceiverRaw {
     ///    - socketId: The identifier of the socket on which this message was received.
     ///    - hostname: The hostname (address) of the source of the message.
     ///
-    private func process(data: Data, ipFamily: ComponentSocketIPFamily, socketId: UUID, hostname: String) {
+    func process(data: Data, ipFamily: ComponentSocketIPFamily, socketId: UUID, hostname: String) {
         do {
             let rootLayer = try RootLayer.parse(fromData: data)
 
@@ -687,7 +712,7 @@ extension sACNReceiverRaw {
                 // per-address priority waiting period has expired
                 // let the timer run again in case it is received later
                 source.state = .hasLevelsOnly
-                source.startPAPTimer(withInterval: Self.sourceLossTimeout)
+                source.startPAPTimer(withInterval: sourceLossTimeout)
             } else {
                 // a DMX packet was received during per-address priority waiting period
                 notify = false
@@ -721,7 +746,7 @@ extension sACNReceiverRaw {
             source.resetPAPTimer()
         case .waitingForPAP, .hasLevelsOnly:
             source.state = .hasLevelsAndPAP
-            source.startPAPTimer(withInterval: Self.sourceLossTimeout)
+            source.startPAPTimer(withInterval: sourceLossTimeout)
         case .hasLevelsAndPAP:
             source.resetPAPTimer()
         }
@@ -777,7 +802,8 @@ extension sACNReceiverRaw {
             }
         }()
 
-        let source = ReceiverRawSource(cid: cid, hostname: hostname, ipFamily: ipFamily, name: name, sequence: sequence, state: state)
+        let source = ReceiverRawSource(
+            cid: cid, hostname: hostname, ipFamily: ipFamily, name: name, sequence: sequence, state: state, sourceLossTimeout: sourceLossTimeout)
         source.startPacketTimer()
 
         if sampling {
@@ -787,13 +813,13 @@ extension sACNReceiverRaw {
                 break
             case .perAddressPriority:
                 // need to wait for levels (ignore per-address priority packets until a level packet is received)
-                source.startPAPTimer(withInterval: Self.sourceLossTimeout)
+                source.startPAPTimer(withInterval: sourceLossTimeout)
             }
         } else {
             // even if this is a per-address priority packet make sure level packets are being sent before notifying
             switch startCode {
             case .null:
-                source.startPAPTimer(withInterval: Self.perAddressPriorityWait)
+                source.startPAPTimer(withInterval: perAddressPriorityWait)
             case .perAddressPriority:
                 break
             }
