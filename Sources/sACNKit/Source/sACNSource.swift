@@ -30,7 +30,7 @@ import CocoaAsyncSocket
 /// An E1.31-2018 sACN Source which Transmits sACN Messages.
 final public class sACNSource {
 
-    private typealias UniverseData = (universeNumber: UInt16, data: Data)
+    typealias UniverseData = (universeNumber: UInt16, data: Data)
 
     // MARK: Socket
 
@@ -153,7 +153,7 @@ final public class sACNSource {
     private var universeNumbers: [UInt16]
     
     /// The universes added to this source which may be transmitted.
-    private var universes: [SourceUniverse]
+    private(set) var universes: [SourceUniverse]
     
     /// A pre-compiled root layer as `Data`.
     private var rootLayer: Data
@@ -861,87 +861,8 @@ private extension sACNSource {
             universesReadyForSocketRemoval.forEach { $0.terminateSocketsComplete() }
         }
         
-        var universeMessages = [UniverseData]()
-        var socketTerminationMessages = [UniverseData]()
+        let (universeMessages, socketTerminationMessages) = buildDataMessages()
 
-        let rootLayer = rootLayer
-            
-        for (index, _) in activeUniverses.enumerated() {
-            let universe = universes[index]
-            
-            // should levels be sent?
-            let sendLevels: Bool
-            switch universe.transmitCounter {
-            case 0, 11, 22, 33:
-                sendLevels = true
-            default:
-                sendLevels = universe.dirtyCounter > 0 ? true : false
-            }
-            
-            let framingOptions: DataFramingLayer.Options = universe.shouldTerminate ? [.terminated] : .none
-            
-            // should per-slot priority be sent?
-            let sendPriority: Bool
-            if !universe.shouldTerminate, universe.priorities != nil {
-                sendPriority = universe.dirtyPriority || universe.transmitCounter == 0
-            } else {
-                sendPriority = false
-            }
-
-            if sendLevels {
-                var framingLayer = universe.framingLayer
-                framingLayer.replacingSequence(with: universe.sequence)
-                framingLayer.replacingOptions(with: framingOptions)
-                
-                let dmpLayer = universe.dmpLevelsLayer
-
-                let levels = rootLayer+framingLayer+dmpLayer
-                
-                let terminationUniverse: UniverseData?
-                if !socketsShouldTerminate.isEmpty || (universe.shouldTerminate && universe.dirtyCounter > 0) {
-                    let framingOptions: DataFramingLayer.Options = [.terminated]
-                    var framingLayer = universe.framingLayer
-                    framingLayer.replacingSequence(with: universe.sequence)
-                    framingLayer.replacingOptions(with: framingOptions)
-                    let levels = rootLayer+framingLayer+dmpLayer
-                    terminationUniverse = UniverseData(universeNumber: universe.number, data: levels)
-                } else {
-                    terminationUniverse = nil
-                }
-                
-                if !socketsShouldTerminate.isEmpty, let terminationUniverse {
-                    socketTerminationMessages.append(terminationUniverse)
-                }
-                
-                if universe.shouldTerminate && universe.dirtyCounter > 0, let terminationUniverse {
-                    universeMessages.append(terminationUniverse)
-                    universe.incrementSequence()
-                } else if _shouldOutput {
-                    universeMessages.append(UniverseData(universeNumber: universe.number, data: levels))
-                    universe.incrementSequence()
-                }
-                universe.decrementDirty()
-            }
-            
-            if sendPriority {
-                var framingLayer = universe.framingLayer
-                framingLayer.replacingSequence(with: universe.sequence)
-                framingLayer.replacingOptions(with: framingOptions)
-                
-                let dmpLayer = universe.dmpPrioritiesLayer
-
-                let priorities = rootLayer+framingLayer+dmpLayer
-                
-                if _shouldOutput || (universe.shouldTerminate && universe.dirtyCounter > 0) {
-                    universeMessages.append((universeNumber: universe.number, data: priorities))
-                    universe.incrementSequence()
-                    universe.prioritySent()
-                }
-            }
-            
-            universe.incrementCounter()
-        }
-        
         sockets.forEach { interface, socket in
             let messages = socketsShouldTerminate[interface] != nil ? socketTerminationMessages : universeMessages
 
@@ -957,7 +878,109 @@ private extension sACNSource {
             }
         }
     }
-    
+
+}
+
+/// Message building
+///
+/// Extensions to `sACNSource` to build the data messages for transmission.
+///
+extension sACNSource {
+
+    /// Builds the data (and socket-termination) messages for the currently active universes.
+    ///
+    /// This advances each universe's transmit state machine (sequence, dirty and transmit counters)
+    /// and returns the packets to be sent, performing no socket I/O. It is extracted from
+    /// `sendDataMessages()` so the transmit cadence and termination behavior can be unit tested.
+    ///
+    /// - Returns: The universe messages to send, and the messages to send to terminating sockets.
+    ///
+    func buildDataMessages() -> (messages: [UniverseData], socketTermination: [UniverseData]) {
+        let activeUniverses = universes.filter { !$0.shouldTerminate || $0.dirtyCounter > 0 }
+
+        var universeMessages = [UniverseData]()
+        var socketTerminationMessages = [UniverseData]()
+
+        let rootLayer = rootLayer
+
+        for universe in activeUniverses {
+
+            // should levels be sent?
+            let sendLevels: Bool
+            switch universe.transmitCounter {
+            case 0, 11, 22, 33:
+                sendLevels = true
+            default:
+                sendLevels = universe.dirtyCounter > 0 ? true : false
+            }
+
+            let framingOptions: DataFramingLayer.Options = universe.shouldTerminate ? [.terminated] : .none
+
+            // should per-slot priority be sent?
+            let sendPriority: Bool
+            if !universe.shouldTerminate, universe.priorities != nil {
+                sendPriority = universe.dirtyPriority || universe.transmitCounter == 0
+            } else {
+                sendPriority = false
+            }
+
+            if sendLevels {
+                var framingLayer = universe.framingLayer
+                framingLayer.replacingSequence(with: universe.sequence)
+                framingLayer.replacingOptions(with: framingOptions)
+
+                let dmpLayer = universe.dmpLevelsLayer
+
+                let levels = rootLayer+framingLayer+dmpLayer
+
+                let terminationUniverse: UniverseData?
+                if !socketsShouldTerminate.isEmpty || (universe.shouldTerminate && universe.dirtyCounter > 0) {
+                    let framingOptions: DataFramingLayer.Options = [.terminated]
+                    var framingLayer = universe.framingLayer
+                    framingLayer.replacingSequence(with: universe.sequence)
+                    framingLayer.replacingOptions(with: framingOptions)
+                    let levels = rootLayer+framingLayer+dmpLayer
+                    terminationUniverse = UniverseData(universeNumber: universe.number, data: levels)
+                } else {
+                    terminationUniverse = nil
+                }
+
+                if !socketsShouldTerminate.isEmpty, let terminationUniverse {
+                    socketTerminationMessages.append(terminationUniverse)
+                }
+
+                if universe.shouldTerminate && universe.dirtyCounter > 0, let terminationUniverse {
+                    universeMessages.append(terminationUniverse)
+                    universe.incrementSequence()
+                } else if _shouldOutput {
+                    universeMessages.append(UniverseData(universeNumber: universe.number, data: levels))
+                    universe.incrementSequence()
+                }
+                universe.decrementDirty()
+            }
+
+            if sendPriority {
+                var framingLayer = universe.framingLayer
+                framingLayer.replacingSequence(with: universe.sequence)
+                framingLayer.replacingOptions(with: framingOptions)
+
+                let dmpLayer = universe.dmpPrioritiesLayer
+
+                let priorities = rootLayer+framingLayer+dmpLayer
+
+                if _shouldOutput || (universe.shouldTerminate && universe.dirtyCounter > 0) {
+                    universeMessages.append((universeNumber: universe.number, data: priorities))
+                    universe.incrementSequence()
+                    universe.prioritySent()
+                }
+            }
+
+            universe.incrementCounter()
+        }
+
+        return (universeMessages, socketTerminationMessages)
+    }
+
 }
 
 /// sACN Source Validation Error
