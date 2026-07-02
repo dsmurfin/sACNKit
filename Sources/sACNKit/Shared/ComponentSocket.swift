@@ -24,7 +24,6 @@
 
 import Foundation
 import CocoaAsyncSocket
-import Network
 
 /// Component Socket Type
 ///
