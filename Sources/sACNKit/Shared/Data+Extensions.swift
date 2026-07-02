@@ -69,12 +69,10 @@ extension Data {
     /// - Returns: An optional UUID value.
     ///
     func toUUID(atOffset offset: Int) -> UUID? {
-        var bytes = [UInt8]()
-        for index in offset..<offset + 16 {
-            guard let byte = self.toUInt8(atOffset: index) else { return nil }
-            bytes.append(byte)
+        guard offset >= 0, offset + 16 <= count else { return nil }
+        return withUnsafeBytes { buffer in
+            buffer.baseAddress.map { UUID(uuid: $0.loadUnaligned(fromByteOffset: offset, as: uuid_t.self)) }
         }
-        return NSUUID(uuidBytes: bytes) as UUID
     }
 
     /// Attempts to create a String of a certain length from this data at a specified offset.
