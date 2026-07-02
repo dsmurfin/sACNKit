@@ -12,6 +12,8 @@ struct SourceTransmitTests {
     /// data framing layer (sequence number at framing offset 73, options at framing offset 74).
     private static let sequenceOffset = 38 + 73
     private static let optionsOffset = 38 + 74
+    private static let startCodeOffset =
+        RootLayer.Offset.data.rawValue + DataFramingLayer.Offset.data.rawValue + DMPLayer.Offset.propertyValues.rawValue
     private static let terminatedBit: UInt8 = 1 << 6
 
     /// A source with a single active universe (no per-slot priorities, so no priority packets).
@@ -40,6 +42,68 @@ struct SourceTransmitTests {
 
         let numbers = Set(source.buildDataMessages().messages.map { $0.universeNumber })
         #expect(numbers == [1, 7])
+    }
+
+    /// Regression for the transmit indexing bug: `buildDataMessages()` indexed the full `universes`
+    /// array with the filtered `activeUniverses` index, so once a terminated universe preceded an
+    /// active one it processed (and emitted keep-alives for) the wrong universe and starved the rest.
+    @Test("A present-but-inactive universe is skipped and active universes still transmit")
+    func presentButInactiveUniverseIsSkipped() throws {
+        let source = sACNSource(delegateQueue: DispatchQueue(label: "test.source"))
+        try source.addUniverse(sACNSourceUniverse(number: 1, levels: Array(repeating: 0, count: 512)))
+        try source.addUniverse(sACNSourceUniverse(number: 9, levels: Array(repeating: 0, count: 512)))
+        source.shouldOutput(true)
+        for _ in 0..<3 { _ = source.buildDataMessages() }  // drain the initial bursts
+
+        // terminate universe 1 in place (as shouldOutput(false) does for every universe); the
+        // builder performs no removal, so after its 3 termination packets it stays present but inactive
+        source.universes.first { $0.number == 1 }?.terminate(remove: false)
+        for _ in 0..<3 {
+            let numbers = source.buildDataMessages().messages.map { $0.universeNumber }
+            #expect(numbers == [1])  // the termination burst, with universe 9 suppressed
+        }
+
+        // a full keep-alive cycle must emit only universe 9; the pre-fix builder emitted universe 1
+        var emitted = [UInt16]()
+        for _ in 0..<44 {
+            emitted.append(contentsOf: source.buildDataMessages().messages.map { $0.universeNumber })
+        }
+        #expect(Set(emitted) == [9])
+    }
+
+    @Test("Suppressed levels are force-sent at transmit counters 0, 11, 22 and 33")
+    func keepAliveCadence() throws {
+        let source = try activeSource()
+        for _ in 0..<3 { _ = source.buildDataMessages() }  // drain the burst (counters 0, 1, 2)
+
+        var emittingFrames = [Int]()
+        for frame in 0..<44 {
+            if !source.buildDataMessages().messages.isEmpty {
+                emittingFrames.append(frame)
+            }
+        }
+        // the cycle covers counters 3...43 then 0...2; keep-alives fire at counters 11, 22, 33 and 0
+        #expect(emittingFrames == [8, 19, 30, 41])
+    }
+
+    @Test("Suppressed per-address priority is re-sent only at transmit counter 0")
+    func papKeepAliveCadence() throws {
+        let source = sACNSource(delegateQueue: DispatchQueue(label: "test.source"))
+        try source.addUniverse(
+            sACNSourceUniverse(
+                number: 1, levels: Array(repeating: 0, count: 512), priorities: Array(repeating: 100, count: 512)))
+        source.shouldOutput(true)
+        for _ in 0..<3 { _ = source.buildDataMessages() }  // drain the burst (counters 0, 1, 2)
+
+        var papFrames = [Int]()
+        for frame in 0..<44 {
+            for message in source.buildDataMessages().messages
+            where Array(message.data)[Self.startCodeOffset] == DMX.STARTCode.perAddressPriority.rawValue {
+                papFrames.append(frame)
+            }
+        }
+        // one PAP keep-alive per cycle, at counter 0 (~once per second at 44 fps)
+        #expect(papFrames == [41])
     }
 
     @Test("Emitted packets carry incrementing sequence numbers")

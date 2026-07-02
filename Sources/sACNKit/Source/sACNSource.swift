@@ -153,7 +153,8 @@ final public class sACNSource {
     private var universeNumbers: [UInt16]
 
     /// The universes added to this source which may be transmitted.
-    private var universes: [SourceUniverse]
+    /// Internal read access allows tests to stage transmit states the public API only reaches when listening.
+    private(set) var universes: [SourceUniverse]
 
     /// A pre-compiled root layer as `Data`.
     private var rootLayer: Data
