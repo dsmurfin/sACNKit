@@ -193,9 +193,11 @@ final public class sACNSource {
     ///    - ipMode: Optional: IP mode for this source (IPv4/IPv6/Both).
     ///    - interfaces: Optional: The network interfaces for this source. An interface may be a name (e.g. "en1" or "lo0") or the corresponding IP address (e.g. "192.168.4.35").
     ///    - priority: Optional: Default priority for this source, used when universes do not have explicit priorities (values permitted 0-200).
-    ///    - delegateQueue: A delegate queue on which to receive delegate calls from this source.
+    ///    - delegateQueue: A serial dispatch queue on which to receive delegate calls from this source. Must be serial so that callbacks are delivered in order.
     ///
     /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interfaces must not be empty.
+    ///
+    /// - Important: The delegate queue must be a serial queue. Do not change the delegate from within a delegate callback; doing so may deadlock.
     ///
     public init(name: String? = nil, cid: UUID = UUID(), ipMode: sACNIPMode = .ipv4Only, interfaces: Set<String> = [], priority: UInt8 = 100, delegateQueue: DispatchQueue) {
         precondition(!ipMode.usesIPv6() || !interfaces.isEmpty, "At least one interface must be provided for IPv6.")

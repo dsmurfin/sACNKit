@@ -98,9 +98,11 @@ final public class sACNReceiverGroup {
     ///    - sourceLimit: The number of sources this receiver is able to process. This will be dependent on the hardware on which the receiver is running. Defaults to `4`.
     ///    - filterPreviewData: Optional: Whether source preview data should be filtered out (defaults to `true`).
     ///    - filtersCIDs: Optional: A list of CIDs which should be ignored (defaults to none).
-    ///    - delegateQueue: A delegate queue on which to receive delegate calls from this receiver.
+    ///    - delegateQueue: A serial dispatch queue on which to receive delegate calls from this receiver. Must be serial: the group's internal state is only safe because callbacks are serialized on this queue.
     ///
     /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interfaces must not be empty.
+    ///
+    /// - Important: The delegate queue must be a serial queue. Do not call methods on this receiver group (including `setDelegate`) from within a delegate callback; universe data is delivered synchronously and re-entering the group may deadlock.
     ///
     public init(ipMode: sACNIPMode = .ipv4Only, interfaces: Set<String> = [], sourceLimit: Int? = 4, filterPreviewData: Bool = true, filterCIDs: Set<UUID> = [], delegateQueue: DispatchQueue) {
         precondition(!ipMode.usesIPv6() || !interfaces.isEmpty, "At least one interface must be provided for IPv6.")
