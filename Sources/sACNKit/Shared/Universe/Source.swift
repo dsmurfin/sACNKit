@@ -23,7 +23,7 @@
 //
 
 import Foundation
-#if os(iOS)
+#if canImport(UIKit)
 import UIKit
 #endif
 
@@ -32,25 +32,30 @@ import UIKit
 /// A stream of E1.31 Packets for a universe is said to be sent from a source.
 /// Sources are uniquely identified by their CID.
 struct Source: Equatable {
-    
+
     /// The maximum source name length in bytes.
     static let sourceNameMaxBytes = 64
-    
+
     /// A unique identifier for this source.
     var cid: UUID
-    
+
     /// Gets the current device name.
     ///
     /// - Returns: A device name as a string.
     ///
     static func getDeviceName() -> String {
-        #if os(iOS)
+        #if canImport(UIKit)
+        // iOS, tvOS, visionOS and Mac Catalyst.
         return UIDevice.current.name
+        #elseif canImport(Darwin)
+        // macOS: localizedName can be nil, so fall back to the POSIX host name.
+        return Host.current().localizedName ?? ProcessInfo.processInfo.hostName
         #else
-        return Host.current().localizedName!
+        // Linux and other non-Apple platforms.
+        return ProcessInfo.processInfo.hostName
         #endif
     }
-    
+
     /// Builds source name data for this source.
     ///
     /// - parameters:
@@ -61,5 +66,5 @@ struct Source: Equatable {
     static func buildNameData(from name: String) -> Data {
         name.data(paddedTo: Self.sourceNameMaxBytes)
     }
-    
+
 }

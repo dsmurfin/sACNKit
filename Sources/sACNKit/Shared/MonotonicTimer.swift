@@ -23,6 +23,9 @@
 //
 
 import Foundation
+#if canImport(Glibc)
+import Glibc
+#endif
 
 /// Monotonic Timer
 ///
@@ -33,7 +36,7 @@ class MonotonicTimer {
 
     /// The timer's timeout interval.
     private var interval: UInt64
-    
+
     /// Initializes the timer.
     ///
     /// The timer will initialize in an expired state.
@@ -42,10 +45,10 @@ class MonotonicTimer {
     ///    - interval: The interval in milliseconds.
     ///
     init() {
-        self.resetTime =  Self.getMilliseconds()
+        self.resetTime = Self.getMilliseconds()
         self.interval = 0
     }
-    
+
     /// Starts this timer with an interval in milliseconds.
     ///
     /// Starting the timer with an interval of 0 means it will instantly be expired.
@@ -57,16 +60,16 @@ class MonotonicTimer {
         self.resetTime = Self.getMilliseconds()
         self.interval = UInt64(interval)
     }
-    
+
     /// Resets this timer with the previously defined interval.
     func reset() {
-        resetTime =  Self.getMilliseconds()
+        resetTime = Self.getMilliseconds()
     }
-    
+
     func timeElapsed() -> UInt64 {
-        Self.getMilliseconds()-resetTime
+        Self.getMilliseconds() - resetTime
     }
-    
+
     /// Checks if this timer has expired.
     ///
     /// - Returns: Whether the timer has expired.
@@ -74,7 +77,7 @@ class MonotonicTimer {
     func isExpired() -> Bool {
         return interval == 0 || Self.getMilliseconds() - resetTime > interval
     }
-    
+
     /// Returns the amount of time remaining.
     ///
     /// - Returns: The time remaining in milliseconds.
@@ -88,10 +91,16 @@ class MonotonicTimer {
         }
         return 0
     }
-    
+
     /// Gets the clock time in milliseconds.
     private static func getMilliseconds() -> UInt64 {
-        clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1_000_000
+        #if canImport(Darwin)
+        return clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1_000_000
+        #else
+        var ts = timespec()
+        clock_gettime(CLOCK_MONOTONIC, &ts)
+        return UInt64(ts.tv_sec) * 1_000 + UInt64(ts.tv_nsec) / 1_000_000
+        #endif
     }
-    
+
 }
