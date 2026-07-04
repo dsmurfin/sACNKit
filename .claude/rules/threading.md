@@ -1,7 +1,7 @@
 # Threading & concurrency contract (current, pre-modernization)
 
 The library has **no Swift Concurrency yet**; it uses GCD serial queues + weak delegates. This will be
-replaced by an actor/`async` model (@MODERNIZATION.md Phases 2 & 4). Until then, these contracts hold
+replaced by an actor/`async` model (MODERNIZATION.md Phases 2 & 4). Until then, these contracts hold
 and must be respected when touching the code.
 
 ## Queue model
@@ -35,4 +35,4 @@ and must be respected when touching the code.
 
 ## When modernizing (Phases 2/4)
 - Make value-type DTOs/models `Sendable` first (Phase 2), then convert components to actors and replace
-  the queue-as-mutex + delegate delivery with `async`/`AsyncStream` (Phase 4). See @MODERNIZATION.md.
+  the queue-as-mutex + delegate delivery with `async`/`AsyncStream` (Phase 4). See MODERNIZATION.md.

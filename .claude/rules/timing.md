@@ -1,7 +1,7 @@
 # sACN timing constants & suppression model
 
 The protocol is timing-sensitive; these are the intervals the code uses today, with source locations.
-Treat them as the current baseline. Some are targeted for change in @MODERNIZATION.md Phase 5 (e.g. a
+Treat them as the current baseline. Some are targeted for change in MODERNIZATION.md Phase 5 (e.g. a
 separately-configurable PAP keep-alive to match ETC), so verify against source before relying on a value.
 
 ## Transmit (source)
@@ -29,7 +29,7 @@ separately-configurable PAP keep-alive to match ETC), so verify against source b
 ## Clock
 - Timeouts use `Shared/MonotonicTimer.swift` (monotonic, immune to wall-clock changes). It currently
   calls the **Darwin-only** `clock_gettime_nsec_np(CLOCK_UPTIME_RAW)`, a cross-platform blocker being
-  fixed in Phase 1 (see @MODERNIZATION.md). `isExpired` uses strict `>`, and `interval == 0` means
+  fixed in Phase 1 (see MODERNIZATION.md). `isExpired` uses strict `>`, and `interval == 0` means
   "already expired" (used to force immediate expiry, e.g. on termination).
 - GCD timers come from the vendored `Vendor/CwlDispatch.swift` (`DispatchSource.repeatingTimer` /
   `singleTimer`), slated for removal with the SwiftNIO/async migration.
