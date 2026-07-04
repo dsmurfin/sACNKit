@@ -42,4 +42,4 @@ than rebuilt every frame: `replacingSequence`, `replacingOptions`, `replacingPri
 packets at frame rate times N universes is the thing it deliberately avoids.
 
 > Behavioral timing (frame rate, keep-alive, source-loss, sampling, PAP wait) lives in
-> @.claude/rules/timing.md. Threading/queue contracts live in @.claude/rules/threading.md.
+> `.claude/rules/timing.md`. Threading/queue contracts live in `.claude/rules/threading.md`.
