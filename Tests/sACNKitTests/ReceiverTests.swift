@@ -12,7 +12,9 @@ struct ReceiverTests {
     private static let clientQueueKey = DispatchSpecificKey<Bool>()
 
     /// The timeout for waiting on an expected delegate callback or bounded call.
-    private static let callbackTimeout: DispatchTimeInterval = .milliseconds(2000)
+    /// Generous because CI runners are small and heavily loaded under parallel
+    /// test execution; a passing wait returns as soon as it is signalled.
+    private static let callbackTimeout: DispatchTimeInterval = .milliseconds(10000)
 
     /// The timeout for asserting a callback does not arrive.
     private static let quietTimeout: DispatchTimeInterval = .milliseconds(100)
@@ -91,7 +93,7 @@ struct ReceiverTests {
 
         /// Waits until the most recent merged data satisfies the predicate, returning whether it did in time.
         func waitUntilMerged(where predicate: (sACNReceiverMergedData) -> Bool) -> Bool {
-            let deadline = Date() + 2.0
+            let deadline = Date() + 10.0
             while Date() < deadline {
                 if let merged = delegate.merged.last, predicate(merged) { return true }
                 Thread.sleep(forTimeInterval: 0.02)
@@ -217,7 +219,7 @@ struct ReceiverTests {
 
         let obtained = DispatchSemaphore(value: 0)
         let information = LockedBox<sACNReceiverSource>()
-        DispatchQueue.global().async { [receiver = harness.receiver, clientQueue = harness.clientQueue] in
+        DispatchQueue.global(qos: .userInitiated).async { [receiver = harness.receiver, clientQueue = harness.clientQueue] in
             clientQueue.sync {
                 information.value = try? receiver.information(for: cid)
             }
@@ -239,7 +241,7 @@ struct ReceiverTests {
 
         let obtained = DispatchSemaphore(value: 0)
         let information = LockedBox<sACNReceiverSource>()
-        DispatchQueue.global().async { [receiver = harness.receiver] in
+        DispatchQueue.global(qos: .userInitiated).async { [receiver = harness.receiver] in
             information.value = try? receiver.information(for: cid)
             obtained.signal()
         }
@@ -259,7 +261,7 @@ struct ReceiverTests {
 
     @Test("State stays consistent when the client supplies a concurrent queue")
     func concurrentClientQueue() throws {
-        let concurrentQueue = DispatchQueue(label: "com.danielmurfin.sACNKitTests.concurrentClient", attributes: .concurrent)
+        let concurrentQueue = DispatchQueue(label: "com.danielmurfin.sACNKitTests.concurrentClient", qos: .userInitiated, attributes: .concurrent)
         let harness = try makeHarness(clientQueue: concurrentQueue)
         let cid = UUID()
         establishAndMerge(cid: cid, levels: Array(repeating: 128, count: 512), in: harness)

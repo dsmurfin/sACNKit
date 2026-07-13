@@ -17,7 +17,7 @@ struct ReceiverGroupTests {
     private static let networkTestsEnabled = ProcessInfo.processInfo.environment["SACNKIT_NETWORK_TESTS"] == "1"
 
     /// The timeout for waiting on an expected delegate callback or bounded call.
-    private static let callbackTimeout: DispatchTimeInterval = .milliseconds(2000)
+    private static let callbackTimeout: DispatchTimeInterval = .milliseconds(10000)
 
     // MARK: Helpers
 

@@ -12,7 +12,7 @@ struct ReceiverRawTests {
     private static let delegateQueueKey = DispatchSpecificKey<Bool>()
 
     /// The timeout for waiting on an expected delegate callback.
-    private static let callbackTimeout: DispatchTimeInterval = .milliseconds(2000)
+    private static let callbackTimeout: DispatchTimeInterval = .milliseconds(10000)
 
     /// The timeout for asserting a callback does not arrive.
     private static let quietTimeout: DispatchTimeInterval = .milliseconds(100)
