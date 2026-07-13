@@ -27,7 +27,7 @@ import Foundation
 /// Root Layer
 ///
 /// Implements the Root Layer and handles creation and parsing.
-struct RootLayer {
+struct RootLayer: Sendable {
 
     /// The offset at which length counting starts.
     static let lengthCountOffset = Offset.flagsAndLength.rawValue
@@ -167,7 +167,7 @@ extension Data {
 ///
 /// Enumerates all possible `RootLayer` parsing errors.
 ///
-enum RootLayerValidationError: LocalizedError {
+enum RootLayerValidationError: LocalizedError, Sendable {
 
     /// The data is of insufficient length.
     case lengthOutOfRange

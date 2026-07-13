@@ -85,7 +85,13 @@ class ReceiverRawSource {
     /// Whether this source has been notified as per-address lost.
     private(set) var notifiedPerAddressLost: Bool
 
-    init(cid: UUID, hostname: String, ipFamily: ComponentSocketIPFamily, name: String, sequence: UInt8, state: State) {
+    /// The network data loss timeout used for the packet timer.
+    private let sourceLossTimeout: UInt64
+
+    init(
+        cid: UUID, hostname: String, ipFamily: ComponentSocketIPFamily, name: String, sequence: UInt8, state: State,
+        sourceLossTimeout: UInt64
+    ) {
         self.cid = cid
         self.hostname = hostname
         self.ipFamily = ipFamily
@@ -98,6 +104,7 @@ class ReceiverRawSource {
         self.papTimer = MonotonicTimer()
         notifiedLost = false
         notifiedPerAddressLost = false
+        self.sourceLossTimeout = sourceLossTimeout
     }
 
     // MARK: Per-address priority
@@ -135,7 +142,7 @@ class ReceiverRawSource {
     ///    - instant: Whether this timer should occur instantly.
     ///
     func startPacketTimer(instant: Bool = false) {
-        packetTimer.start(interval: instant ? 0 : sACNReceiverRaw.sourceLossTimeout)
+        packetTimer.start(interval: instant ? 0 : sourceLossTimeout)
     }
 
     /// Resets the packet priority timer.
@@ -162,16 +169,19 @@ class ReceiverRawSource {
         }
     }
 
-    /// Notifies this source as having lost per-address priority if it has not already been notified.
+    /// Marks this source as having lost per-address priority.
     ///
-    /// - Parameters:
-    ///    - delegate: The optional `sACNReceiverDelegate` to notify.
-    ///    - receiver: The receiver which this call is associated with.
+    /// - Returns: Whether this is the first loss since per-address priority was last present, and should therefore be notified.
     ///
-    func notifyPerAddressLost(using delegate: sACNReceiverRawDelegate?, from receiver: sACNReceiverRaw) {
-        guard !notifiedPerAddressLost else { return }
+    func markPerAddressPriorityLost() -> Bool {
+        guard !notifiedPerAddressLost else { return false }
         notifiedPerAddressLost = true
-        delegate?.receiver(receiver, lostPerAddressPriorityFor: cid)
+        return true
+    }
+
+    /// Marks per-address priority as present again, so a future loss is notified.
+    func resetPerAddressPriorityLost() {
+        notifiedPerAddressLost = false
     }
 
 }

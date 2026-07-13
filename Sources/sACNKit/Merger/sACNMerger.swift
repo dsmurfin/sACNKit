@@ -623,7 +623,7 @@ public class sACNMerger {
 /// Merger Config
 ///
 /// Optionally used for initial configuration of a merger.
-public struct sACNMergerConfig {
+public struct sACNMergerConfig: Sendable {
 
     /// Whether per-address priority packets should be transmitted.
     ///
@@ -644,7 +644,7 @@ public struct sACNMergerConfig {
 
 /// Merger Error
 ///
-public enum sACNMergerError: Error {
+public enum sACNMergerError: Error, Sendable {
 
     /// There is already a merger with the universe requested.
     case mergerExistsWithUniverse(_ universe: UInt16)

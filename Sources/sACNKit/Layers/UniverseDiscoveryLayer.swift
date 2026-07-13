@@ -27,7 +27,7 @@ import Foundation
 /// Universe Discovery Layer
 ///
 /// Implements the Universe Discovery Layer and handles creation and parsing.
-struct UniverseDiscoveryLayer {
+struct UniverseDiscoveryLayer: Sendable {
 
     /// The maximum number of universe numbers to include in this layer.
     static let maxUniverseNumbers = 512
@@ -138,7 +138,7 @@ struct UniverseDiscoveryLayer {
 ///
 /// Enumerates all possible `UniverseDiscoveryLayer` parsing errors.
 ///
-enum UniverseDiscoveryLayerValidationError: LocalizedError {
+enum UniverseDiscoveryLayerValidationError: LocalizedError, Sendable {
 
     /// The data is of insufficient length.
     case lengthOutOfRange

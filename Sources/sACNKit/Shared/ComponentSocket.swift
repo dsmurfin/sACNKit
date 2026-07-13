@@ -314,7 +314,7 @@ protocol ComponentSocketDelegate: AnyObject {
 ///
 /// Enumerates all possible `sACNComponentSocketError` errors.
 ///
-public enum sACNComponentSocketError: LocalizedError {
+public enum sACNComponentSocketError: LocalizedError, Sendable {
 
     /// It was not possible to enable port reuse.
     case couldNotEnablePortReuse

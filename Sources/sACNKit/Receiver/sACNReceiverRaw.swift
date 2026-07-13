@@ -40,7 +40,8 @@ public class sACNReceiverRaw {
     private let ipMode: sACNIPMode
 
     /// The queue on which socket notifications occur (also used to protect state).
-    private let socketDelegateQueue: DispatchQueue
+    /// Internal to allow tests to drive packet processing on the correct queue.
+    let socketDelegateQueue: DispatchQueue
 
     /// The identifiers of sockets and their sampling status.
     ///
@@ -49,7 +50,7 @@ public class sACNReceiverRaw {
     ///
     /// If this receiver is set to listen on all interfaces there will only be a single socket.
     /// Sampling occurs for this socket only.
-    private var socketsSampling: [UUID: Bool]
+    private(set) var socketsSampling: [UUID: Bool]
 
     /// The sockets used for communications (one per interface).
     /// The key for each socket is the interface it is bound to (or an empty string for all interfaces).
@@ -67,12 +68,17 @@ public class sACNReceiverRaw {
 
     /// Changes the receiver delegate of this receiver to the the object passed.
     ///
+    /// Passing `nil` does not fence in-flight deliveries: a callback already enqueued
+    /// may still be delivered to the previous delegate after this returns.
+    ///
     /// - Parameters:
     ///   - delegate: The delegate to receive notifications.
     ///
     public func setDelegate(_ delegate: sACNReceiverRawDelegate?) {
-        delegateQueue.sync {
+        if DispatchQueue.getSpecific(key: Self.socketDelegateQueueSpecificKey) == true {
             self.delegate = delegate
+        } else {
+            socketDelegateQueue.sync { self.delegate = delegate }
         }
     }
 
@@ -82,8 +88,10 @@ public class sACNReceiverRaw {
     ///   - delegate: The delegate to receive notifications.
     ///
     public func setDebugDelegate(_ delegate: sACNComponentDebugDelegate?) {
-        delegateQueue.sync {
+        if DispatchQueue.getSpecific(key: Self.socketDelegateQueueSpecificKey) == true {
             self.debugDelegate = delegate
+        } else {
+            socketDelegateQueue.sync { self.debugDelegate = delegate }
         }
     }
 
@@ -127,6 +135,12 @@ public class sACNReceiverRaw {
     /// How long to wait for a per-address priority start code (0xdd) packet when discovering a source (1500 ms).
     static let perAddressPriorityWait: UInt64 = 1500
 
+    /// The network data loss timeout for this receiver (defaults to `Self.sourceLossTimeout`; overridable for tests).
+    let sourceLossTimeout: UInt64
+
+    /// The per-address priority wait for this receiver (defaults to `Self.perAddressPriorityWait`; overridable for tests).
+    let perAddressPriorityWait: UInt64
+
     /// The length of time to sample a new universe (1500 ms).
     private static let sampleTime: DispatchTimeInterval = DispatchTimeInterval.milliseconds(1500)
 
@@ -141,6 +155,16 @@ public class sACNReceiverRaw {
 
     /// The timer used for checking for source loss and checks.
     private var heartbeatTimer: DispatchSourceTimer?
+
+    /// The generation token for the sample timer, bumped whenever the timer is
+    /// installed or torn down. A tick is only honored while its generation still
+    /// matches, so a stale tick from a cancelled or replaced timer is discarded.
+    /// (The vendored timer factory attaches handlers at creation, so comparing
+    /// identity against the stored timer is not possible.)
+    private var samplingGeneration: UInt64 = 0
+
+    /// The generation token for the heartbeat timer (see `samplingGeneration`).
+    private var heartbeatGeneration: UInt64 = 0
 
     // MARK: Notification
 
@@ -164,9 +188,23 @@ public class sACNReceiverRaw {
     ///
     /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interfaces must not be empty.
     ///
-    public init?(
+    public convenience init?(
         ipMode: sACNIPMode = .ipv4Only, interfaces: Set<String> = [], universe: UInt16, sourceLimit: Int? = 4, filterPreviewData: Bool = true,
         filterCIDs: Set<UUID> = [], delegateQueue: DispatchQueue
+    ) {
+        self.init(
+            ipMode: ipMode, interfaces: interfaces, universe: universe, sourceLimit: sourceLimit, filterPreviewData: filterPreviewData,
+            filterCIDs: filterCIDs, delegateQueue: delegateQueue, sourceLossTimeout: Self.sourceLossTimeout,
+            perAddressPriorityWait: Self.perAddressPriorityWait)
+    }
+
+    /// Creates a new receiver, additionally allowing the timing constants to be overridden.
+    ///
+    /// Internal seam so tests can exercise timing-driven behavior quickly.
+    ///
+    init?(
+        ipMode: sACNIPMode, interfaces: Set<String>, universe: UInt16, sourceLimit: Int?, filterPreviewData: Bool,
+        filterCIDs: Set<UUID>, delegateQueue: DispatchQueue, sourceLossTimeout: UInt64, perAddressPriorityWait: UInt64
     ) {
         precondition(!ipMode.usesIPv6() || !interfaces.isEmpty, "At least one interface must be provided for IPv6.")
 
@@ -206,6 +244,10 @@ public class sACNReceiverRaw {
 
         // notification
         self.sourceLimitExceededNotified = false
+
+        // timing
+        self.sourceLossTimeout = sourceLossTimeout
+        self.perAddressPriorityWait = perAddressPriorityWait
     }
 
     deinit {
@@ -244,6 +286,9 @@ public class sACNReceiverRaw {
     /// Stops this receiver.
     ///
     /// The receiver will stop listening for sACN Data messages.
+    ///
+    /// This is not a delivery barrier: callbacks already enqueued to the delegate
+    /// queue may still be delivered after this returns.
     public func stop() {
         if DispatchQueue.getSpecific(key: Self.socketDelegateQueueSpecificKey) == true {
             _stop()
@@ -260,6 +305,7 @@ public class sACNReceiverRaw {
         guard _isListening else { return }
         self._isListening = false
 
+        samplingGeneration &+= 1
         sampleTimer?.cancel()
         sampleTimer = nil
         stopHeartbeat()
@@ -411,11 +457,15 @@ public class sACNReceiverRaw {
 
     /// Starts the main heartbeat timer, which handles source loss and other checks.
     private func startHeartbeat() {
+        heartbeatGeneration &+= 1
+        let generation = heartbeatGeneration
         let timer = DispatchSource.repeatingTimer(interval: Self.heartbeatTime, leeway: Self.timingLeeway, queue: Self.timerQueue) { [weak self] in
-            if let _ = self?.heartbeatTimer {
-                self?.socketDelegateQueue.async {
-                    self?.checkForSourceLoss()
-                }
+            guard let self else { return }
+            self.socketDelegateQueue.async {
+                // the generation is read on the queue that owns it, so a tick from
+                // a timer which was since cancelled or replaced is discarded here
+                guard generation == self.heartbeatGeneration else { return }
+                self.checkForSourceLoss()
             }
         }
         heartbeatTimer = timer
@@ -423,6 +473,7 @@ public class sACNReceiverRaw {
 
     /// Stops the main heartbeat timer.
     private func stopHeartbeat() {
+        heartbeatGeneration &+= 1
         heartbeatTimer?.cancel()
         heartbeatTimer = nil
     }
@@ -432,7 +483,7 @@ public class sACNReceiverRaw {
     /// - Parameters:
     ///    - notify: Whether to notify sampling has started (defaults to `true`).
     ///
-    private func beginSamplingPeriod(notify: Bool = true) {
+    func beginSamplingPeriod(notify: Bool = true) {
         dispatchPrecondition(condition: .onQueue(socketDelegateQueue))
 
         guard !sampling else { return }
@@ -440,48 +491,67 @@ public class sACNReceiverRaw {
 
         // notify sampling has started
         if notify {
-            delegateQueue.async { self.delegate?.receiverStartedSampling(self) }
+            let delegate = delegate
+            delegateQueue.async { delegate?.receiverStartedSampling(self) }
         }
 
+        samplingGeneration &+= 1
+        let generation = samplingGeneration
         let timer = DispatchSource.singleTimer(interval: Self.sampleTime, leeway: Self.timingLeeway, queue: Self.timerQueue) { [weak self] in
-            if let _ = self?.sampleTimer {
-                self?.endedSamplingPeriod()
+            guard let self else { return }
+            self.socketDelegateQueue.async {
+                // the generation is read on the queue that owns it, so a tick from
+                // a timer which was since cancelled or replaced is discarded here
+                guard generation == self.samplingGeneration else { return }
+                self._endedSamplingPeriod()
             }
         }
         self.sampleTimer = timer
     }
 
     /// Ends the initial sampling period for this universe.
-    private func endedSamplingPeriod() {
-        socketDelegateQueue.sync {
-            sampling = false
+    func endedSamplingPeriod() {
+        if DispatchQueue.getSpecific(key: Self.socketDelegateQueueSpecificKey) == true {
+            _endedSamplingPeriod()
+        } else {
+            socketDelegateQueue.sync { _endedSamplingPeriod() }
+        }
+    }
 
-            // remove any sockets which were sampling
-            let keys = socketsSampling.filter { $0.value == true }.map { $0.key }
+    /// Performs the end of sampling logic.
+    ///
+    /// Must be called on `socketDelegateQueue`.
+    private func _endedSamplingPeriod() {
+        dispatchPrecondition(condition: .onQueue(socketDelegateQueue))
+        sampling = false
+
+        // remove any sockets which were sampling
+        let keys = socketsSampling.filter { $0.value == true }.map { $0.key }
+        keys.forEach { key in
+            socketsSampling.removeValue(forKey: key)
+        }
+
+        // any sockets left should now be sampling
+        if !socketsSampling.isEmpty {
+            let keys = socketsSampling.keys
             keys.forEach { key in
-                socketsSampling.removeValue(forKey: key)
+                socketsSampling.updateValue(true, forKey: key)
             }
 
-            // any sockets left should now be sampling
-            if !socketsSampling.isEmpty {
-                let keys = socketsSampling.keys
-                keys.forEach { key in
-                    socketsSampling.updateValue(true, forKey: key)
-                }
+            self.beginSamplingPeriod(notify: false)
+        } else {
+            samplingGeneration &+= 1
+            self.sampleTimer?.cancel()
+            self.sampleTimer = nil
 
-                self.beginSamplingPeriod(notify: false)
-            } else {
-                self.sampleTimer?.cancel()
-                self.sampleTimer = nil
-
-                // notify sampling has ended
-                delegateQueue.async { self.delegate?.receiverEndedSampling(self) }
-            }
+            // notify sampling has ended
+            let delegate = delegate
+            delegateQueue.async { delegate?.receiverEndedSampling(self) }
         }
     }
 
     /// Checks for source loss.
-    private func checkForSourceLoss() {
+    func checkForSourceLoss() {
         var notifyLostSources: Set<UUID> = []
         var removeLostSources: Set<UUID> = []
         sources.forEach { id, source in
@@ -515,7 +585,8 @@ public class sACNReceiverRaw {
 
         // notify all lost sources
         if !notifyLostSources.isEmpty {
-            delegateQueue.async { self.delegate?.receiver(self, lostSources: Array(notifyLostSources)) }
+            let delegate = delegate
+            delegateQueue.async { delegate?.receiver(self, lostSources: Array(notifyLostSources)) }
         }
 
         // remove any expired sources
@@ -542,7 +613,7 @@ extension sACNReceiverRaw {
     ///    - socketId: The identifier of the socket on which this message was received.
     ///    - hostname: The hostname (address) of the source of the message.
     ///
-    private func process(data: Data, ipFamily: ComponentSocketIPFamily, socketId: UUID, hostname: String) {
+    func process(data: Data, ipFamily: ComponentSocketIPFamily, socketId: UUID, hostname: String) {
         do {
             let rootLayer = try RootLayer.parse(fromData: data)
 
@@ -557,11 +628,14 @@ extension sACNReceiverRaw {
                 try processDataPacket(rootLayer: rootLayer, ipFamily: ipFamily, socketId: socketId, hostname: hostname)
             }
         } catch let error as RootLayerValidationError {
-            delegateQueue.async { self.debugDelegate?.debugLog(error.logDescription) }
+            let debugDelegate = debugDelegate
+            delegateQueue.async { debugDelegate?.debugLog(error.logDescription) }
         } catch let error as DataFramingLayerValidationError {
-            delegateQueue.async { self.debugDelegate?.debugLog(error.logDescription) }
+            let debugDelegate = debugDelegate
+            delegateQueue.async { debugDelegate?.debugLog(error.logDescription) }
         } catch let error as DMPLayerValidationError {
-            delegateQueue.async { self.debugDelegate?.debugLog(error.logDescription) }
+            let debugDelegate = debugDelegate
+            delegateQueue.async { debugDelegate?.debugLog(error.logDescription) }
         } catch {
             // unknown error
         }
@@ -653,8 +727,8 @@ extension sACNReceiverRaw {
         // only notify if this is not preview data, or if we shouldn't filter it
         guard !previewData || !filterPreviewData else { return }
 
-        // data is provided synchronously
-        delegateQueue.sync { self.delegate?.receiverReceivedUniverseData(self, sourceData: universeData) }
+        let delegate = delegate
+        delegateQueue.async { delegate?.receiverReceivedUniverseData(self, sourceData: universeData) }
     }
 
     /// Decides whether level data should be notified for a source.
@@ -687,7 +761,7 @@ extension sACNReceiverRaw {
                 // per-address priority waiting period has expired
                 // let the timer run again in case it is received later
                 source.state = .hasLevelsOnly
-                source.startPAPTimer(withInterval: Self.sourceLossTimeout)
+                source.startPAPTimer(withInterval: sourceLossTimeout)
             } else {
                 // a DMX packet was received during per-address priority waiting period
                 notify = false
@@ -698,7 +772,11 @@ extension sACNReceiverRaw {
         case .hasLevelsAndPAP:
             guard source.isPAPTimerExpired else { break }
             // the source stopped sending per-address priorities but continues to send levels
-            source.notifyPerAddressLost(using: delegate, from: self)
+            if source.markPerAddressPriorityLost() {
+                let cid = source.cid
+                let delegate = delegate
+                delegateQueue.async { delegate?.receiver(self, lostPerAddressPriorityFor: cid) }
+            }
             source.state = .hasLevelsOnly
         }
     }
@@ -721,7 +799,8 @@ extension sACNReceiverRaw {
             source.resetPAPTimer()
         case .waitingForPAP, .hasLevelsOnly:
             source.state = .hasLevelsAndPAP
-            source.startPAPTimer(withInterval: Self.sourceLossTimeout)
+            source.resetPerAddressPriorityLost()
+            source.startPAPTimer(withInterval: sourceLossTimeout)
         case .hasLevelsAndPAP:
             source.resetPAPTimer()
         }
@@ -754,7 +833,8 @@ extension sACNReceiverRaw {
         if let sourceLimit, sources.count >= sourceLimit {
             if !sourceLimitExceededNotified {
                 sourceLimitExceededNotified = true
-                delegateQueue.async { self.delegate?.receiverExceededSources(self) }
+                let delegate = delegate
+                delegateQueue.async { delegate?.receiverExceededSources(self) }
             }
             return nil
         }
@@ -777,7 +857,8 @@ extension sACNReceiverRaw {
             }
         }()
 
-        let source = ReceiverRawSource(cid: cid, hostname: hostname, ipFamily: ipFamily, name: name, sequence: sequence, state: state)
+        let source = ReceiverRawSource(
+            cid: cid, hostname: hostname, ipFamily: ipFamily, name: name, sequence: sequence, state: state, sourceLossTimeout: sourceLossTimeout)
         source.startPacketTimer()
 
         if sampling {
@@ -787,13 +868,13 @@ extension sACNReceiverRaw {
                 break
             case .perAddressPriority:
                 // need to wait for levels (ignore per-address priority packets until a level packet is received)
-                source.startPAPTimer(withInterval: Self.sourceLossTimeout)
+                source.startPAPTimer(withInterval: sourceLossTimeout)
             }
         } else {
             // even if this is a per-address priority packet make sure level packets are being sent before notifying
             switch startCode {
             case .null:
-                source.startPAPTimer(withInterval: Self.perAddressPriorityWait)
+                source.startPAPTimer(withInterval: perAddressPriorityWait)
             case .perAddressPriority:
                 break
             }
@@ -865,7 +946,8 @@ extension sACNReceiverRaw: ComponentSocketDelegate {
     ///
     func socket(_ socket: ComponentSocket, socketDidCloseWithError error: Error?) {
         guard error != nil, self._isListening else { return }
-        delegateQueue.async { self.delegate?.receiver(self, interface: socket.interface, socketDidCloseWithError: error) }
+        let delegate = delegate
+        delegateQueue.async { delegate?.receiver(self, interface: socket.interface, socketDidCloseWithError: error) }
     }
 
     /// Called when a debug socket log is produced.
@@ -875,6 +957,7 @@ extension sACNReceiverRaw: ComponentSocketDelegate {
     ///    - logMessage: The debug message.
     ///
     func debugLog(for socket: ComponentSocket, with logMessage: String) {
-        delegateQueue.async { self.debugDelegate?.debugSocketLog(logMessage) }
+        let debugDelegate = debugDelegate
+        delegateQueue.async { debugDelegate?.debugSocketLog(logMessage) }
     }
 }

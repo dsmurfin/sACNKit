@@ -41,7 +41,7 @@ struct UDP {
 /// - ipv6Only: Only use IPv6
 /// - ipv4And6: Use IPv4 and IPv6
 ///
-public enum sACNIPMode: String, CaseIterable {
+public enum sACNIPMode: String, CaseIterable, Sendable {
     /// The  component should only use IPv4.
     case ipv4Only = "IPv4"
     /// The component should only use IPv6.

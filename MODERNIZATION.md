@@ -103,11 +103,12 @@ declares only `iOS`/`macOS`. Three hard blockers plus incidental ones:
 - **Force-unwraps (crash paths):** `Shared/Universe/Source.swift:50` `Host.current().localizedName!`
   (nil on headless/sandboxed macOS); `Receiver/sACNReceiver.swift:120` and
   `Receiver/sACNReceiverGroup.swift:135` force-unwrap a failable `init(...)!`.
-- **Receiver delegate deadlock window:** `sACNReceiverRaw.processDataPacket` delivers via
-  `delegateQueue.sync` (`:642`) while holding `socketDelegateQueue`; a client calling back into the
-  receiver from within a callback can AB/BA deadlock. (TX side uses `delegateQueue.async` - inconsistent.)
-- **Undocumented serial-queue requirement:** `sACNReceiver`/`sACNReceiverGroup` mutate state with no
-  lock of their own - safe only if the client's `delegateQueue` is serial; a concurrent queue races.
+- **Receiver delegate deadlock window** *(fixed in Phase 2)*: `sACNReceiverRaw.processDataPacket`
+  delivered via `delegateQueue.sync` while holding `socketDelegateQueue`; a client calling back into
+  the receiver from within a callback could AB/BA deadlock. Delivery is now `.async`, like TX.
+- **Undocumented serial-queue requirement** *(fixed in Phase 2)*: `sACNReceiver`/`sACNReceiverGroup`
+  mutated state with no lock of their own - safe only if the client's `delegateQueue` was serial.
+  Both now serialize state on internal queues.
 - **Mutable "constants":** `Shared/DMX/DMX.swift:33` `public static var addressCount`; multicast
   prefix statics in `NetworkDefinitions.swift:81,104` are `var` (read-only in practice) - should be `let`.
 - **Hot-path allocation:** `Shared/Data+Extensions.swift` `loadUnaligned` (`:246`, per-call heap
@@ -202,6 +203,12 @@ intended behavior change beyond crash-safety and the one confirmed TX correctnes
 **Goal:** make the data model `Sendable`-clean and close the known concurrency-safety gaps *before*
 the actor migration, so the migration is incremental rather than a big-bang.
 
+> **Status: complete** - see docs/modernization/phase-2.md for the executed plan and completion
+> notes (including the strict-concurrency recon inventory that seeds Phase 4). Notable findings
+> during execution: a previously undocumented defect - the PAP-lost callback was delivered directly
+> on the internal socket queue (`ReceiverRawSource.notifyPerAddressLost`) - now fixed; and `Error`
+> already refines `Sendable` (SE-0302), so delegate `Error?` parameters were never a blocker.
+
 - Enable strict concurrency checking incrementally via `swiftSettings`
   (`.enableUpcomingFeature`/`StrictConcurrency` at `.minimal`→`.targeted`).
 - Adopt `Sendable` on value-type DTOs and models: `sACNSourceUniverse`, universe/priority/DMX types
@@ -295,7 +302,11 @@ Phase 1 net (now running on the modern stack). See the inventory below for the f
   `dirtyPriority`, and the 3-packet termination model - the sequence/on-wire fixes hook into these
   rather than reworking layer construction.
 - **Receiver behavior:** flicker after the sampling period; network reset re-samples only *new*
-  interfaces (`is_sampling` per source); sampling-exclusion-on-init fix.
+  interfaces (`is_sampling` per source); sampling-exclusion-on-init fix. *Note:* sACNKit's local
+  contribution to post-sampling flicker (an inverted condition in `sACNReceiver.samplingEnded` that
+  dropped sampling-captured per-address priorities) was already fixed in the Phase 2 post-review
+  addendum (docs/modernization/phase-2.md); the ETC port here covers the remaining upstream
+  behavior, not that flip.
 - **Merger correctness:** output independent of input order; `perAddressPrioritiesActive` correct when
   PAP == universe priority; remove-PAP-then-add-PAP sequencing.
 - **Robustness:** remote-source / merger-source handle wrapping/rollover at `0xFFFF`.
@@ -371,6 +382,8 @@ practical caveats specific to an sACN library - both **integration/runtime**, no
 
 **Receiver / sampling**
 - Flicker after sampling period fixed; network reset re-samples only new interfaces (3.0.0).
+  (sACNKit's local `samplingEnded` PAP-transfer inversion is already fixed - see the Phase 2
+  post-review addendum - so this item is the upstream behavior only.)
 - Sources no longer excluded from sampling during init (3.0.0).
 - Receiver data model gains `sync_universe`, `sequence`, `options` (SACN-392, 4.0.0).
 
