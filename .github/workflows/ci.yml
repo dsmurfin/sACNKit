@@ -34,20 +34,29 @@ jobs:
         run: swift test --sanitize=thread
 
   loopback:
-    # Non-blocking while multicast loopback and socket binding prove stable on
-    # shared runners; promote to a required check once it has a clean observation
-    # window (at which point fold the env var into the thread-sanitizer job and
-    # remove this one). The filter avoids duplicating the full TSan suite run;
-    # the network-gated tests live in these two suites.
+    # Non-blocking: multicast DELIVERY does not work on GitHub-hosted macOS
+    # runners (binds and multicast joins succeed - the gated group tests pass -
+    # but loopback datagrams never arrive), so this check is informational. A
+    # failure surfaces as a warning annotation, not a red check (step-level
+    # continue-on-error keeps the job green; job-level would still show a
+    # failing check on the PR). Promoting this to a required check needs a
+    # runner where multicast loopback works (e.g. self-hosted), at which point
+    # fold the env var into the thread-sanitizer job and remove this one.
+    # The filter avoids duplicating the full TSan suite run; the network-gated
+    # tests live in these two suites.
     name: Loopback + TSan (macOS, non-blocking)
     runs-on: macos-26
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
       - name: Test with network loopback under TSan
+        id: loopback
+        continue-on-error: true
         run: swift test --sanitize=thread --filter "LoopbackTests|ReceiverGroupTests"
         env:
           SACNKIT_NETWORK_TESTS: "1"
+      - name: Surface loopback result
+        if: steps.loopback.outcome == 'failure'
+        run: echo "::warning title=Loopback tests failed (non-blocking)::Network loopback tests failed on this runner. Multicast delivery is unreliable on shared runners; see the previous step's log before suspecting a regression."
 
   format:
     name: Format check
