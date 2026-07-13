@@ -90,7 +90,7 @@ class ReceiverRawSource {
 
     init(
         cid: UUID, hostname: String, ipFamily: ComponentSocketIPFamily, name: String, sequence: UInt8, state: State,
-        sourceLossTimeout: UInt64 = sACNReceiverRaw.sourceLossTimeout
+        sourceLossTimeout: UInt64
     ) {
         self.cid = cid
         self.hostname = hostname
@@ -171,12 +171,17 @@ class ReceiverRawSource {
 
     /// Marks this source as having lost per-address priority.
     ///
-    /// - Returns: Whether this is the first loss, and should therefore be notified.
+    /// - Returns: Whether this is the first loss since per-address priority was last present, and should therefore be notified.
     ///
     func markPerAddressPriorityLost() -> Bool {
         guard !notifiedPerAddressLost else { return false }
         notifiedPerAddressLost = true
         return true
+    }
+
+    /// Marks per-address priority as present again, so a future loss is notified.
+    func resetPerAddressPriorityLost() {
+        notifiedPerAddressLost = false
     }
 
 }

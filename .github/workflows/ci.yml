@@ -19,8 +19,9 @@ jobs:
       - name: Swift version
         run: swift --version
       - name: Build
-        # Warnings-as-errors locks in the zero-warning state under StrictConcurrency=targeted.
-        run: swift build -Xswiftc -warnings-as-errors
+        # Warnings-as-errors locks in the zero-warning state under StrictConcurrency=targeted,
+        # including the test target (--build-tests).
+        run: swift build --build-tests -Xswiftc -warnings-as-errors
       - name: Test
         run: swift test
 
@@ -31,6 +32,22 @@ jobs:
       - uses: actions/checkout@v7
       - name: Test with TSan
         run: swift test --sanitize=thread
+
+  loopback:
+    # Non-blocking while multicast loopback and socket binding prove stable on
+    # shared runners; promote to a required check once it has a clean observation
+    # window (at which point fold the env var into the thread-sanitizer job and
+    # remove this one). The filter avoids duplicating the full TSan suite run;
+    # the network-gated tests live in these two suites.
+    name: Loopback + TSan (macOS, non-blocking)
+    runs-on: macos-26
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test with network loopback under TSan
+        run: swift test --sanitize=thread --filter "LoopbackTests|ReceiverGroupTests"
+        env:
+          SACNKIT_NETWORK_TESTS: "1"
 
   format:
     name: Format check

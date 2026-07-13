@@ -91,12 +91,13 @@ struct ReceiverRawTests {
     ///    - endSampling: Whether to immediately end the initial sampling state, so packets
     ///    from any socket are accepted (defaults to `true`).
     ///
-    private func makeHarness(endSampling: Bool = true, sourceLossTimeout: UInt64 = 60, perAddressPriorityWait: UInt64 = 60) -> Harness {
+    private func makeHarness(endSampling: Bool = true, sourceLossTimeout: UInt64 = 60, perAddressPriorityWait: UInt64 = 60) throws -> Harness {
         let delegateQueue = DispatchQueue(label: "com.danielmurfin.sACNKitTests.receiverRawDelegate")
         delegateQueue.setSpecific(key: Self.delegateQueueKey, value: true)
-        let receiver = sACNReceiverRaw(
-            ipMode: .ipv4Only, interfaces: [], universe: 1, sourceLimit: 4, filterPreviewData: true, filterCIDs: [],
-            delegateQueue: delegateQueue, sourceLossTimeout: sourceLossTimeout, perAddressPriorityWait: perAddressPriorityWait)!
+        let receiver = try #require(
+            sACNReceiverRaw(
+                ipMode: .ipv4Only, interfaces: [], universe: 1, sourceLimit: 4, filterPreviewData: true, filterCIDs: [],
+                delegateQueue: delegateQueue, sourceLossTimeout: sourceLossTimeout, perAddressPriorityWait: perAddressPriorityWait))
         let delegate = DelegateMock()
         receiver.setDelegate(delegate)
         if endSampling {
@@ -135,7 +136,7 @@ struct ReceiverRawTests {
 
     @Test("A new source's levels are held until per-address priority arrives, then delivered with payload fidelity")
     func newSourceHeldUntilPAP() throws {
-        let harness = makeHarness()
+        let harness = try makeHarness()
         let cid = UUID()
         let levels: [UInt8] = (0..<512).map { UInt8($0 % 256) }
         let priorities: [UInt8] = [200] + Array(repeating: 100, count: 511)
@@ -170,8 +171,8 @@ struct ReceiverRawTests {
     }
 
     @Test("Packets with invalid sequence numbers are discarded")
-    func sequenceFiltering() {
-        let harness = makeHarness()
+    func sequenceFiltering() throws {
+        let harness = try makeHarness()
         let cid = UUID()
         var sequence = establishSource(cid: cid, in: harness)
 
@@ -191,8 +192,8 @@ struct ReceiverRawTests {
     }
 
     @Test("Preview data is filtered when preview filtering is enabled")
-    func previewFiltering() {
-        let harness = makeHarness()
+    func previewFiltering() throws {
+        let harness = try makeHarness()
         let cid = UUID()
         let sequence = establishSource(cid: cid, in: harness)
 
@@ -205,7 +206,7 @@ struct ReceiverRawTests {
 
     @Test("During sampling, data is delivered immediately and marked as sampling")
     func samplingDelivery() throws {
-        let harness = makeHarness(endSampling: false)
+        let harness = try makeHarness(endSampling: false)
         let samplingSocketId = try #require(harness.receiver.socketsSampling.keys.first)
         harness.receiver.socketDelegateQueue.sync {
             harness.receiver.beginSamplingPeriod()
@@ -223,23 +224,23 @@ struct ReceiverRawTests {
     }
 
     @Test("Packets for another universe are ignored")
-    func universeMismatchIgnored() {
-        let harness = makeHarness()
+    func universeMismatchIgnored() throws {
+        let harness = try makeHarness()
         harness.inject(dataPacket(cid: UUID(), universe: 2, sequence: 0))
         harness.inject(dataPacket(cid: UUID(), universe: 2, sequence: 1, startCode: .perAddressPriority))
         #expect(!harness.waitForData(timeout: Self.quietTimeout), "packets for another universe should be ignored")
     }
 
     @Test("A new source which is already terminated is ignored")
-    func terminatedNewSourceIgnored() {
-        let harness = makeHarness()
+    func terminatedNewSourceIgnored() throws {
+        let harness = try makeHarness()
         harness.inject(dataPacket(cid: UUID(), sequence: 0, options: .terminated))
         #expect(!harness.waitForData(timeout: Self.quietTimeout), "a terminated stream should not create a source")
     }
 
     @Test("A client may call back into the receiver from within a data callback")
-    func reentrantCallbackDoesNotDeadlock() {
-        let harness = makeHarness()
+    func reentrantCallbackDoesNotDeadlock() throws {
+        let harness = try makeHarness()
         let cid = UUID()
 
         let reentered = DispatchSemaphore(value: 0)
@@ -261,7 +262,7 @@ struct ReceiverRawTests {
 
     @Test("Per-address priority loss is notified exactly once, on the delegate queue")
     func perAddressPriorityLoss() throws {
-        let harness = makeHarness()
+        let harness = try makeHarness()
         let cid = UUID()
         var sequence = establishSource(cid: cid, in: harness)
 
@@ -282,8 +283,8 @@ struct ReceiverRawTests {
     }
 
     @Test("Data callbacks preserve packet order")
-    func orderingPreserved() {
-        let harness = makeHarness()
+    func orderingPreserved() throws {
+        let harness = try makeHarness()
         let cid = UUID()
         var sequence = establishSource(cid: cid, in: harness)
 
@@ -301,6 +302,55 @@ struct ReceiverRawTests {
         // drop the establishing callback, keep the ordered burst
         let burst = harness.delegate.data.dropFirst().map { $0.values[0] }
         #expect(Array(burst) == (0..<count).map { UInt8($0) }, "data callbacks must arrive in packet order")
+    }
+
+    @Test("Per-address priority loss is notified again after priorities resume")
+    func perAddressPriorityLossAfterResumption() throws {
+        let harness = try makeHarness()
+        let cid = UUID()
+        var sequence = establishSource(cid: cid, in: harness)
+
+        // let the per-address priority timer expire, then send levels only
+        usleep(120_000)
+        harness.inject(dataPacket(cid: cid, sequence: sequence))
+        sequence &+= 1
+        #expect(harness.delegate.papLostSemaphore.wait(timeout: .now() + Self.callbackTimeout) == .success)
+
+        // per-address priority resumes
+        harness.inject(dataPacket(cid: cid, sequence: sequence, startCode: .perAddressPriority, values: Array(repeating: 100, count: 512)))
+        sequence &+= 1
+
+        // a second loss must be notified
+        usleep(120_000)
+        harness.inject(dataPacket(cid: cid, sequence: sequence))
+        #expect(
+            harness.delegate.papLostSemaphore.wait(timeout: .now() + Self.callbackTimeout) == .success,
+            "a second loss must be notified after per-address priority resumed")
+        #expect(harness.delegate.lostPerAddressPriority == [cid, cid])
+    }
+
+    // MARK: Sampling lifecycle
+
+    @Test("endedSamplingPeriod may be called from the socket delegate queue")
+    func endedSamplingPeriodReentrant() throws {
+        let harness = try makeHarness(endSampling: false)
+        harness.receiver.socketDelegateQueue.sync {
+            harness.receiver.endedSamplingPeriod()
+        }
+        #expect(harness.delegate.samplingEndedSemaphore.wait(timeout: .now() + Self.callbackTimeout) == .success)
+    }
+
+    @Test("The sampling timer ends the sampling period and notifies")
+    func samplingTimerEndsSampling() throws {
+        let harness = try makeHarness(endSampling: false)
+        harness.receiver.socketDelegateQueue.sync {
+            harness.receiver.beginSamplingPeriod()
+        }
+        #expect(harness.delegate.samplingStartedSemaphore.wait(timeout: .now() + Self.callbackTimeout) == .success)
+
+        // the production sampling period is 1500 ms; the timer tick hops to the
+        // socket delegate queue and ends sampling
+        #expect(harness.delegate.samplingEndedSemaphore.wait(timeout: .now() + .milliseconds(2500)) == .success)
     }
 
 }

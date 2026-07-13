@@ -12,11 +12,20 @@ contracts hold and must be respected when touching the code.
   is only touched on that queue. When adding state or methods, keep that invariant.
 - `sACNReceiver` and `sACNReceiverGroup` each own a private serial **`stateQueue`** guarding their
   state (`sources`, mergers, `receivers`); public API uses `performOnStateQueue` (a
-  `DispatchSpecificKey` sentinel + `stateQueue.sync`). The state queue must **never target the
-  client's queue and never `sync` onto another component's queue** - deliveries hop with `.async`
-  only (see deadlock notes below).
+  `DispatchSpecificKey` sentinel + `stateQueue.sync`). The state queue must never target the
+  client's queue (see deadlock notes below).
+- **Lock hierarchy (the rule): `sync` flows parent -> child only; child -> parent is always
+  `.async`.** A parent may `sync` down into its children (the group's `information(for:on:)`,
+  `updateInterfaces` and `add` do), but a child delivers up to its parent exclusively with `.async`
+  hops. Never `sync` upward or sideways between components - the one-way direction is what makes
+  the downward `sync` deadlock-free. Be aware `add`/`start` performs socket I/O while holding the
+  group `stateQueue`, which is also the delivery conduit for every universe's callbacks, so keep
+  work held on that queue short.
 - Public getters read state via `.sync` onto the owning queue (e.g. `isListening`).
 - Timers run on separate static/instance `timerQueue`s; timeout math uses `MonotonicTimer` (a struct).
+  Timer ticks hop to the owning queue and are validated against a **generation token** before acting;
+  the token must be bumped at **every** install and teardown site (see `samplingGeneration` in
+  `sACNReceiverRaw`) - a timer installed without a bump silently reopens the stale-tick window.
 
 ## Delegate delivery
 - **Every** delegate callback is delivered **asynchronously** on the caller-supplied `delegateQueue`:
@@ -26,6 +35,13 @@ contracts hold and must be respected when touching the code.
 - Ordering is preserved per component: deliveries are enqueued FIFO from a serial queue.
 - All `delegate` references are `weak`; timer closures capture `[weak self]`. Preserve both to avoid
   retain cycles.
+- **Async delivery contracts** (consequences of the Phase 2 sync -> async flip; the real fix is the
+  Phase 4 actor redesign - do not add stopgap fences):
+  - `stop()` is not a delivery barrier: callbacks already enqueued may fire after it returns.
+  - `setDelegate(nil)` does not fence in-flight deliveries: a callback enqueued earlier holds a
+    strong reference to the previous delegate and may still fire on it.
+  - `information(for:)` reflects current state, not a callback payload's snapshot: it may throw for
+    a CID a just-delivered payload listed as active.
 
 ## Reentrancy / deadlock (important)
 - Self-reentrancy is handled with a `DispatchSpecificKey` sentinel: methods like `stop()` and the
@@ -39,6 +55,10 @@ contracts hold and must be respected when touching the code.
 - Clients may safely call back into a component (including `stop()`, `setDelegate`, `information`)
   from within delegate callbacks; regression tests cover this. Do not reintroduce `.sync` deliveries
   that would break it.
+- The sentinel keys are **static per-type**, so they answer "am I on ANY instance's queue of this
+  type?", not "this instance's". No current path crosses instances; the first cross-instance
+  feature (e.g. one receiver calling into another from a callback) would silently run
+  unsynchronized instead of deadlocking loudly. Switch to per-instance keys if that ever lands.
 
 ## Delegate contract (callers)
 - A **serial** `delegateQueue` is still recommended (callback ordering), but internal state is

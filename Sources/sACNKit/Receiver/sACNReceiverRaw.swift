@@ -68,6 +68,9 @@ public class sACNReceiverRaw {
 
     /// Changes the receiver delegate of this receiver to the the object passed.
     ///
+    /// Passing `nil` does not fence in-flight deliveries: a callback already enqueued
+    /// may still be delivered to the previous delegate after this returns.
+    ///
     /// - Parameters:
     ///   - delegate: The delegate to receive notifications.
     ///
@@ -152,6 +155,16 @@ public class sACNReceiverRaw {
 
     /// The timer used for checking for source loss and checks.
     private var heartbeatTimer: DispatchSourceTimer?
+
+    /// The generation token for the sample timer, bumped whenever the timer is
+    /// installed or torn down. A tick is only honored while its generation still
+    /// matches, so a stale tick from a cancelled or replaced timer is discarded.
+    /// (The vendored timer factory attaches handlers at creation, so comparing
+    /// identity against the stored timer is not possible.)
+    private var samplingGeneration: UInt64 = 0
+
+    /// The generation token for the heartbeat timer (see `samplingGeneration`).
+    private var heartbeatGeneration: UInt64 = 0
 
     // MARK: Notification
 
@@ -273,6 +286,9 @@ public class sACNReceiverRaw {
     /// Stops this receiver.
     ///
     /// The receiver will stop listening for sACN Data messages.
+    ///
+    /// This is not a delivery barrier: callbacks already enqueued to the delegate
+    /// queue may still be delivered after this returns.
     public func stop() {
         if DispatchQueue.getSpecific(key: Self.socketDelegateQueueSpecificKey) == true {
             _stop()
@@ -289,6 +305,7 @@ public class sACNReceiverRaw {
         guard _isListening else { return }
         self._isListening = false
 
+        samplingGeneration &+= 1
         sampleTimer?.cancel()
         sampleTimer = nil
         stopHeartbeat()
@@ -440,11 +457,15 @@ public class sACNReceiverRaw {
 
     /// Starts the main heartbeat timer, which handles source loss and other checks.
     private func startHeartbeat() {
+        heartbeatGeneration &+= 1
+        let generation = heartbeatGeneration
         let timer = DispatchSource.repeatingTimer(interval: Self.heartbeatTime, leeway: Self.timingLeeway, queue: Self.timerQueue) { [weak self] in
-            if let _ = self?.heartbeatTimer {
-                self?.socketDelegateQueue.async {
-                    self?.checkForSourceLoss()
-                }
+            guard let self else { return }
+            self.socketDelegateQueue.async {
+                // the generation is read on the queue that owns it, so a tick from
+                // a timer which was since cancelled or replaced is discarded here
+                guard generation == self.heartbeatGeneration else { return }
+                self.checkForSourceLoss()
             }
         }
         heartbeatTimer = timer
@@ -452,6 +473,7 @@ public class sACNReceiverRaw {
 
     /// Stops the main heartbeat timer.
     private func stopHeartbeat() {
+        heartbeatGeneration &+= 1
         heartbeatTimer?.cancel()
         heartbeatTimer = nil
     }
@@ -473,9 +495,15 @@ public class sACNReceiverRaw {
             delegateQueue.async { delegate?.receiverStartedSampling(self) }
         }
 
+        samplingGeneration &+= 1
+        let generation = samplingGeneration
         let timer = DispatchSource.singleTimer(interval: Self.sampleTime, leeway: Self.timingLeeway, queue: Self.timerQueue) { [weak self] in
-            if let _ = self?.sampleTimer {
-                self?.endedSamplingPeriod()
+            guard let self else { return }
+            self.socketDelegateQueue.async {
+                // the generation is read on the queue that owns it, so a tick from
+                // a timer which was since cancelled or replaced is discarded here
+                guard generation == self.samplingGeneration else { return }
+                self._endedSamplingPeriod()
             }
         }
         self.sampleTimer = timer
@@ -483,31 +511,42 @@ public class sACNReceiverRaw {
 
     /// Ends the initial sampling period for this universe.
     func endedSamplingPeriod() {
-        socketDelegateQueue.sync {
-            sampling = false
+        if DispatchQueue.getSpecific(key: Self.socketDelegateQueueSpecificKey) == true {
+            _endedSamplingPeriod()
+        } else {
+            socketDelegateQueue.sync { _endedSamplingPeriod() }
+        }
+    }
 
-            // remove any sockets which were sampling
-            let keys = socketsSampling.filter { $0.value == true }.map { $0.key }
+    /// Performs the end of sampling logic.
+    ///
+    /// Must be called on `socketDelegateQueue`.
+    private func _endedSamplingPeriod() {
+        dispatchPrecondition(condition: .onQueue(socketDelegateQueue))
+        sampling = false
+
+        // remove any sockets which were sampling
+        let keys = socketsSampling.filter { $0.value == true }.map { $0.key }
+        keys.forEach { key in
+            socketsSampling.removeValue(forKey: key)
+        }
+
+        // any sockets left should now be sampling
+        if !socketsSampling.isEmpty {
+            let keys = socketsSampling.keys
             keys.forEach { key in
-                socketsSampling.removeValue(forKey: key)
+                socketsSampling.updateValue(true, forKey: key)
             }
 
-            // any sockets left should now be sampling
-            if !socketsSampling.isEmpty {
-                let keys = socketsSampling.keys
-                keys.forEach { key in
-                    socketsSampling.updateValue(true, forKey: key)
-                }
+            self.beginSamplingPeriod(notify: false)
+        } else {
+            samplingGeneration &+= 1
+            self.sampleTimer?.cancel()
+            self.sampleTimer = nil
 
-                self.beginSamplingPeriod(notify: false)
-            } else {
-                self.sampleTimer?.cancel()
-                self.sampleTimer = nil
-
-                // notify sampling has ended
-                let delegate = delegate
-                delegateQueue.async { delegate?.receiverEndedSampling(self) }
-            }
+            // notify sampling has ended
+            let delegate = delegate
+            delegateQueue.async { delegate?.receiverEndedSampling(self) }
         }
     }
 
@@ -760,6 +799,7 @@ extension sACNReceiverRaw {
             source.resetPAPTimer()
         case .waitingForPAP, .hasLevelsOnly:
             source.state = .hasLevelsAndPAP
+            source.resetPerAddressPriorityLost()
             source.startPAPTimer(withInterval: sourceLossTimeout)
         case .hasLevelsAndPAP:
             source.resetPAPTimer()

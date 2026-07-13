@@ -58,6 +58,9 @@ public class sACNDiscoveryReceiver {
 
     /// Changes the receiver delegate of this receiver to the the object passed.
     ///
+    /// Passing `nil` does not fence in-flight deliveries: a callback already enqueued
+    /// may still be delivered to the previous delegate after this returns.
+    ///
     /// - Parameters:
     ///   - delegate: The delegate to receive notifications.
     ///
@@ -179,6 +182,9 @@ public class sACNDiscoveryReceiver {
     /// Stops this receiver.
     ///
     /// The receiver will stop listening for sACN Universe Discovery messages.
+    ///
+    /// This is not a delivery barrier: callbacks already enqueued to the delegate
+    /// queue may still be delivered after this returns.
     public func stop() {
         if DispatchQueue.getSpecific(key: Self.socketDelegateQueueSpecificKey) == true {
             _stop()

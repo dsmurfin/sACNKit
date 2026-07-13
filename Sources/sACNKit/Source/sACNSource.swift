@@ -93,6 +93,9 @@ final public class sACNSource {
 
     /// Changes the source delegate of this source to the the object passed.
     ///
+    /// Passing `nil` does not fence in-flight deliveries: a callback already enqueued
+    /// may still be delivered to the previous delegate after this returns.
+    ///
     /// - Parameters:
     ///   - delegate: The delegate to receive notifications.
     ///
@@ -296,6 +299,9 @@ final public class sACNSource {
     /// Stops this source.
     ///
     /// When stopped, this source will no longer transmit sACN messages.
+    ///
+    /// This is not a delivery barrier: callbacks already enqueued to the delegate
+    /// queue may still be delivered after this returns.
     ///
     public func stop() {
         if DispatchQueue.getSpecific(key: Self.socketDelegateQueueSpecificKey) == true {

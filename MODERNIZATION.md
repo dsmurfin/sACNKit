@@ -302,7 +302,11 @@ Phase 1 net (now running on the modern stack). See the inventory below for the f
   `dirtyPriority`, and the 3-packet termination model - the sequence/on-wire fixes hook into these
   rather than reworking layer construction.
 - **Receiver behavior:** flicker after the sampling period; network reset re-samples only *new*
-  interfaces (`is_sampling` per source); sampling-exclusion-on-init fix.
+  interfaces (`is_sampling` per source); sampling-exclusion-on-init fix. *Note:* sACNKit's local
+  contribution to post-sampling flicker (an inverted condition in `sACNReceiver.samplingEnded` that
+  dropped sampling-captured per-address priorities) was already fixed in the Phase 2 post-review
+  addendum (docs/modernization/phase-2.md); the ETC port here covers the remaining upstream
+  behavior, not that flip.
 - **Merger correctness:** output independent of input order; `perAddressPrioritiesActive` correct when
   PAP == universe priority; remove-PAP-then-add-PAP sequencing.
 - **Robustness:** remote-source / merger-source handle wrapping/rollover at `0xFFFF`.
@@ -378,6 +382,8 @@ practical caveats specific to an sACN library - both **integration/runtime**, no
 
 **Receiver / sampling**
 - Flicker after sampling period fixed; network reset re-samples only new interfaces (3.0.0).
+  (sACNKit's local `samplingEnded` PAP-transfer inversion is already fixed - see the Phase 2
+  post-review addendum - so this item is the upstream behavior only.)
 - Sources no longer excluded from sampling during init (3.0.0).
 - Receiver data model gains `sync_universe`, `sequence`, `options` (SACN-392, 4.0.0).
 

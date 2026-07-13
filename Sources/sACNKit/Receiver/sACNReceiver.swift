@@ -68,6 +68,9 @@ public class sACNReceiver {
 
     /// Changes the receiver delegate of this receiver to the the object passed.
     ///
+    /// Passing `nil` does not fence in-flight deliveries: a callback already enqueued
+    /// may still be delivered to the previous delegate after this returns.
+    ///
     /// - Parameters:
     ///   - delegate: The delegate to receive notifications.
     ///
@@ -129,9 +132,23 @@ public class sACNReceiver {
     ///
     /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interfaces must not be empty.
     ///
-    public init?(
+    public convenience init?(
         ipMode: sACNIPMode = .ipv4Only, interfaces: Set<String> = [], universe: UInt16, sourceLimit: Int? = 4, filterPreviewData: Bool = true,
         filterCIDs: Set<UUID> = [], delegateQueue: DispatchQueue
+    ) {
+        self.init(
+            ipMode: ipMode, interfaces: interfaces, universe: universe, sourceLimit: sourceLimit, filterPreviewData: filterPreviewData,
+            filterCIDs: filterCIDs, delegateQueue: delegateQueue, sourceLossTimeout: sACNReceiverRaw.sourceLossTimeout,
+            perAddressPriorityWait: sACNReceiverRaw.perAddressPriorityWait)
+    }
+
+    /// Creates a new receiver, additionally allowing the timing constants to be overridden.
+    ///
+    /// Internal seam so tests can exercise timing-driven behavior quickly.
+    ///
+    init?(
+        ipMode: sACNIPMode, interfaces: Set<String>, universe: UInt16, sourceLimit: Int?, filterPreviewData: Bool,
+        filterCIDs: Set<UUID>, delegateQueue: DispatchQueue, sourceLossTimeout: UInt64, perAddressPriorityWait: UInt64
     ) {
         precondition(!ipMode.usesIPv6() || !interfaces.isEmpty, "At least one interface must be provided for IPv6.")
 
@@ -145,7 +162,8 @@ public class sACNReceiver {
         guard
             let receiver = sACNReceiverRaw(
                 ipMode: ipMode, interfaces: interfaces, universe: universe, sourceLimit: sourceLimit, filterPreviewData: filterPreviewData,
-                filterCIDs: filterCIDs, delegateQueue: stateQueue)
+                filterCIDs: filterCIDs, delegateQueue: stateQueue, sourceLossTimeout: sourceLossTimeout,
+                perAddressPriorityWait: perAddressPriorityWait)
         else { return nil }
         self.receiver = receiver
         let config = sACNMergerConfig(sourceLimit: sourceLimit)
@@ -174,6 +192,13 @@ public class sACNReceiver {
     /// The receiver will stop listening for sACN Data messages and cease
     /// providing merged output.
     ///
+    /// This is not a delivery barrier: callbacks already enqueued to the delegate
+    /// queue may still be delivered after this returns.
+    ///
+    /// To receive again, prefer creating a fresh receiver instead of restarting this
+    /// one: previously learned sources are not cleared from the merged output when
+    /// the receiver is stopped, so a restart republishes them.
+    ///
     public func stop() {
         receiver.stop()
     }
@@ -200,6 +225,8 @@ public class sACNReceiver {
     /// - Returns: Source information.
     ///
     /// May be called from any queue, including from within delegate callbacks.
+    /// Reflects current state rather than a callback payload's snapshot, so it may
+    /// throw for a source a just-delivered payload listed as active.
     public func information(for sourceId: UUID) throws -> sACNReceiverSource {
         try performOnStateQueue {
             guard let source = sources[sourceId] else { throw sACNReceiverValidationError.sourceDoesNotExist }
@@ -276,13 +303,17 @@ public class sACNReceiver {
             try? merger.addSource(identified: cid)
 
             // copy sampling levels and universe priority to the main merger
-            try? merger.updateLevelsForSource(identified: cid, newLevels: sourceData.levels, newLevelsCount: sourceData.levelCount)
+            // (the merger snapshot holds fixed 512-slot arrays, but the update methods
+            // require the array to match the received count, so slice before passing)
+            try? merger.updateLevelsForSource(
+                identified: cid, newLevels: Array(sourceData.levels.prefix(sourceData.levelCount)), newLevelsCount: sourceData.levelCount)
             try? merger.updateUniversePriorityForSource(identified: cid, priority: sourceData.universePriority)
 
             // copy per-address priority to the main merger
-            if sourceData.usingUniversePriority {
+            if !sourceData.usingUniversePriority {
                 try? merger.updatePAPForSource(
-                    identified: cid, newPriorities: sourceData.addressPriorities, newPrioritiesCount: sourceData.perAddressPriorityCount)
+                    identified: cid, newPriorities: Array(sourceData.addressPriorities.prefix(sourceData.perAddressPriorityCount)),
+                    newPrioritiesCount: sourceData.perAddressPriorityCount)
             }
 
             // remove the source from the sampling merger
@@ -313,6 +344,12 @@ public class sACNReceiver {
             if !nonSamplingMergeOccurred {
                 nonSamplingMergeOccurred = !source.sampling
             }
+
+            // a lost source which never delivered levels must release its
+            // pending count, or merged data is gated forever
+            if source.pending {
+                numberOfPendingSources -= 1
+            }
             sources.removeValue(forKey: sourceId)
         }
 
@@ -335,7 +372,7 @@ public class sACNReceiver {
 
         try? merger.removePAP(forSourceIdentified: sourceId)
 
-        if source.sampling && numberOfPendingSources == 0 {
+        if !source.sampling && numberOfPendingSources == 0 {
             notifyMerge()
         }
     }

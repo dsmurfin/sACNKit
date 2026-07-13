@@ -42,11 +42,15 @@ final public class sACNReceiverGroup {
     private let ipMode: sACNIPMode
 
     /// The interfaces on which the receivers in this group should receive data.
-    private var interfaces: Set<String> = []
+    /// Internal read to allow tests to observe interface updates.
+    private(set) var interfaces: Set<String> = []
 
     // MARK: Delegate
 
     /// Changes the receiver delegate of this receiver to the the object passed.
+    ///
+    /// Passing `nil` does not fence in-flight deliveries: a callback already enqueued
+    /// may still be delivered to the previous delegate after this returns.
     ///
     /// - Parameters:
     ///   - delegate: The delegate to receive notifications.
@@ -105,7 +109,8 @@ final public class sACNReceiverGroup {
     private let filterCIDs: Set<UUID>
 
     /// The receivers, identified by their universe.
-    private var receivers: [UInt16: sACNReceiver]
+    /// Internal read to allow tests to drive child receivers without network traffic.
+    private(set) var receivers: [UInt16: sACNReceiver]
 
     // MARK: - Initialization
 
@@ -164,9 +169,12 @@ final public class sACNReceiverGroup {
             else {
                 throw sACNReceiverValidationError.universeNumberInvalid
             }
-            receivers[universe] = receiver
             receiver.setDelegate(self)
+
+            // only register the receiver once it has started, so a failed
+            // add leaves no dead receiver behind and can simply be retried
             try receiver.start()
+            receivers[universe] = receiver
         }
     }
 
@@ -193,10 +201,18 @@ final public class sACNReceiverGroup {
     ///
     /// - Throws: An `sACNReceiverValidationError` error.
     ///
+    /// If this throws, the update may have been applied to only some of the existing
+    /// universes; the new interfaces are still recorded, so universes added later use
+    /// them and retrying with the same set converges.
+    ///
     public func updateInterfaces(_ newInterfaces: Set<String> = []) throws {
         precondition(!ipMode.usesIPv6() || !newInterfaces.isEmpty, "At least one interface must be provided for IPv6.")
 
         try performOnStateQueue {
+            // persist first so universes added later use the new interfaces even
+            // if updating an existing child throws part-way through
+            interfaces = newInterfaces
+
             try receivers.forEach { _, receiver in
                 try receiver.updateInterfaces(newInterfaces)
             }
@@ -214,6 +230,8 @@ final public class sACNReceiverGroup {
     /// - Returns: Source information.
     ///
     /// May be called from any queue, including from within delegate callbacks.
+    /// Reflects current state rather than a callback payload's snapshot, so it may
+    /// throw for a source a just-delivered payload listed as active.
     public func information(for sourceId: UUID, on universe: UInt16) throws -> sACNReceiverSource {
         try performOnStateQueue {
             guard let receiver = receivers[universe] else { throw sACNReceiverValidationError.sourceDoesNotExist }

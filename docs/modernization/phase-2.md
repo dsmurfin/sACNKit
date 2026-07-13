@@ -238,3 +238,112 @@ All workstreams landed. Deviations from this plan and results, in execution orde
 `Tests/sACNKitTests/{ReceiverRawTests,ReceiverTests,ReceiverGroupTests,MonotonicTimerTests}.swift`
 (new), `.github/workflows/ci.yml`, `docs/modernization/phase-2.md`, `README.md`,
 `.claude/rules/threading.md`, `MODERNIZATION.md`.
+
+## Post-review addendum (2026-07-13)
+
+An adversarial review of this phase surfaced ten findings. The following were fixed on this
+branch, each behind a regression test verified to fail against the pre-fix code:
+
+- **Three pre-existing logic inversions in the PAP/sampling paths this phase touched** (the phase's
+  characterization tests sat on top of them without catching them):
+  - `sACNReceiver.samplingEnded` copied per-address priorities to the main merger under
+    `if sourceData.usingUniversePriority` - inverted; priorities captured during sampling were never
+    transferred (post-sampling flicker, wrong DMX output).
+  - `sACNReceiver.perAddressPriorityLost` notified merged data under `if source.sampling` - inverted
+    versus every sibling delivery path; this made the phase's own PAP-lost delivery fix only
+    half-effective, and spuriously notified merged data for sampling sources.
+  - `ReceiverRawSource.notifiedPerAddressLost` was never reset when per-address priority resumed, so
+    a second loss was never notified and stale priorities won indefinitely.
+- **`sACNReceiverGroup.updateInterfaces` never persisted the new interfaces**, so universes added
+  later were constructed with the init-time interfaces.
+- **`sACNReceiverGroup.add(universe:)` registered the child before `start()`**, so a failed add left
+  a dead receiver registered and (via the documented duplicate-add silent success) made retry a
+  silent no-op. Registration now follows a successful start.
+- **Timer/stop races in `sACNReceiverRaw`**: the heartbeat and sample timer callbacks read the timer
+  properties on the static timer queue, unsynchronized against `_stop()` writing them on
+  `socketDelegateQueue`. Ticks now hop to `socketDelegateQueue` before reading, which also discards
+  a tick pending at stop (no post-stop `receiverEndedSampling`). `endedSamplingPeriod()` gained the
+  standard sentinel-guarded entry (`_endedSamplingPeriod` core), so the test seam is safe to call
+  from the socket delegate queue.
+- **CI verification holes**: the loopback suite ran in no CI job (its `SACNKIT_NETWORK_TESTS` gate
+  was never set anywhere); it now runs under TSan in a dedicated non-blocking job, to be promoted to
+  required after a stability observation window. The warnings-as-errors build gained
+  `--build-tests` so test-target diagnostics are locked in too. The promised group-callback
+  regression test now exists (`callbacksMayReenterGroup`, driven through the child's raw-engine
+  seam - binds local sockets but requires no network traffic), and the false ReceiverGroupTests
+  header claiming loopback covered group behavior was corrected.
+
+**Behavior-change note:** fixing the inversions and group bugs deviates from this phase's
+"no merge-behavior change" guardrail. The precedent is Phase 1's TX index-mapping fix: confirmed
+short correctness bugs land behind tests rather than riding a multi-phase rewrite (MODERNIZATION.md,
+Phase 1 "cheap fixes behind tests"). The ETC "flicker after sampling" port in Phase 5 is still
+needed - it covers more than the inversion fixed here - and MODERNIZATION.md is annotated so the
+flip is not rediscovered.
+
+**Documented, deferred to Phase 4/5** (contract changes introduced by the sync-to-async delivery
+flip; code-level mitigation now would be stopgap machinery the actor redesign deletes):
+
+- `stop()` is not a delivery barrier: callbacks already enqueued (including data callbacks) may
+  still be delivered after `stop()` returns.
+- `setDelegate(nil)` does not fence in-flight deliveries: a callback enqueued before the change may
+  still fire on the previous delegate (a strong reference is captured at enqueue time).
+- `information(for:)` may throw `sourceDoesNotExist` for a CID listed in a just-delivered payload
+  (snapshot-then-hop staleness).
+
+These are documented in README.md, the relevant doc comments, and `.claude/rules/threading.md`
+(which also now states the one-way lock hierarchy - `sync` flows parent-to-child only, `async`
+child-to-parent - as the rule, plus the static-sentinel-key caveat).
+
+### Second review round (2026-07-13)
+
+A follow-up adversarial review of the fix batch itself surfaced one bug inside the flagship fix,
+two pre-existing defects the fixes made load-bearing, and a test-conformance gap. Fixed on this
+branch (each behind a regression test verified to fail against the reverted code):
+
+- **Short-packet sampling transfer (correction to this batch's headline fix):** `samplingEnded`
+  passed the merger snapshot's fixed 512-slot arrays with the received count; the merger update
+  methods require `array.count == count`, so the transfer silently no-oped (via `try?`) for any
+  source whose packets carried fewer than 512 slots - reintroducing post-sampling flicker through a
+  different mechanism. The arrays are now sliced to the received count at the call site (the
+  merger's `==` invariant is a public-API contract and was deliberately not relaxed). The test also
+  pins that a source which sent only per-address priority during sampling transfers nothing.
+- **Lost pending source muted merged data forever (pre-existing, promoted into this batch):**
+  `sourcesLost` removed a pending source without decrementing `numberOfPendingSources`, so a
+  PAP-first source lost before delivering levels permanently gated every merged-data
+  notification - including the deliveries the condition flips above were fixed to produce.
+- **Stale timer ticks (correction to this batch's queue-confinement fix):** the hop block guarded
+  on timer existence, not identity, so a tick from a cancelled timer could terminate a freshly
+  started sampling period. Replaced with generation tokens (bumped at every install/teardown,
+  snapshot into the handler) rather than identity comparison, because the vendored CwlDispatch
+  factory attaches handlers at creation, so identity capture would need a mutable box and risk a
+  timer-handler retain cycle.
+- **Test-conformance gap (empirically verified):** the earlier "verified-to-fail-first" check
+  reverted all three logic fixes together, which masked that `secondPAPLossReflectedInMergedData`
+  actually pins the PAP reset, not the notify flip - the flip's positive half was untested because
+  a non-preview levels packet triggers its own merged notification anyway. The new
+  `papLossViaPreviewPacketDeliversMergedData` test injects a preview-flagged packet (filtered from
+  data delivery, so the loss path's notification is the only merged delivery) and was verified to
+  fail against an isolated revert of the flip alone.
+- **CI/test hardening:** the two socket-binding group tests are now gated behind
+  `SACNKIT_NETWORK_TESTS` (keeping the required jobs free of environment-sensitive binds); the
+  non-blocking loopback job filters to the two network suites instead of duplicating the full TSan
+  run; the group re-entry test now also exercises `add` (socket I/O while holding the state queue)
+  and removal of the delivering universe from within its own callback; the shared packet fixture
+  patches the framing/DMP flags-and-length and DMP property value count so short-packet fixtures
+  parse.
+- **`updateInterfaces` now persists the new set before updating children** and documents that a
+  mid-loop throw leaves the update partially applied with the new set recorded, so retrying with
+  the same set converges.
+- **Docs completed:** the delivery-contract notes were extended to `sACNSource` and
+  `sACNDiscoveryReceiver` and the DocC landing page; `sACNReceiver.stop()` now advises preferring
+  a fresh instance over restart (see below).
+
+Inventoried (pre-existing, verified out of batch scope, deferred to Phase 4/5):
+
+- **stop()/start() desync at the merged layer:** stopping wipes the raw engine's sources but leaves
+  `numberOfPendingSources` and both mergers populated, so a restarted receiver republishes stale
+  sources that nothing can remove (source-loss requires the raw engine to know them). The Phase 4
+  actor redesign rebuilds this lifecycle; until then `sACNReceiver.stop()`'s docs advise a fresh
+  instance.
+- **Test-support consolidation:** point the two remaining private packet builders at the shared
+  fixture; hoist the duplicated locked-box/timeout/injection helpers.
