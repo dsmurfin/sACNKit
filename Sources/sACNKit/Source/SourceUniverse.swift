@@ -115,11 +115,13 @@ class SourceUniverse: Equatable {
     ///
     ///  - parameters:
     ///     - universe: A public `sACNSourceUniverse`.
+    ///     - sourcePriority: The priority for the source containing this universe (applied when the
+    ///       universe has no per-packet priority override).
     ///     - isSourceActive: Whether the source is active.
     ///
     ///  - Throws: An error of type `sACNSourceValidationError`.
     ///
-    func update(with universe: sACNSourceUniverse, sourceActive isSourceActive: Bool) throws {
+    func update(with universe: sACNSourceUniverse, sourcePriority: UInt8, sourceActive isSourceActive: Bool) throws {
         guard universe.levels.count == 512 else {
             throw sACNSourceValidationError.incorrectLevelsCount
         }
@@ -136,10 +138,11 @@ class SourceUniverse: Equatable {
 
         if self.priority != universe.priority {
             self.priority = universe.priority
-            if let priority = universe.priority {
-                self.levelsPacket.replacingComposedPriority(with: priority)
-                self.prioritiesPacket.replacingComposedPriority(with: priority)
-            }
+            // write the effective framing priority - the per-packet override if set, else the source
+            // priority - so clearing the override reverts the wire priority instead of leaving it stale
+            let effectivePriority = universe.priority ?? sourcePriority
+            self.levelsPacket.replacingComposedPriority(with: effectivePriority)
+            self.prioritiesPacket.replacingComposedPriority(with: effectivePriority)
             dirty = true
         }
 

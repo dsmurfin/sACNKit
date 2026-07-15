@@ -12,6 +12,7 @@ struct SourceTransmitTests {
     /// data framing layer (sequence number at framing offset 73, options at framing offset 74).
     private static let sequenceOffset = 38 + 73
     private static let optionsOffset = 38 + 74
+    private static let priorityOffset = 38 + 70
     private static let startCodeOffset =
         RootLayer.Offset.data.rawValue + DataFramingLayer.Offset.data.rawValue + DMPLayer.Offset.propertyValues.rawValue
     private static let terminatedBit: UInt8 = 1 << 6
@@ -170,6 +171,27 @@ struct SourceTransmitTests {
         let expected = sACNTestDataPacket(cid: cid, name: "Golden", universe: 5, sequence: sequence, options: .terminated)
         #expect(packet == expected)
         #expect(Array(packet)[Self.optionsOffset] & Self.terminatedBit != 0)
+    }
+
+    @Test("Clearing a per-packet priority reverts the wire priority to the source priority on both packets")
+    func clearingPriorityRevertsToSourcePriority() throws {
+        let hundreds = Array(repeating: UInt8(100), count: 512)
+        let source = sACNSource(name: "Golden", cid: UUID(), priority: 100, delegateQueue: DispatchQueue(label: "test.source"))
+        try source.addUniverse(
+            sACNSourceUniverse(number: 1, priority: 150, levels: Array(repeating: 0, count: 512), priorities: hundreds))
+
+        // clear the per-packet priority override; the wire priority must revert to the source priority
+        try source.updateLevels(
+            with: sACNSourceUniverse(number: 1, priority: nil, levels: Array(repeating: 0, count: 512), priorities: hundreds))
+        source.shouldOutput(true)
+
+        let messages = source.buildDataMessages().messages
+        let levels = try #require(messages.first { Array($0.data)[Self.startCodeOffset] == DMX.STARTCode.null.rawValue }).data
+        let pap = try #require(
+            messages.first { Array($0.data)[Self.startCodeOffset] == DMX.STARTCode.perAddressPriority.rawValue }
+        ).data
+        #expect(Array(levels)[Self.priorityOffset] == 100)
+        #expect(Array(pap)[Self.priorityOffset] == 100)
     }
 
     @Test("Termination emits exactly 3 packets carrying the terminated option")

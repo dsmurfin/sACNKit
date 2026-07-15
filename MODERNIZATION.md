@@ -142,6 +142,13 @@ declares only `iOS`/`macOS`. Three hard blockers plus incidental ones:
 - **Undocumented serial-queue requirement** *(fixed in Phase 2)*: `sACNReceiver`/`sACNReceiverGroup`
   mutated state with no lock of their own - safe only if the client's `delegateQueue` was serial.
   Both now serialize state on internal queues.
+- **Stale per-packet priority on clear** *(fixed in Phase 3 PR 2)*: clearing a universe's per-packet
+  priority (`sACNSourceUniverse.priority` non-nil -> nil via `updateLevels(with:)`) left the previous
+  priority on the wire instead of reverting to the source priority - `SourceUniverse.update(with:)`
+  only wrote the framing priority byte when the new value was non-nil. **Wire-observable behavior
+  delta** (documented here, landed with the transmit refactor rather than deferred to Phase 5):
+  `update(with:)` now takes `sourcePriority` and writes the effective priority (`universe.priority ??
+  sourcePriority`) into both composed packets on every change. Regression-tested in `SourceTransmitTests`.
 - **Mutable "constants":** `Shared/DMX/DMX.swift:33` `public static var addressCount`; multicast
   prefix statics in `NetworkDefinitions.swift:81,104` are `var` (read-only in practice) - should be `let`.
 - **Hot-path allocation:** `Shared/Data+Extensions.swift` `loadUnaligned` (`:246`, per-call heap

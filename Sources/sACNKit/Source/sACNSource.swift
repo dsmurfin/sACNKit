@@ -556,7 +556,7 @@ final public class sACNSource {
                 throw sACNSourceValidationError.universeTerminating
             }
 
-            try internalUniverse.update(with: universe, sourceActive: _isListening)
+            try internalUniverse.update(with: universe, sourcePriority: self.priority, sourceActive: _isListening)
         }
     }
 
