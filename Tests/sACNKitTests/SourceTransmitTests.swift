@@ -115,6 +115,63 @@ struct SourceTransmitTests {
         #expect(sequences == [0, 1, 2])
     }
 
+    // MARK: Byte-identical output
+
+    /// The pre-composed transmit packets must be byte-for-byte identical to a packet built the long way
+    /// (root + framing + DMP) by `sACNTestDataPacket`. This locks the wire output against the
+    /// pre-composed/in-place-mutation refactor - the other tests only check individual bytes.
+
+    @Test("A level packet is byte-identical to a freshly composed packet")
+    func levelPacketByteIdentical() throws {
+        let cid = UUID()
+        let levels = (0..<512).map { UInt8($0 % 256) }
+        let source = sACNSource(name: "Golden", cid: cid, delegateQueue: DispatchQueue(label: "test.source"))
+        try source.addUniverse(sACNSourceUniverse(number: 3, levels: levels))
+        source.shouldOutput(true)
+
+        let packet = try #require(source.buildDataMessages().messages.first).data
+        let expected = sACNTestDataPacket(cid: cid, name: "Golden", universe: 3, sequence: 0, values: levels)
+        #expect(packet == expected)
+    }
+
+    @Test("A per-address-priority packet is byte-identical to a freshly composed packet")
+    func priorityPacketByteIdentical() throws {
+        let cid = UUID()
+        let priorities = (0..<512).map { _ in UInt8(200) }
+        let source = sACNSource(name: "Golden", cid: cid, delegateQueue: DispatchQueue(label: "test.source"))
+        try source.addUniverse(
+            sACNSourceUniverse(number: 1, levels: Array(repeating: 0, count: 512), priorities: priorities))
+        source.shouldOutput(true)
+
+        let pap = try #require(
+            source.buildDataMessages().messages.first {
+                Array($0.data)[Self.startCodeOffset] == DMX.STARTCode.perAddressPriority.rawValue
+            }
+        ).data
+        // the PAP packet carries whatever sequence it was stamped with; feed it back so the comparison
+        // validates every other byte
+        let sequence = Array(pap)[Self.sequenceOffset]
+        let expected = sACNTestDataPacket(
+            cid: cid, name: "Golden", universe: 1, sequence: sequence, startCode: .perAddressPriority, values: priorities)
+        #expect(pap == expected)
+    }
+
+    @Test("A termination packet is byte-identical to a freshly composed terminated packet")
+    func terminationPacketByteIdentical() throws {
+        let cid = UUID()
+        let source = sACNSource(name: "Golden", cid: cid, delegateQueue: DispatchQueue(label: "test.source"))
+        try source.addUniverse(sACNSourceUniverse(number: 5, levels: Array(repeating: 0, count: 512)))
+        source.shouldOutput(true)
+        for _ in 0..<3 { _ = source.buildDataMessages() }  // drain the initial burst
+
+        source.shouldOutput(false)  // terminate
+        let packet = try #require(source.buildDataMessages().messages.first).data
+        let sequence = Array(packet)[Self.sequenceOffset]
+        let expected = sACNTestDataPacket(cid: cid, name: "Golden", universe: 5, sequence: sequence, options: .terminated)
+        #expect(packet == expected)
+        #expect(Array(packet)[Self.optionsOffset] & Self.terminatedBit != 0)
+    }
+
     @Test("Termination emits exactly 3 packets carrying the terminated option")
     func terminationEmitsThreePackets() throws {
         let source = try activeSource()

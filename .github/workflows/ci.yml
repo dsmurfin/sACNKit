@@ -59,6 +59,22 @@ jobs:
         if: steps.loopback.outcome == 'failure'
         run: echo "::warning title=Loopback tests failed (non-blocking)::Network loopback tests failed on this runner. Multicast delivery is unreliable on shared runners; see the previous step's log before suspecting a regression."
 
+  benchmark:
+    # Non-blocking performance-trend job (workstream J). The deterministic allocation guard
+    # (PerformanceBenchmarks: the emitted packet is the pre-composed buffer, not a per-frame
+    # allocation) runs unconditionally in the Build & Test job and is the hard gate. This job
+    # additionally records wall-clock build throughput, which is noisy on shared runners and so is
+    # informational only - step-level continue-on-error keeps the check green.
+    name: Benchmark trend (macOS, non-blocking)
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build throughput trend
+        continue-on-error: true
+        run: swift test --filter "PerformanceBenchmarks"
+        env:
+          SACNKIT_BENCH: "1"
+
   format:
     name: Format check
     runs-on: macos-26

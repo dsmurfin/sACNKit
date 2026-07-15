@@ -47,14 +47,11 @@ class SourceUniverse: Equatable {
     /// The priority (per-slot) data (512).
     var priorities: [UInt8]?
 
-    /// The framing layer.
-    private(set) var framingLayer: Data
+    /// The pre-composed levels packet (root + framing + DMP levels), mutated in place at frame rate.
+    private(set) var levelsPacket: Data
 
-    /// The dmp levels layer.
-    private(set) var dmpLevelsLayer: Data
-
-    /// The dmp levels layer.
-    private(set) var dmpPrioritiesLayer: Data
+    /// The pre-composed per-address-priority packet (root + framing + DMP priorities), mutated in place.
+    private(set) var prioritiesPacket: Data
 
     /// The last transmitted sequence number for this universe.
     private(set) var sequence: UInt8
@@ -83,16 +80,18 @@ class SourceUniverse: Equatable {
     ///     - universe: A public `sACNSourceUniverse`.
     ///     - sourcePriority: The priority for the source containing this universe.
     ///     - nameData: The name data for the source.
+    ///     - rootLayer: The source's pre-compiled root layer (constant for the source's lifetime).
     ///
-    init(with universe: sACNSourceUniverse, sourcePriority: UInt8, nameData: Data) {
+    init(with universe: sACNSourceUniverse, sourcePriority: UInt8, nameData: Data, rootLayer: Data) {
         self.number = universe.number
         self.priority = universe.priority
         self.levels = universe.levels
         self.priorities = universe.priorities
-        self.framingLayer = DataFramingLayer.createAsData(nameData: nameData, priority: self.priority ?? sourcePriority, universe: universe.number)
-        self.dmpLevelsLayer = DMPLayer.createAsData(startCode: .null, values: universe.levels)
-        self.dmpPrioritiesLayer = DMPLayer.createAsData(
-            startCode: .perAddressPriority, values: universe.priorities ?? Array(repeating: 0, count: 512))
+        let framingLayer = DataFramingLayer.createAsData(nameData: nameData, priority: self.priority ?? sourcePriority, universe: universe.number)
+        self.levelsPacket = rootLayer + framingLayer + DMPLayer.createAsData(startCode: .null, values: universe.levels)
+        self.prioritiesPacket =
+            rootLayer + framingLayer
+            + DMPLayer.createAsData(startCode: .perAddressPriority, values: universe.priorities ?? Array(repeating: 0, count: 512))
         self.sequence = 0
         self.transmitCounter = 0
         self.dirtyCounter = 3
@@ -138,21 +137,22 @@ class SourceUniverse: Equatable {
         if self.priority != universe.priority {
             self.priority = universe.priority
             if let priority = universe.priority {
-                self.framingLayer.replacingPriority(with: priority)
+                self.levelsPacket.replacingComposedPriority(with: priority)
+                self.prioritiesPacket.replacingComposedPriority(with: priority)
             }
             dirty = true
         }
 
         if self.levels != universe.levels {
             self.levels = universe.levels
-            self.dmpLevelsLayer.replacingDMPLayerValues(with: universe.levels)
+            self.levelsPacket.replacingComposedDMPValues(with: universe.levels)
             dirty = true
         }
 
         if self.priorities != universe.priorities {
             self.priorities = universe.priorities
             if let priorities = priorities {
-                self.dmpPrioritiesLayer.replacingDMPLayerValues(with: priorities)
+                self.prioritiesPacket.replacingComposedDMPValues(with: priorities)
             }
             dirty = true
             if isSourceActive {
@@ -180,7 +180,7 @@ class SourceUniverse: Equatable {
 
         if self.levels != levels {
             self.levels = levels
-            self.dmpLevelsLayer.replacingDMPLayerValues(with: levels)
+            self.levelsPacket.replacingComposedDMPValues(with: levels)
             if isSourceActive {
                 dirtyCounter = 3
             }
@@ -204,7 +204,7 @@ class SourceUniverse: Equatable {
 
         if self.priorities != priorities {
             self.priorities = priorities
-            self.dmpPrioritiesLayer.replacingDMPLayerValues(with: priorities ?? Array(repeating: 0, count: 512))
+            self.prioritiesPacket.replacingComposedDMPValues(with: priorities ?? Array(repeating: 0, count: 512))
             if isSourceActive {
                 dirtyPriority = true
                 dirtyCounter = 3
@@ -237,13 +237,13 @@ class SourceUniverse: Equatable {
 
         if self.levels[slot] != level {
             self.levels[slot] = level
-            self.dmpLevelsLayer.replacingDMPLayerValue(level, at: slot)
+            self.levelsPacket.replacingComposedDMPValue(level, at: slot)
             dirty = true
         }
 
         if let priorities = self.priorities, let priority = priority, priorities[slot] != priority {
             self.priorities?[slot] = priority
-            self.dmpPrioritiesLayer.replacingDMPLayerValue(priority, at: slot)
+            self.prioritiesPacket.replacingComposedDMPValue(priority, at: slot)
             dirty = true
             if isSourceActive {
                 dirtyPriority = true
@@ -274,7 +274,7 @@ class SourceUniverse: Equatable {
 
         if let priorities = self.priorities, priorities[slot] != priority {
             self.priorities?[slot] = priority
-            self.dmpPrioritiesLayer.replacingDMPLayerValue(priority, at: slot)
+            self.prioritiesPacket.replacingComposedDMPValue(priority, at: slot)
             if isSourceActive {
                 dirtyPriority = true
                 dirtyCounter = 3
@@ -289,7 +289,53 @@ class SourceUniverse: Equatable {
     ///     - nameData: The name data for the source.
     ///
     func updateFramingLayer(withSourcePriority sourcePriority: UInt8, nameData: Data) {
-        framingLayer = DataFramingLayer.createAsData(nameData: nameData, priority: self.priority ?? sourcePriority, universe: number)
+        let framingLayer = DataFramingLayer.createAsData(nameData: nameData, priority: self.priority ?? sourcePriority, universe: number)
+        levelsPacket.replacingComposedFraming(with: framingLayer)
+        prioritiesPacket.replacingComposedFraming(with: framingLayer)
+    }
+
+    /// Stamps the sequence and options into the levels packet in place, ready for transmission.
+    ///
+    ///  - parameters:
+    ///     - sequence: The sequence number to stamp.
+    ///     - options: The framing options to stamp.
+    ///
+    func stampLevels(sequence: UInt8, options: DataFramingLayer.Options) {
+        stamp(&levelsPacket, sequence: sequence, options: options)
+    }
+
+    /// Stamps the sequence and options into the priorities packet in place, ready for transmission.
+    ///
+    ///  - parameters:
+    ///     - sequence: The sequence number to stamp.
+    ///     - options: The framing options to stamp.
+    ///
+    func stampPriorities(sequence: UInt8, options: DataFramingLayer.Options) {
+        stamp(&prioritiesPacket, sequence: sequence, options: options)
+    }
+
+    /// Stamps the sequence and options into a composed packet in place.
+    ///
+    /// Both fields are always written together (never conditionally) so a stale option bit - e.g. a
+    /// `terminated` flag from a prior frame - can never leak into a later packet.
+    ///
+    private func stamp(_ packet: inout Data, sequence: UInt8, options: DataFramingLayer.Options) {
+        packet.replacingComposedSequence(with: sequence)
+        packet.replacingComposedOptions(with: options)
+    }
+
+    /// A copy of the current levels packet with the `terminated` option forced on.
+    ///
+    /// Used on the socket-termination path, where a terminated variant is needed alongside the normal
+    /// packet in the same frame. Callers should stamp the levels packet first so the copy carries the
+    /// correct sequence number.
+    ///
+    ///  - Returns: A terminated copy of the levels packet.
+    ///
+    func terminatedLevelsPacket() -> Data {
+        var packet = levelsPacket
+        packet.addingComposedOptions([.terminated])
+        return packet
     }
 
     /// Increments the sequence number for this universe.
@@ -342,6 +388,60 @@ class SourceUniverse: Equatable {
 
     static func == (lhs: SourceUniverse, rhs: SourceUniverse) -> Bool {
         return lhs.number == rhs.number
+    }
+
+}
+
+/// Composed-Packet Data Extension
+///
+/// In-place writers for fields within a full, pre-composed data packet (root + framing + DMP). Each
+/// field's absolute offset is the root-layer length plus its layer-relative `Offset`, so the layer
+/// `Offset` enums remain the single source of truth. These must only be used on a zero-based composed
+/// packet - never on a standalone layer or a slice, where the offsets would be wrong. They are distinct
+/// from the layer-relative replacers (e.g. `replacingSequence`) precisely to avoid that mix-up.
+///
+private extension Data {
+
+    /// The offset of the framing layer within a composed packet (the root-layer length).
+    static let composedFramingBase = RootLayer.Offset.data.rawValue
+
+    /// The offset of the DMP layer within a composed packet.
+    static let composedDMPBase = composedFramingBase + DataFramingLayer.Offset.data.rawValue
+
+    /// Replaces the framing-layer sequence number.
+    mutating func replacingComposedSequence(with sequence: UInt8) {
+        self[Data.composedFramingBase + DataFramingLayer.Offset.sequenceNumber.rawValue] = sequence
+    }
+
+    /// Replaces the framing-layer options.
+    mutating func replacingComposedOptions(with options: DataFramingLayer.Options) {
+        self[Data.composedFramingBase + DataFramingLayer.Offset.options.rawValue] = options.rawValue
+    }
+
+    /// Sets additional framing-layer option bits, preserving any already set.
+    mutating func addingComposedOptions(_ options: DataFramingLayer.Options) {
+        self[Data.composedFramingBase + DataFramingLayer.Offset.options.rawValue] |= options.rawValue
+    }
+
+    /// Replaces the framing-layer priority.
+    mutating func replacingComposedPriority(with priority: UInt8) {
+        self[Data.composedFramingBase + DataFramingLayer.Offset.priority.rawValue] = priority
+    }
+
+    /// Replaces the DMP-layer property values (levels or per-address priorities).
+    mutating func replacingComposedDMPValues(with values: [UInt8]) {
+        let start = Data.composedDMPBase + DMPLayer.Offset.propertyValues.rawValue + 1
+        self.replaceSubrange(start..<start + values.count, with: values)
+    }
+
+    /// Replaces a single DMP-layer property value at a slot offset.
+    mutating func replacingComposedDMPValue(_ value: UInt8, at offset: Int) {
+        self[Data.composedDMPBase + DMPLayer.Offset.propertyValues.rawValue + offset + 1] = value
+    }
+
+    /// Replaces the entire framing layer, leaving the root and DMP regions intact.
+    mutating func replacingComposedFraming(with framing: Data) {
+        self.replaceSubrange(Data.composedFramingBase..<Data.composedDMPBase, with: framing)
     }
 
 }
