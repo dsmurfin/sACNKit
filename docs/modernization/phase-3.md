@@ -8,7 +8,7 @@ Locked decisions (maintainer):
 
 - Full migration; CocoaAsyncSocket removed this phase.
 - **Timers are out of scope**: the vendored `Vendor/CwlDispatch.swift` GCD timers stay (libdispatch works on Linux) and are removed in Phase 4 with the async redesign. MODERNIZATION.md's Phase 3 text is amended accordingly (workstream I). Rationale: Phase 2 just hardened the timer machinery (generation tokens, queue hops); moving ticks onto event loops while state still lives on GCD queues would re-open exactly that area for no Phase 3 benefit.
-- **ByteBuffer is staged within the phase**: PR 1 = NIO transport with boundary conversion (`ByteBuffer <-> Data` at the socket edge); PR 2 = migrate `Layers/*` parse/build and the in-place transmit replacers to `ByteBuffer` under the Phase 1 round-trip net. Each PR independently green and revertible. Boundary-copy honesty: the PR 1 conversion happens once per `send` call - per universe x family x interface (worst case roughly 45k conversions/s at 256 universes, dual-stack, two interfaces); acceptable for one PR's lifetime, removed by PR 2.
+- **Wire-format codec stays `Data` (amended 2026-07-15)**: PR 1 = NIO transport with boundary conversion (`ByteBuffer <-> Data` at the socket edge). PR 2 = kill the per-frame transmit allocation by pre-composing one `Data` packet per universe (existing offset-based replacers, no type change) under the Phase 1 round-trip net and the new benchmark guard (workstream J). **NIO `ByteBuffer` does not enter `Layers/*`, `Data+Extensions`, or the internal delegate payload** - it is confined to the transport layer; see the MODERNIZATION.md 2026-07-15 amendment and workstream H below. The PR 1 socket-edge conversion stays: at worst-case load (~45k packets/s = ~29 MB/s, ~0.1% of memory bandwidth) it is negligible, and a zero-copy `ByteBuffer` pipeline is not justified by measured need (it would cost the layering boundary and the centralized absolute-`Offset` parse model). Each PR independently green and revertible.
 - Swift 6.2 toolchain, tools-version 6.2, `StrictConcurrency=targeted`, language mode `.v5` unchanged.
 
 ## Verified findings driving this phase
@@ -20,7 +20,7 @@ Locked decisions (maintainer):
 - **GCD closes the whole socket on fatal errors**: 14 `closeWithError:` sites in `GCDAsyncUdpSocket.m` fire from fatal send/recv errno, producing `udpSocketDidClose(_:withError:)`; all three owners forward non-nil errors to client delegates. GCD's `close` tears down synchronously (dispatch_sync onto the socket queue).
 - **Bogus-interface errors surface at join, not bind, for receivers**: receive-type `startListening` never passes the interface to `bind` (`ComponentSocket.swift:176` binds wildcard); the interface is first used by `joinMulticastGroup` - so a bad interface on a receiver throws `couldNotJoin`, not `couldNotBind`. (`ReceiverGroupTests` asserts only that *an* error is thrown, but the public error case is client-visible API behavior.)
 - **GCD accepts the alias strings `"localhost"` and `"loopback"`** for both interface parameters and send hosts (`GCDAsyncUdpSocket.m:1191,1456-1479`), mapping them to the loopback addresses. `interface` is public API on every component.
-- **All five layer structs are internal** (zero `public` under `Sources/sACNKit/Layers/`), as are the `Data` accessors/replacers in `Shared/Data+Extensions.swift`. The PR 2 ByteBuffer swap is non-breaking - the breaking-change gate does not apply.
+- **All five layer structs are internal** (zero `public` under `Sources/sACNKit/Layers/`), as are the `Data` accessors/replacers in `Shared/Data+Extensions.swift`. The PR 2 pre-composed-buffer change is internal and non-breaking - the breaking-change gate does not apply.
 - **Hostname string continuity is load-bearing**: `sACNReceiverRaw.processDataPacket` rejects packets whose `hostname`/`ipFamily` differ from the tracked source's. Post-migration this is self-consistent (NIO-vs-NIO string equality), but the *format* of `sourceHostname` reaching client delegates changes for scoped link-local IPv6 (delta B-2).
 - **Owners rely on close-on-dealloc**: comments like "deinit first stops listening" drop `ComponentSocket` references without calling `stopListening()`; GCD closes on dealloc. The NIO impl needs an equivalent `deinit`, which in turn requires the facade's delegate reference to be weak (see D4).
 - The roadmap's remaining cross-platform prep is **already discharged**: `Shared/Universe/Source.swift` has a portable host-name fallback and no Foundation networking types are used outside Darwin guards - the Phase 3 completion note can close that MODERNIZATION.md bullet without code changes.
@@ -41,7 +41,7 @@ Two public error cases become unreachable but are preserved verbatim as API: `co
 - **Commit this plan as `docs/modernization/phase-3.md` before any code** (Phase 1/2 precedent).
 - **Two PRs**, each independently green and revertible:
   - **PR 1 - NIO transport swap**: protocol seam, `NIOComponentSocket`, interface resolver, CocoaAsyncSocket removal, Linux CI, docs.
-  - **PR 2 - ByteBuffer wire I/O**: `Layers/*` parse/build + in-place replacers on `ByteBuffer` under the Phase 1 round-trip net.
+  - **PR 2 - transmit allocation win (amended)**: pre-compose one `Data` packet per universe, mutate in place, remove the per-frame concatenation; add the performance-benchmark guard. Codec stays `Data`; NIO stays in transport.
 - One focused commit per step, each gated on green CI.
 
 ## Guardrails / non-goals
@@ -57,7 +57,7 @@ Two public error cases become unreachable but are preserved verbatim as API: `co
 
 ### A. Manifest & dependency - `Package.swift`
 
-- Remove `CocoaAsyncSocket`; add `.package(url: "https://github.com/apple/swift-nio.git", from: "2.81.0")` with target products `NIOCore`, `NIOPosix`, `NIOFoundationCompat` (boundary `Data(buffer:)`/`ByteBuffer(data:)` conversion in PR 1; test bridging in PR 2). Floor 2.81.0 is the spike-verified minimum; bump to the current release at implementation time if resolution picks one anyway.
+- Remove `CocoaAsyncSocket`; add `.package(url: "https://github.com/apple/swift-nio.git", from: "2.81.0")` with target products `NIOCore`, `NIOPosix`, `NIOFoundationCompat` (retained socket-edge `Data(buffer:)`/`ByteBuffer(data:)` conversion - the codec stays `Data`, so this bridge is permanent, not a PR 1-only stopgap). Floor 2.81.0 is the spike-verified minimum; bump to the current release at implementation time if resolution picks one anyway.
 - **Warnings-as-errors scoping**: CI's `-Xswiftc -warnings-as-errors` applies to every module including dependencies - swift-nio would have to be warning-free under our exact toolchain. Move enforcement into the manifest with the per-target SwiftPM 6.2 setting `.treatAllWarnings(as: .error)` (SE-0443) on both targets, and drop the CI flag (keep `--build-tests`). Verify availability under tools 6.2 at implementation; fallback: keep the CI flag and pin an exact warning-clean swift-nio version.
 
 ### B. Interface resolver - new `Sources/sACNKit/Shared/NetworkInterfaceResolver.swift`
@@ -206,23 +206,35 @@ Keep all four macOS jobs (drop `-Xswiftc -warnings-as-errors` if workstream A's 
 - **R5 evidence loop**: `NIOComponentSocketTests` includes a **unicast-loopback control test** (send to `127.0.0.1`, assert delivery - no multicast involved). Decision rule, pre-committed: if the control passes on the Linux runner but v4 multicast egress/delivery fails, the failure implicates egress routing, and `IP_MULTICAST_IF` is set on v4 transmit channels as a documented deviation from strict parity; if the control also fails, the container's networking is unviable for loopback tests and R5 stays open (recorded in the completion note, to be settled on real Linux hardware).
 - Notes: `--enable-test-discovery` is obsolete; Linux TSan deferred (macOS TSan job covers shared code; add later if cheap). Replace the trailing "Linux ... added in Phase 3" comment. Android/Windows compile-only jobs deferred.
 
-### H. PR 2 - ByteBuffer wire I/O (staged second, independently revertible)
+### H. PR 2 - Transmit allocation win (amended 2026-07-15; staged second, independently revertible)
 
-All affected types are internal (verified), so this is non-breaking by construction. Guarded by the Phase 1 layer round-trip/malformed suites and the TX emission suite.
+> **Amendment.** PR 2 originally migrated `Layers/*` parse/build, the in-place replacers, and the internal `ComponentSocketDelegate` payload to NIO `ByteBuffer`. That coupling is dropped: `ByteBuffer` stays confined to the transport layer (`NIOComponentSocket` / `NetworkInterfaceResolver`), the codec stays `Data`, and the socket-edge boundary conversion from PR 1 is kept. See the MODERNIZATION.md 2026-07-15 amendment for the rationale (layering, negligible boundary-copy cost, avoiding the reader-index parse model). PR 2 now delivers only the measurable performance win, on `Data`.
 
-- **Receive path:** the five layer types gain `parse(from: ByteBuffer)` using `readInteger(endianness: .big)` / `readSlice`. Two swaps are **not** mechanical and get named helpers rather than ad-hoc reimplementation: `Data.toString`'s NUL-trim + invalid-UTF8-truncation semantics (source-name fields) are hoisted into one ByteBuffer-reading helper, and flags-and-length reads converge on the existing `FlagsAndLength` type (no third copy of the shift math). `sACNReceiverRaw`/`sACNDiscoveryReceiver` gain `process(buffer:...)`; the existing `process(data:...)` seam stays as a thin Data-wrapping shim for the Phase 2 receiver suites - its removal is scheduled for Phase 4 (delegate/API redesign), listed in the follow-ups. `ComponentSocketDelegate.receivedMessage` flips its payload to `ByteBuffer` (internal protocol), removing the PR 1 receive-side copy.
-- **Transmit path:** `createAsData` -> `ByteBuffer` equivalents; the in-place replacers (`replacingSequence`/`replacingOptions`/`replacingPriority`/flags-and-length/`replacingDMPLayerValues`) become `buffer.setInteger(_:at:)`/`setBytes(_:at:)` at the same centralized `Offset` values. Today the transmit path re-concatenates `rootLayer + framingLayer + dmpLayer` per frame (`sACNSource.buildDataMessages`); PR 2 stores **one pre-composed per-universe packet buffer** mutated in place at absolute offsets, making `.claude/rules/protocol.md`'s "mutated in place, never rebuilt at frame rate" fully true and removing the per-frame join. `ComponentSocket.send(message:)` flips to `ByteBuffer`, removing the send-side copy.
-- Test fixtures update mechanically via `NIOFoundationCompat` bridging; assertions unchanged - the round-trips are the net.
-- Cleanup: delete `Data` accessors/replacers that become unused.
+All affected types are internal (verified), so this is non-breaking by construction. Guarded by the Phase 1 layer round-trip/malformed suites, the TX emission suite, and the new benchmark harness (workstream J).
+
+- **Receive path:** unchanged. Layer `parse(fromData:)` stays `Data`-based on the Phase 1 stdlib non-allocating `loadUnaligned`; the socket delivers `Data` as today. No `process(buffer:)` seam, no delegate-payload flip - so the Phase 2 `process(data:...)` receiver seam is untouched here (its Phase 4 removal is unaffected).
+- **Transmit path (the win):** today `buildDataMessages` re-concatenates `rootLayer + framingLayer + dmpLayer` per universe per frame (one ~638 B `Data` allocation each, at up to 44 fps x N universes x families). PR 2 pre-composes **one full `Data` packet per universe** (root+framing+DMP joined once at build/update time), stored on `SourceUniverse`, and the per-frame path mutates it in place at absolute offsets with the existing replacers (`replacingSequence`/`replacingOptions`/`replacingPriority`/`replacingDMPLayerValues`), removing the per-frame join. This makes `.claude/rules/protocol.md`'s "mutated in place, never rebuilt at frame rate" literally true. The replacers stay on `Data`; `ComponentSocket.send(message:)` stays `Data` (the transport converts to `ByteBuffer` at the edge).
+- **Levels vs priority:** a universe emits either a NULL-start-code (levels) or a `0xDD` (PAP) packet, so fold the two DMP layers `SourceUniverse` already models (`dmpLevelsLayer` / `dmpPrioritiesLayer`) into **two** pre-composed full packets (a levels packet and a priorities packet), each mutated in place; sequence/options are written into whichever is being sent, matching today's logic. Offset bookkeeping: the framing/DMP `Offset` enums become offsets into the composed packet (add the root-layer length), centralized once so the replacers keep single-source-of-truth offsets.
+- No fixture or assertion churn: the round-trip and TX-emission suites are `Data`-based already and assert byte-identical output.
+- Cleanup: the `Data` accessors/replacers stay (they are the mechanism); drop only the now-unused per-frame concatenation in `buildDataMessages`.
 
 ### I. Docs & rules updates
 
-- **MODERNIZATION.md:** Phase 3 bullet (retire CwlDispatch) - timers deferred to Phase 4 (libdispatch is portable; the async redesign deletes them wholesale, avoiding churning timer plumbing twice); ByteBuffer bullet - staged as PR 2; deliverable - CocoaAsyncSocket removed, CwlDispatch remains until Phase 4, Android/Windows deferred; key files - drop "CwlDispatch (removed)"; Phase 4 section gains CwlDispatch removal and the `process(data:)` shim removal (timing bullet + key files). The cross-platform prep bullet (host name / FoundationNetworking) is recorded as already discharged. On completion: "Status: complete" pointer with honest-history deviations (phase-2.md precedent), including the B-1..B-3 deltas and any R5/R6 outcomes.
+- **MODERNIZATION.md:** Phase 3 bullet (retire CwlDispatch) - timers deferred to Phase 4 (libdispatch is portable; the async redesign deletes them wholesale, avoiding churning timer plumbing twice); ByteBuffer bullet - amended (2026-07-15): codec stays `Data`, NIO confined to transport, PR 2 delivers the transmit allocation win via a pre-composed per-universe `Data` buffer; Verification strategy gains the "Performance benchmarks" item; deliverable - CocoaAsyncSocket removed, CwlDispatch remains until Phase 4, Android/Windows deferred; key files - drop "CwlDispatch (removed)"; Phase 4 section gains CwlDispatch removal and the `process(data:)` shim removal (timing bullet + key files). The cross-platform prep bullet (host name / FoundationNetworking) is recorded as already discharged. On completion: "Status: complete" pointer with honest-history deviations (phase-2.md precedent), including the B-1..B-3 deltas and any R5/R6 outcomes.
 - **AGENTS.md:** dependency line (CocoaAsyncSocket -> swift-nio), Layout (`Shared/` gains the two new files; CwlDispatch note -> "removed in Phase 4"), Networking line -> SwiftNIO done, platforms -> Linux supported.
 - **`.claude/rules/threading.md`:** add the event-loop tier - event loops sit below all component queues; event loop -> `socketDelegateQueue` is `.async`-only with the delegate read inside the hop; `.wait()` only from GCD queues, never from an event loop/handler; one shared event loop per facade preserves cross-family ordering.
 - **`.claude/rules/timing.md`:** CwlDispatch line -> "removed in Phase 4".
-- **`.claude/rules/protocol.md`** (PR 2): replacers described on `ByteBuffer`; pre-composed per-universe packet buffer.
+- **`.claude/rules/protocol.md`** (PR 2): pre-composed per-universe packet buffer mutated in place (replacers stay on `Data`; the "never rebuilt at frame rate" rule made literally true). Note NIO `ByteBuffer` is transport-only and does not appear in the wire format.
 - **README.md:** Requirements add Linux (Swift 6.2); document deltas B-1 and B-2.
+
+### J. Performance benchmark harness (regression guard, added 2026-07-15)
+
+Purpose: catch **performance** regressions independently of the correctness net - specifically a reintroduced per-frame allocation. Not a correctness gate; correctness stays with the Phase 1 characterization suites.
+
+- New benchmark cases in `Tests/sACNKitTests/` (behind an env flag, e.g. `SACNKIT_BENCH=1`, so ordinary `swift test` stays fast) measuring: (a) single data-packet `parse` (`RootLayer` -> `DataFramingLayer` -> `DMPLayer`); (b) `buildDataMessages` at **1 / 64 / 256** universes, dual-stack; (c) the in-place replacers.
+- **Allocation count is the primary, deterministic signal** (wall-clock on shared CI runners is noisy). Assert that the per-frame transmit path allocates a **bounded, universe-count-independent** number of buffers after the pre-composed-buffer change - that is exactly the regression this guards. Where a portable allocation probe is unavailable on Linux, gate the assertion to Darwin (`malloc` zone counters) and keep the throughput measurement cross-platform.
+- **Baseline captured in the same PR as the transmit change** (sequencing step 9) so the win is measured, not assumed, and later diffs are compared against it.
+- CI: a **non-blocking** job (`continue-on-error`) records the numbers as a trend; the deterministic allocation-count assertions run in the normal test job (they are cheap and stable) and are the hard gate.
 
 ## Sequencing (one commit each, green-CI gate)
 
@@ -237,11 +249,11 @@ All affected types are internal (verified), so this is non-breaking by construct
 7. G(Linux): Linux CI jobs incl. the R5 evidence loop. *Guard: the new jobs themselves; first commit where Linux compiles.*
 8. I: docs/rules amendments.
 
-**PR 2 (after PR 1 merges):**
+**PR 2 (after PR 1 merges) - amended 2026-07-15:**
 
-9. Receive path to ByteBuffer (parse + named `toString`/`FlagsAndLength` helpers + `process(buffer:)` + delegate payload flip; Data shim kept). *Guard: layer suites, receiver suites.*
-10. Transmit path to ByteBuffer (create/replacers/pre-composed per-universe buffer/`send`). *Guard: TX emission suite, loopback.*
-11. Dead-code cleanup in `Data+Extensions` + protocol.md update.
+9. Benchmark harness + baseline (workstream J), captured **before** the transmit change so the win is measured. *Guard: non-blocking benchmark job + deterministic allocation assertions.*
+10. Transmit pre-composed per-universe `Data` buffer + in-place replacers; remove the per-frame concatenation in `buildDataMessages` (codec stays `Data` - no `ByteBuffer`, no delegate-payload flip, receive path untouched). *Guard: TX emission suite (byte-identical), loopback, benchmark allocation assertion.*
+11. protocol.md update (pre-composed per-universe buffer) + drop the now-unused concatenation helper.
 
 ## Verification
 
@@ -250,8 +262,10 @@ All affected types are internal (verified), so this is non-breaking by construct
 - Linux gated suites run in the **non-blocking** job; green there is the promotion criterion, not a phase gate (the job's outcome feeds the R5 decision rule either way).
 - TSan job green (covers the new event-loop <-> queue hops).
 - Public API surface diff: no signature deltas.
-- PR 2: byte-identical packet output where asserted (round-trip and TX emission suites unchanged in expectations).
+- PR 2: byte-identical packet output where asserted (round-trip and TX emission suites unchanged in expectations); the transmit per-frame allocation count is bounded and universe-count-independent (benchmark allocation assertion, workstream J); NIO `ByteBuffer` appears in no file under `Layers/`, `Data+Extensions.swift`, or the `ComponentSocketDelegate` payload (grep-verifiable layering check).
 - `swift format lint --strict` clean.
+
+**Verification boundary (untested at runtime):** the gated socket tests are IPv4-only, so the IPv6 paths have **no runtime coverage** and are compile-/API-verified only - specifically the `IPV6_V6ONLY` family separation (the v4-mapped `::ffff:` continuity hazard), the `IPV6_MULTICAST_IF` egress (correct `IPPROTO_IPV6` option level), and the `withPort` scope-id preservation for link-local binds. An IPv6 multicast delivery test was deliberately declined to avoid flakiness on runners without reliable v6 loopback; add one once a known-good v6 runner is available before treating these as tested.
 
 ## Risks / notes
 
@@ -268,8 +282,9 @@ All affected types are internal (verified), so this is non-breaking by construct
 `Package.swift`, `Sources/sACNKit/Shared/ComponentSocket.swift` (protocol + delegate + error),
 `Sources/sACNKit/Shared/NIOComponentSocket.swift` (new), `Sources/sACNKit/Shared/NetworkInterfaceResolver.swift` (new),
 `Sources/sACNKit/Source/sACNSource.swift`, `Sources/sACNKit/Receiver/sACNReceiverRaw.swift`,
-`Sources/sACNKit/Receiver/sACNDiscoveryReceiver.swift`, `Sources/sACNKit/Layers/*.swift` (PR 2),
-`Sources/sACNKit/Source/SourceUniverse.swift` (PR 2), `Sources/sACNKit/Shared/Data+Extensions.swift` (PR 2),
+`Sources/sACNKit/Receiver/sACNDiscoveryReceiver.swift`,
+`Sources/sACNKit/Source/sACNSource.swift` (PR 2, remove per-frame concat), `Sources/sACNKit/Source/SourceUniverse.swift` (PR 2, pre-composed buffers),
 `Tests/sACNKitTests/{NetworkInterfaceResolverTests,NIOComponentSocketTests,TestInterface}.swift` (new),
+`Tests/sACNKitTests/PerformanceBenchmarks.swift` (new, PR 2),
 `Tests/sACNKitTests/{ReceiverGroupTests,PacketFixtures}.swift`, `.github/workflows/ci.yml`,
 `MODERNIZATION.md`, `AGENTS.md`, `.claude/rules/{threading,timing,protocol}.md`, `README.md`.
