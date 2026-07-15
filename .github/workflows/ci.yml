@@ -19,9 +19,9 @@ jobs:
       - name: Swift version
         run: swift --version
       - name: Build
-        # Warnings-as-errors locks in the zero-warning state under StrictConcurrency=targeted,
-        # including the test target (--build-tests).
-        run: swift build --build-tests -Xswiftc -warnings-as-errors
+        # Warnings-as-errors is enforced per-target in Package.swift (.treatAllWarnings), which -
+        # unlike the CI-wide -Xswiftc flag - does not apply to dependencies such as swift-nio.
+        run: swift build --build-tests
       - name: Test
         run: swift test
 
@@ -43,7 +43,8 @@ jobs:
     # runner where multicast loopback works (e.g. self-hosted), at which point
     # fold the env var into the thread-sanitizer job and remove this one.
     # The filter avoids duplicating the full TSan suite run; the network-gated
-    # tests live in these two suites.
+    # tests live in these suites (loopback delivery, receiver-group bind/join, and
+    # the NIO socket facade).
     name: Loopback + TSan (macOS, non-blocking)
     runs-on: macos-26
     steps:
@@ -51,7 +52,7 @@ jobs:
       - name: Test with network loopback under TSan
         id: loopback
         continue-on-error: true
-        run: swift test --sanitize=thread --filter "LoopbackTests|ReceiverGroupTests"
+        run: swift test --sanitize=thread --filter "LoopbackTests|ReceiverGroupTests|NIOComponentSocketTests"
         env:
           SACNKIT_NETWORK_TESTS: "1"
       - name: Surface loopback result
@@ -66,6 +67,42 @@ jobs:
       - name: swift-format lint
         run: swift format lint --strict --recursive --configuration .swift-format Sources Tests
 
-# Linux (and, best-effort, Android / Windows) CI is added in Phase 3, once the
-# SwiftNIO migration removes the Objective-C CocoaAsyncSocket dependency that
-# currently prevents the package from building off-Apple. See MODERNIZATION.md.
+  linux:
+    # Enabled by the Phase 3 SwiftNIO migration removing the Obj-C CocoaAsyncSocket dependency.
+    # Required: build + full (non-network) test suite on Ubuntu.
+    name: Build & Test (Linux)
+    runs-on: ubuntu-latest
+    container: swift:6.2-noble
+    steps:
+      - uses: actions/checkout@v7
+      - name: Swift version
+        run: swift --version
+      - name: Build
+        run: swift build --build-tests
+      - name: Test
+        run: swift test
+
+  linux-loopback:
+    # Non-blocking, same rationale as the macOS loopback job: multicast delivery may not work inside
+    # a shared-runner container. The suite includes a unicast-loopback control test - if that passes
+    # but multicast delivery fails, the failure implicates IPv4 egress routing (see risk R5 in
+    # docs/modernization/phase-3.md), not the container. Promote to required only after a stability
+    # window on a runner where multicast loopback works.
+    name: Loopback (Linux, non-blocking)
+    runs-on: ubuntu-latest
+    container: swift:6.2-noble
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test with network loopback
+        id: loopback
+        continue-on-error: true
+        run: swift test --filter "LoopbackTests|ReceiverGroupTests|NIOComponentSocketTests"
+        env:
+          SACNKIT_NETWORK_TESTS: "1"
+      - name: Surface loopback result
+        if: steps.loopback.outcome == 'failure'
+        run: echo "::warning title=Linux loopback failed (non-blocking)::Network loopback tests failed in the Linux container. If the unicast control test passed but multicast did not, suspect IPv4 multicast egress (risk R5), not a regression."
+
+# Android and Windows are best-effort stretch targets (compile-only) reachable via SwiftNIO. They are
+# deferred as follow-ups - they need non-trivial toolchain scaffolding for no runtime guarantee. See
+# MODERNIZATION.md.

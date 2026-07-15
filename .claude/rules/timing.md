@@ -32,4 +32,5 @@ separately-configurable PAP keep-alive to match ETC), so verify against source b
   fixed in Phase 1 (see MODERNIZATION.md). `isExpired` uses strict `>`, and `interval == 0` means
   "already expired" (used to force immediate expiry, e.g. on termination).
 - GCD timers come from the vendored `Vendor/CwlDispatch.swift` (`DispatchSource.repeatingTimer` /
-  `singleTimer`), slated for removal with the SwiftNIO/async migration.
+  `singleTimer`). The SwiftNIO transport migration (Phase 3) left these in place; they are removed in
+  Phase 4 with the async redesign (`Task.sleep`/`ContinuousClock`/NIO scheduled tasks).

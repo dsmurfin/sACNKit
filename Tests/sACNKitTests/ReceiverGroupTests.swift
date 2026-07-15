@@ -21,19 +21,6 @@ struct ReceiverGroupTests {
 
     // MARK: Helpers
 
-    /// A tiny thread-safe box for values written from delegate callbacks.
-    private final class LockedBox<T> {
-
-        private let lock = NSLock()
-        private var _value: T?
-
-        var value: T? {
-            get { lock.withLock { _value } }
-            set { lock.withLock { _value = newValue } }
-        }
-
-    }
-
     /// A recording `sACNReceiverGroupDelegate`.
     private final class DelegateMock: sACNReceiverGroupDelegate {
 
@@ -107,8 +94,8 @@ struct ReceiverGroupTests {
     @Test("updateInterfaces applies to universes added later")
     func updateInterfacesPersists() throws {
         let group = makeGroup()
-        try group.updateInterfaces(["lo0"])
-        #expect(group.interfaces == ["lo0"], "updated interfaces must persist for universes added later")
+        try group.updateInterfaces([TestInterface.loopback])
+        #expect(group.interfaces == [TestInterface.loopback], "updated interfaces must persist for universes added later")
     }
 
     @Test("A failed add leaves no receiver registered and a retry can succeed", .enabled(if: networkTestsEnabled))

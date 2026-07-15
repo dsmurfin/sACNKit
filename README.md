@@ -9,7 +9,7 @@ standalone HTP / per-address-priority merge engine.
 ## Requirements
 
 - Swift 6.2 toolchain (Xcode 26 or newer)
-- iOS 17+ / macOS 14+ / tvOS 17+ / visionOS 1+
+- iOS 17+ / macOS 14+ / tvOS 17+ / visionOS 1+ / Linux
 
 > The library is undergoing a phased modernization (SwiftNIO transport, a Swift Concurrency API, and
 > Linux support). See [MODERNIZATION.md](MODERNIZATION.md) for the roadmap.
@@ -66,6 +66,15 @@ previous delegate alive for those in-flight deliveries). Similarly, `information
 component's current state, so it may throw for a source listed in the callback payload you are
 handling if that source was lost in the meantime. Tear down resources your delegate uses only after
 queued callbacks have drained (for example after a barrier block on your delegate queue).
+
+### Transport notes (SwiftNIO)
+
+The transport is SwiftNIO. Two behaviours differ from earlier CocoaAsyncSocket-based releases:
+
+- A component's `sACNIPMode` is now enforced: an `ipv4Only` component only binds IPv4, so it no longer
+  incidentally receives IPv6 unicast traffic (and vice versa). Use `ipv4And6` for dual-stack.
+- Source hostnames for scoped link-local IPv6 senders are reported without the zone id
+  (`fe80::1` rather than `fe80::1%en0`).
 
 ## Public types
 

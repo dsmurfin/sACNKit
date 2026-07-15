@@ -23,7 +23,6 @@
 //
 
 import Foundation
-import CocoaAsyncSocket
 
 /// sACN Source
 ///
@@ -218,11 +217,11 @@ final public class sACNSource {
         self.socketDelegateQueue = socketDelegateQueue
         self.socketsShouldTerminate = [:]
         if interfaces.isEmpty {
-            let socket = ComponentSocket(type: .transmit, ipMode: ipMode, delegateQueue: socketDelegateQueue)
+            let socket = NIOComponentSocket(type: .transmit, ipMode: ipMode, delegateQueue: socketDelegateQueue)
             self.sockets = ["": socket]
         } else {
             self.sockets = interfaces.reduce(into: [String: ComponentSocket]()) { dict, interface in
-                let socket = ComponentSocket(type: .transmit, ipMode: ipMode, delegateQueue: socketDelegateQueue)
+                let socket = NIOComponentSocket(type: .transmit, ipMode: ipMode, delegateQueue: socketDelegateQueue)
                 dict[interface] = socket
             }
         }
@@ -369,7 +368,7 @@ final public class sACNSource {
 
                 // add each new interfaces
                 for interface in newInterfaces {
-                    let socket = ComponentSocket(type: .transmit, ipMode: ipMode, delegateQueue: socketDelegateQueue)
+                    let socket = NIOComponentSocket(type: .transmit, ipMode: ipMode, delegateQueue: socketDelegateQueue)
                     sockets[interface] = socket
                     socketsShouldTerminate.removeValue(forKey: interface)
 
@@ -396,7 +395,7 @@ final public class sACNSource {
                 }
 
                 // add socket for all interfaces
-                let socket = ComponentSocket(type: .transmit, ipMode: ipMode, delegateQueue: socketDelegateQueue)
+                let socket = NIOComponentSocket(type: .transmit, ipMode: ipMode, delegateQueue: socketDelegateQueue)
                 sockets[""] = socket
                 socketsShouldTerminate.removeValue(forKey: "")
 
@@ -429,7 +428,7 @@ final public class sACNSource {
 
                 // add each new interface
                 for interface in interfacesToAdd {
-                    let socket = ComponentSocket(type: .transmit, ipMode: ipMode, delegateQueue: socketDelegateQueue)
+                    let socket = NIOComponentSocket(type: .transmit, ipMode: ipMode, delegateQueue: socketDelegateQueue)
                     sockets[interface] = socket
                     socketsShouldTerminate.removeValue(forKey: interface)
 

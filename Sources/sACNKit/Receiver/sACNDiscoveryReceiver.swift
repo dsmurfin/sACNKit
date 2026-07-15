@@ -133,11 +133,11 @@ public class sACNDiscoveryReceiver {
         socketDelegateQueue.setSpecific(key: Self.socketDelegateQueueSpecificKey, value: true)
         self.socketDelegateQueue = socketDelegateQueue
         if interfaces.isEmpty {
-            let socket = ComponentSocket(type: .receive, ipMode: ipMode, port: UDP.sdtPort, delegateQueue: socketDelegateQueue)
+            let socket = NIOComponentSocket(type: .receive, ipMode: ipMode, port: UDP.sdtPort, delegateQueue: socketDelegateQueue)
             self.sockets = ["": socket]
         } else {
             self.sockets = interfaces.reduce(into: [String: ComponentSocket]()) { dict, interface in
-                let socket = ComponentSocket(type: .receive, ipMode: ipMode, port: UDP.sdtPort, delegateQueue: socketDelegateQueue)
+                let socket = NIOComponentSocket(type: .receive, ipMode: ipMode, port: UDP.sdtPort, delegateQueue: socketDelegateQueue)
                 dict[interface] = socket
             }
         }
@@ -241,7 +241,7 @@ public class sACNDiscoveryReceiver {
 
                 // add each new interfaces
                 for interface in newInterfaces {
-                    let socket = ComponentSocket(type: .receive, ipMode: self.ipMode, port: UDP.sdtPort, delegateQueue: self.socketDelegateQueue)
+                    let socket = NIOComponentSocket(type: .receive, ipMode: self.ipMode, port: UDP.sdtPort, delegateQueue: self.socketDelegateQueue)
                     sockets[interface] = socket
 
                     // attempt to listen
@@ -257,7 +257,7 @@ public class sACNDiscoveryReceiver {
                 sockets.removeAll()
 
                 // add socket for all interfaces
-                let socket = ComponentSocket(type: .receive, ipMode: self.ipMode, port: UDP.sdtPort, delegateQueue: self.socketDelegateQueue)
+                let socket = NIOComponentSocket(type: .receive, ipMode: self.ipMode, port: UDP.sdtPort, delegateQueue: self.socketDelegateQueue)
                 sockets[""] = socket
 
                 // attempt to listen
@@ -276,7 +276,7 @@ public class sACNDiscoveryReceiver {
 
                 // add each new interface
                 for interface in interfacesToAdd {
-                    let socket = ComponentSocket(type: .receive, ipMode: self.ipMode, port: UDP.sdtPort, delegateQueue: self.socketDelegateQueue)
+                    let socket = NIOComponentSocket(type: .receive, ipMode: self.ipMode, port: UDP.sdtPort, delegateQueue: self.socketDelegateQueue)
                     sockets[interface] = socket
 
                     // attempt to listen
