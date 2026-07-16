@@ -312,10 +312,12 @@ final class NIOComponentSocket: ComponentSocket, @unchecked Sendable {
             do {
                 let device = try NetworkInterfaceResolver.device(matching: interface, family: .IPv6)
                 // IPV6_MULTICAST_IF is an IPPROTO_IPV6-level option; the default socketOption level
-                // is SOL_SOCKET, so name the level explicitly.
+                // is SOL_SOCKET, so name the level explicitly. The option value type is
+                // platform-dependent (CInt on Darwin, Int on Linux), so build it from the alias rather
+                // than hardcoding CInt - otherwise this fails to compile on Linux.
                 try channel.setOption(
                     ChannelOptions.Types.SocketOption(level: .ipv6, name: .ipv6_multicast_if),
-                    value: CInt(device.interfaceIndex)
+                    value: ChannelOptions.Types.SocketOption.Value(device.interfaceIndex)
                 ).wait()
             } catch {
                 try? channel.close().wait()
