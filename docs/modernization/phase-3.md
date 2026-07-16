@@ -1,5 +1,11 @@
 # sACNKit Modernization - Phase 3: SwiftNIO Transport Migration (Detailed Plan)
 
+> **Status: complete** - PR 1 (transport swap) + PR 2 (transmit allocation win) merged as #43. The
+> honest-history outcomes (behavior deltas B-1..B-3 shipped; **R6 resolved** via `@unchecked Sendable`;
+> **R5 open** - Linux IPv4 multicast egress untested; the broader `isFatal` errno set; and the
+> **non-blocking, known-not-green Linux CI**) are consolidated in the MODERNIZATION.md Phase 3 Status
+> note. This document remains the executed plan of record.
+
 ## Context
 
 This executes **Phase 3** of `MODERNIZATION.md`: replace CocoaAsyncSocket (`GCDAsyncUdpSocket`) with SwiftNIO beneath a stable internal socket abstraction, and make **Linux a first-class CI target**. The phase is **behavior-preserving** except for three deliberate, documented deltas (see "Deliberate behavior deltas" below): the public delegate API is unchanged, the Phase 1/2 characterization net stays green, and the actor/async redesign remains Phase 4.
@@ -246,7 +252,7 @@ Purpose: catch **performance** regressions independently of the correctness net 
 4. C: **protocol flip** - `ComponentSocket` becomes the protocol, GCD class renamed `GCDComponentSocket` and conforms, 15 construction sites updated. Behavioral no-op. *Guard: full suite + gated network suites locally.*
 5. D + G(macOS): `NIOComponentSocket` added alongside (unused by owners) + gated `NIOComponentSocketTests` + macOS loopback job filter extended. *Guard: gated NIO tests locally + macOS loopback job.*
 6. E: **the swap** - construction sites -> `NIOComponentSocket`, `GCDComponentSocket` + CocoaAsyncSocket dependency deleted. *Guard: full suite, TSan, gated network suites + LoopbackTests locally.*
-7. G(Linux): Linux CI jobs incl. the R5 evidence loop. *Guard: the new jobs themselves; first commit where Linux compiles.*
+7. G(Linux): Linux CI jobs incl. the R5 evidence loop, added **non-blocking**. *Guard: the new jobs themselves. Note: Linux does not yet build (concurrency captures under warnings-as-errors, CwlDispatch Darwin symbols, a CInt/Int socket-option mismatch); the job is non-blocking, not a merge gate - see the completion note.*
 8. I: docs/rules amendments.
 
 **PR 2 (after PR 1 merges) - amended 2026-07-15:**

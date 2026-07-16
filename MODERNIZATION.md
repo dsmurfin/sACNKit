@@ -300,14 +300,42 @@ Phase 1 net still applies.
   (`receivePacketInfo`) for multi-homed multicast dedup; vectored reads for high-universe-count RX.
 
 **Deliverable:** all transport on SwiftNIO; CocoaAsyncSocket removed (`CwlDispatch.swift` remains until
-Phase 4); macOS + Linux CI green (Android/Windows deferred as follow-ups); existing delegate API
-unchanged, except three documented behavior deltas (ipMode-enforced families, scoped-IPv6 hostname
-format, no callback on clean close - see docs/modernization/phase-3.md).
+Phase 4); **macOS CI green and blocking; Linux CI runs non-blocking and does not yet build** (three
+causes - see the Status note; Android/Windows deferred as follow-ups); existing delegate API unchanged,
+except three documented behavior deltas (ipMode-enforced families, scoped-IPv6 hostname format, no
+callback on clean close - see docs/modernization/phase-3.md).
 
-> **Status: PR 1 (transport swap) complete** - `ComponentSocket` protocol + `NIOComponentSocket` +
-> `NetworkInterfaceResolver`, CocoaAsyncSocket removed, Linux CI added; validated under TSan. **PR 2
-> (transmit allocation win; amended 2026-07-15 - codec stays `Data`, NIO confined to transport) is
-> pending.** See docs/modernization/phase-3.md for the executed plan.
+> **Status: complete** - PR 1 (transport swap) + PR 2 (transmit allocation win), merged as #43.
+> `ComponentSocket` protocol + `NIOComponentSocket` + `NetworkInterfaceResolver`, CocoaAsyncSocket
+> removed. Honest-history deviations from the plan (phase-2.md precedent):
+>
+> - **Behavior deltas B-1..B-3 shipped as specified:** ipMode-enforced families, scoped link-local
+>   IPv6 hostname format, no delegate callback on clean close. Two public error cases
+>   (`couldNotReceive`, `couldNotEnablePortReuse`) are preserved as API but now unreachable.
+> - **PR 2 (amended 2026-07-15):** the wire-format codec stays `Data`; NIO `ByteBuffer` is confined to
+>   the transport. The per-frame packet concatenation is gone - one pre-composed `Data` packet per
+>   universe, mutated in place. A pre-existing **stale per-packet priority on clear** bug was fixed
+>   here (a wire-observable delta - see the confirmed-defects list) with a regression test.
+> - **R6 resolved:** the facade Sendability fallback was taken - `@unchecked Sendable` on
+>   `NIOComponentSocket` only, with all mutable state behind one `NIOLockedValueBox` and a weak
+>   delegate; TSan-guarded.
+> - **R5 open:** Linux IPv4 multicast egress is unverified. IPv6 and multicast delivery have **no
+>   runtime coverage** on the Linux runner, so this is untested, not confirmed working. To be settled
+>   on real Linux hardware; if egress is implicated, set `IP_MULTICAST_IF` on v4 transmit channels.
+> - **`isFatal` broader than planned (deliberate):** `NIOComponentSocket.isFatal` also treats
+>   `ECONNREFUSED`/`EHOSTUNREACH`/`ENETUNREACH`/`EHOSTDOWN`/`ENETDOWN`/`ECONNRESET`/`EMSGSIZE` as
+>   non-fatal (beyond the plan's `EWOULDBLOCK`/`EAGAIN`/`EINTR`), so one unreachable unicast
+>   destination cannot tear down a socket serving every universe. Correct for unconnected UDP.
+> - **Portability discharged:** `MonotonicTimer` cross-platform clock (Darwin `CLOCK_UPTIME_RAW` /
+>   Glibc `CLOCK_MONOTONIC`); host-name fallback already in place.
+>
+> **Linux CI is known-not-green.** The `Build & Test (Linux)` job is **non-blocking** and currently
+> fails to build. Three causes: (1) Swift 6 concurrency-capture diagnostics across the GCD/delegate
+> stack (promoted to errors by warnings-as-errors) and (2) Darwin-only `NSEC_*` symbols in vendored
+> `CwlDispatch` - both **dissolved by Phase 4** (actor/async redesign + CwlDispatch removal); plus (3)
+> a `CInt`/`Int` IPv6-socket-option mismatch in `NIOComponentSocket` that Phase 4 does **not** fix (the
+> NIO transport is retained), so land it independently. Only the ~110 non-network logic tests gate
+> merges today. See docs/modernization/phase-3.md for the executed plan.
 
 **Key files:** `Shared/ComponentSocket.swift` (protocol), `Shared/NIOComponentSocket.swift` (new),
 `Shared/NetworkInterfaceResolver.swift` (new), `Shared/MonotonicTimer.swift`, `Package.swift`,
