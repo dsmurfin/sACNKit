@@ -36,10 +36,21 @@ that enum is the source of truth. Example (`Layers/RootLayer.swift`, header = 38
   `Shared/Definitions/FlagsAndLength.swift` and `Data+Extensions.toFlagsAndLength`.
 
 ## Hot-path rule: in-place `Data` replacers
-Transmit packets are pre-compiled to `Data` once and then **mutated in place** at fixed offsets rather
-than rebuilt every frame: `replacingSequence`, `replacingOptions`, `replacingPriority`,
-`replacingDMPLayerValues` (`Shared/Data+Extensions.swift`). Preserve this pattern; rebuilding 638-byte
-packets at frame rate times N universes is the thing it deliberately avoids.
+Transmit packets are pre-composed to `Data` once and then **mutated in place** at fixed offsets rather
+than rebuilt every frame. Each `SourceUniverse` stores two full **pre-composed 638-byte packets**
+(`levelsPacket`, `prioritiesPacket` = root + framing + DMP); `Source/SourceUniverse.swift` mutates them
+in place via composed-packet writers (`replacingComposed{Sequence,Options,Priority,DMPValues,DMPValue,
+Framing}`) whose absolute offset is the root-layer length plus the layer-relative `Offset` (so the layer
+`Offset` enums stay the single source of truth). At emit, `buildDataMessages()` stamps sequence/options
+into the stored packet and hands it over (a COW-shared `Data`) - **no per-frame concatenation**. The
+transport (`NIOComponentSocket.send`) copies once into a `ByteBuffer` at the socket edge; NIO
+`ByteBuffer` never enters the codec.
+
+The standalone layer-relative replacers (`replacingSequence`/`replacingOptions`/`replacingPriority`/
+`replacingDMPLayerValues` in `Layers/*` + `Shared/Data+Extensions.swift`) remain for building standalone
+layers (e.g. test fixtures); **never** call them on a composed packet - their offsets are layer-relative
+and would corrupt it. Preserve this pattern; rebuilding 638-byte packets at frame rate times N universes
+is the thing it deliberately avoids.
 
 > Behavioral timing (frame rate, keep-alive, source-loss, sampling, PAP wait) lives in
 > `.claude/rules/timing.md`. Threading/queue contracts live in `.claude/rules/threading.md`.

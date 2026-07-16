@@ -27,19 +27,6 @@ struct ReceiverTests {
 
     // MARK: Helpers
 
-    /// A tiny thread-safe box for values written from delegate callbacks.
-    private final class LockedBox<T> {
-
-        private let lock = NSLock()
-        private var _value: T?
-
-        var value: T? {
-            get { lock.withLock { _value } }
-            set { lock.withLock { _value = newValue } }
-        }
-
-    }
-
     /// A recording `sACNReceiverDelegate`.
     private final class DelegateMock: sACNReceiverDelegate {
 

@@ -27,6 +27,26 @@ contracts hold and must be respected when touching the code.
   the token must be bumped at **every** install and teardown site (see `samplingGeneration` in
   `sACNReceiverRaw`) - a timer installed without a bump silently reopens the stale-tick window.
 
+## Event-loop tier (SwiftNIO transport, Phase 3)
+
+- The transport is `NIOComponentSocket` (SwiftNIO). Each facade owns up to two datagram channels
+  (one per address family) bound on a **single shared event loop**, so cross-family callback order
+  matches the total order the old shared GCD socket queue gave. **Event loops sit strictly *below*
+  every component queue in the lock hierarchy.**
+- Delivery is `.async`-only and upward: a channel handler runs on the event loop, captures the
+  payload, then `delegateQueue.async` hops onto the owner's `socketDelegateQueue` and reads the
+  (weak) delegate **inside** that hop - exactly where `GCDAsyncUdpSocket` delivered. Never call a
+  delegate directly from the event loop.
+- **`.wait()` on a NIO future is permitted only from a GCD queue, never from an event loop or a
+  channel handler.** `startListening`/`stopListening` run `bind().wait()` / `close().wait()` on the
+  owner's `socketDelegateQueue`; this cannot deadlock because an event loop never blocks on, syncs
+  to, or waits for any GCD queue, so a GCD queue blocking down on an event-loop future closes no
+  cycle. Blocking a NIO thread on a GCD queue would break this and is forbidden.
+- `NIOComponentSocket` is `@unchecked Sendable`: all mutable state lives in one `NIOLockedValueBox`
+  and the delegate reference is weak (an owner holds its socket strongly and sets `socket.delegate =
+  self`, so a strong reference would leak the component and defeat close-on-dealloc). Keep both
+  invariants when touching it.
+
 ## Delegate delivery
 - **Every** delegate callback is delivered **asynchronously** on the caller-supplied `delegateQueue`:
   capture the delegate on the owning queue, then `delegateQueue.async { delegate?.… }`

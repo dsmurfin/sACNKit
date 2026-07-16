@@ -17,7 +17,7 @@ API, Swift 6, cross-platform incl. Linux) and the current-state baseline.
 
 ## Layout
 
-- `Package.swift` - SwiftPM manifest; single product `sACNKit`, one dependency (CocoaAsyncSocket).
+- `Package.swift` - SwiftPM manifest; single product `sACNKit`, one dependency (SwiftNIO).
 - `Sources/sACNKit/` - library source, organized by role:
   - `Source/` - sACN transmit: `sACNSource`, `SourceUniverse`, source delegate.
   - `Receiver/` (+ `Receiver/Delegate/`) - receive stack: `sACNReceiverRaw` (engine), `sACNReceiver`,
@@ -25,10 +25,11 @@ API, Swift 6, cross-platform incl. Linux) and the current-state baseline.
   - `Merger/` - standalone HTP/priority merge engine: `sACNMerger`, `MergerSource`.
   - `Layers/` - E1.31 wire-format layers (Root / DataFraming / DMP / UniverseDiscovery) as value
     types with `createAsData`/`parse` + typed validation errors; byte offsets centralized per layer.
-  - `Shared/` - sockets (`ComponentSocket`), timing (`MonotonicTimer`), `Definitions/`, `DMX/`,
-    `Universe/`, `Data+Extensions.swift`.
-  - `Vendor/CwlDispatch.swift` - vendored GCD timer helpers. **Do not edit by hand** (slated for
-    removal in the SwiftNIO migration).
+  - `Shared/` - sockets (`ComponentSocket` protocol + `NIOComponentSocket` SwiftNIO impl,
+    `NetworkInterfaceResolver`), timing (`MonotonicTimer`), `Definitions/`, `DMX/`, `Universe/`,
+    `Data+Extensions.swift`.
+  - `Vendor/CwlDispatch.swift` - vendored GCD timer helpers. **Do not edit by hand** (removed in
+    Phase 4 with the async redesign; still used by the receivers/source timers today).
 - `Tests/sACNKitTests/` - test target. Coverage is currently thin (`DMPLayerTests` only) and is being
   expanded; see MODERNIZATION.md Phase 1.
 
@@ -40,8 +41,10 @@ API, Swift 6, cross-platform incl. Linux) and the current-state baseline.
 - Concurrency: **none today** - GCD serial queues (one per component, doubling as the state mutex) +
   weak-delegate callbacks; no `Sendable`/async. A full actor + `async`/`AsyncStream` redesign under
   Swift 6 strict concurrency is planned (MODERNIZATION.md Phases 2 & 4). Do not assume async APIs exist yet.
-- Networking: wraps `GCDAsyncUdpSocket` (CocoaAsyncSocket) via `Shared/ComponentSocket.swift` ->
-  migrating to SwiftNIO (MODERNIZATION.md Phase 3).
+- Networking: **SwiftNIO** (`Shared/NIOComponentSocket.swift`) behind the internal `ComponentSocket`
+  protocol; interface strings are resolved to NIO devices/addresses by `NetworkInterfaceResolver`.
+  The transport migration (Phase 3) is done; the GCD/`CwlDispatch` timers still run until Phase 4.
+  Linux is now a supported build/test target (MODERNIZATION.md).
 
 ## Conventions
 
@@ -51,8 +54,8 @@ API, Swift 6, cross-platform incl. Linux) and the current-state baseline.
   (existing ones are a known cleanup target - see MODERNIZATION.md).
 - Wire format: on-the-wire is big-endian; per-layer byte offsets are centralized. Preserve the in-place
   `Data` replacers (sequence / options / priority / levels) - they avoid rebuilding packets at frame rate.
-- Dependencies: exactly one today (CocoaAsyncSocket); do not add dependencies without discussion.
-  SwiftNIO is the sanctioned future transport.
+- Dependencies: one - SwiftNIO (products `NIOCore`, `NIOPosix`, `NIOFoundationCompat`,
+  `NIOConcurrencyHelpers`); do not add dependencies without discussion.
 - Style: `swift-format` is the formatter of record.
 - Comments: Comments are encouraged, but avoid cluttering the code with obvious or verbose comments. Use comments sparingly when they add value. Comments should explain why something is done, not what is done. Comments should not document prompt design decisions. Doc comments (`///`) are preferred for public API; inline comments (`//`) are preferred for private implementation details. Avoid block comments (`/* ... */`).
 - Prefer switch-as-expression added in SE-0380 over if/else chains for clarity and exhaustiveness.

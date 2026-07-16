@@ -217,12 +217,12 @@ public class sACNReceiverRaw {
         socketDelegateQueue.setSpecific(key: Self.socketDelegateQueueSpecificKey, value: true)
         self.socketDelegateQueue = socketDelegateQueue
         if interfaces.isEmpty {
-            let socket = ComponentSocket(type: .receive, ipMode: ipMode, port: UDP.sdtPort, delegateQueue: socketDelegateQueue)
+            let socket = NIOComponentSocket(type: .receive, ipMode: ipMode, port: UDP.sdtPort, delegateQueue: socketDelegateQueue)
             self.sockets = ["": socket]
             self.socketsSampling = [socket.id: true]
         } else {
             self.sockets = interfaces.reduce(into: [String: ComponentSocket]()) { dict, interface in
-                let socket = ComponentSocket(type: .receive, ipMode: ipMode, port: UDP.sdtPort, delegateQueue: socketDelegateQueue)
+                let socket = NIOComponentSocket(type: .receive, ipMode: ipMode, port: UDP.sdtPort, delegateQueue: socketDelegateQueue)
                 dict[interface] = socket
             }
             self.socketsSampling = sockets.map { $0.value.id }.reduce(into: [UUID: Bool]()) { dict, id in
@@ -349,7 +349,7 @@ public class sACNReceiverRaw {
 
                 // add each new interfaces
                 for interface in newInterfaces {
-                    let socket = ComponentSocket(type: .receive, ipMode: self.ipMode, port: UDP.sdtPort, delegateQueue: self.socketDelegateQueue)
+                    let socket = NIOComponentSocket(type: .receive, ipMode: self.ipMode, port: UDP.sdtPort, delegateQueue: self.socketDelegateQueue)
                     sockets[interface] = socket
 
                     // attempt to listen
@@ -372,7 +372,7 @@ public class sACNReceiverRaw {
                 sockets.removeAll()
 
                 // add socket for all interfaces
-                let socket = ComponentSocket(type: .receive, ipMode: self.ipMode, port: UDP.sdtPort, delegateQueue: self.socketDelegateQueue)
+                let socket = NIOComponentSocket(type: .receive, ipMode: self.ipMode, port: UDP.sdtPort, delegateQueue: self.socketDelegateQueue)
                 sockets[""] = socket
                 socketsSampling.removeAll()
                 let sample = sampleTimer == nil
@@ -398,7 +398,7 @@ public class sACNReceiverRaw {
                 // add each new interface
                 var newSocketIds: [UUID] = []
                 for interface in interfacesToAdd {
-                    let socket = ComponentSocket(type: .receive, ipMode: self.ipMode, port: UDP.sdtPort, delegateQueue: self.socketDelegateQueue)
+                    let socket = NIOComponentSocket(type: .receive, ipMode: self.ipMode, port: UDP.sdtPort, delegateQueue: self.socketDelegateQueue)
                     sockets[interface] = socket
                     newSocketIds.append(socket.id)
 

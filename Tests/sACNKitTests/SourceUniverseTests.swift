@@ -10,7 +10,9 @@ struct SourceUniverseTests {
 
     private func makeUniverse(levels: [UInt8] = Array(repeating: 0, count: 512)) -> SourceUniverse {
         let universe = sACNSourceUniverse(number: 1, levels: levels)
-        return SourceUniverse(with: universe, sourcePriority: 100, nameData: Source.buildNameData(from: "test"))
+        return SourceUniverse(
+            with: universe, sourcePriority: 100, nameData: Source.buildNameData(from: "test"),
+            rootLayer: RootLayer.createAsData(vector: .data, cid: UUID()))
     }
 
     @Test("Initial state after construction")

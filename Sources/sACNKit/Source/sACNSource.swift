@@ -23,7 +23,6 @@
 //
 
 import Foundation
-import CocoaAsyncSocket
 
 /// sACN Source
 ///
@@ -218,11 +217,11 @@ final public class sACNSource {
         self.socketDelegateQueue = socketDelegateQueue
         self.socketsShouldTerminate = [:]
         if interfaces.isEmpty {
-            let socket = ComponentSocket(type: .transmit, ipMode: ipMode, delegateQueue: socketDelegateQueue)
+            let socket = NIOComponentSocket(type: .transmit, ipMode: ipMode, delegateQueue: socketDelegateQueue)
             self.sockets = ["": socket]
         } else {
             self.sockets = interfaces.reduce(into: [String: ComponentSocket]()) { dict, interface in
-                let socket = ComponentSocket(type: .transmit, ipMode: ipMode, delegateQueue: socketDelegateQueue)
+                let socket = NIOComponentSocket(type: .transmit, ipMode: ipMode, delegateQueue: socketDelegateQueue)
                 dict[interface] = socket
             }
         }
@@ -369,7 +368,7 @@ final public class sACNSource {
 
                 // add each new interfaces
                 for interface in newInterfaces {
-                    let socket = ComponentSocket(type: .transmit, ipMode: ipMode, delegateQueue: socketDelegateQueue)
+                    let socket = NIOComponentSocket(type: .transmit, ipMode: ipMode, delegateQueue: socketDelegateQueue)
                     sockets[interface] = socket
                     socketsShouldTerminate.removeValue(forKey: interface)
 
@@ -396,7 +395,7 @@ final public class sACNSource {
                 }
 
                 // add socket for all interfaces
-                let socket = ComponentSocket(type: .transmit, ipMode: ipMode, delegateQueue: socketDelegateQueue)
+                let socket = NIOComponentSocket(type: .transmit, ipMode: ipMode, delegateQueue: socketDelegateQueue)
                 sockets[""] = socket
                 socketsShouldTerminate.removeValue(forKey: "")
 
@@ -429,7 +428,7 @@ final public class sACNSource {
 
                 // add each new interface
                 for interface in interfacesToAdd {
-                    let socket = ComponentSocket(type: .transmit, ipMode: ipMode, delegateQueue: socketDelegateQueue)
+                    let socket = NIOComponentSocket(type: .transmit, ipMode: ipMode, delegateQueue: socketDelegateQueue)
                     sockets[interface] = socket
                     socketsShouldTerminate.removeValue(forKey: interface)
 
@@ -462,7 +461,8 @@ final public class sACNSource {
                 throw sACNSourceValidationError.universeExists
             }
 
-            let internalUniverse = SourceUniverse(with: universe, sourcePriority: self.priority, nameData: self.nameData)
+            let internalUniverse = SourceUniverse(
+                with: universe, sourcePriority: self.priority, nameData: self.nameData, rootLayer: self.rootLayer)
             self.universes.append(internalUniverse)
             self.universeNumbers.append(universe.number)
             self.universeNumbers.sort()
@@ -556,7 +556,7 @@ final public class sACNSource {
                 throw sACNSourceValidationError.universeTerminating
             }
 
-            try internalUniverse.update(with: universe, sourceActive: _isListening)
+            try internalUniverse.update(with: universe, sourcePriority: self.priority, sourceActive: _isListening)
         }
     }
 
@@ -920,8 +920,6 @@ extension sACNSource {
         var universeMessages = [UniverseData]()
         var socketTerminationMessages = [UniverseData]()
 
-        let rootLayer = rootLayer
-
         for universe in activeUniverses {
 
             // should levels be sent?
@@ -944,22 +942,14 @@ extension sACNSource {
             }
 
             if sendLevels {
-                var framingLayer = universe.framingLayer
-                framingLayer.replacingSequence(with: universe.sequence)
-                framingLayer.replacingOptions(with: framingOptions)
-
-                let dmpLayer = universe.dmpLevelsLayer
-
-                let levels = rootLayer + framingLayer + dmpLayer
+                // stamp sequence/options into the pre-composed packet in place (no per-frame rebuild)
+                universe.stampLevels(sequence: universe.sequence, options: framingOptions)
 
                 let terminationUniverse: UniverseData?
                 if !socketsShouldTerminate.isEmpty || (universe.shouldTerminate && universe.dirtyCounter > 0) {
-                    let framingOptions: DataFramingLayer.Options = [.terminated]
-                    var framingLayer = universe.framingLayer
-                    framingLayer.replacingSequence(with: universe.sequence)
-                    framingLayer.replacingOptions(with: framingOptions)
-                    let levels = rootLayer + framingLayer + dmpLayer
-                    terminationUniverse = UniverseData(universeNumber: universe.number, data: levels)
+                    // the rare socket-termination path needs a `.terminated` variant alongside the normal
+                    // packet: one explicit copy off the just-stamped packet (same sequence)
+                    terminationUniverse = UniverseData(universeNumber: universe.number, data: universe.terminatedLevelsPacket())
                 } else {
                     terminationUniverse = nil
                 }
@@ -972,23 +962,17 @@ extension sACNSource {
                     universeMessages.append(terminationUniverse)
                     universe.incrementSequence()
                 } else if _shouldOutput {
-                    universeMessages.append(UniverseData(universeNumber: universe.number, data: levels))
+                    universeMessages.append(UniverseData(universeNumber: universe.number, data: universe.levelsPacket))
                     universe.incrementSequence()
                 }
                 universe.decrementDirty()
             }
 
             if sendPriority {
-                var framingLayer = universe.framingLayer
-                framingLayer.replacingSequence(with: universe.sequence)
-                framingLayer.replacingOptions(with: framingOptions)
-
-                let dmpLayer = universe.dmpPrioritiesLayer
-
-                let priorities = rootLayer + framingLayer + dmpLayer
+                universe.stampPriorities(sequence: universe.sequence, options: framingOptions)
 
                 if _shouldOutput || (universe.shouldTerminate && universe.dirtyCounter > 0) {
-                    universeMessages.append((universeNumber: universe.number, data: priorities))
+                    universeMessages.append((universeNumber: universe.number, data: universe.prioritiesPacket))
                     universe.incrementSequence()
                     universe.prioritySent()
                 }

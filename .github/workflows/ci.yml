@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, "modernization-*"]
+    branches: [main]
   pull_request:
 
 concurrency:
@@ -19,9 +19,9 @@ jobs:
       - name: Swift version
         run: swift --version
       - name: Build
-        # Warnings-as-errors locks in the zero-warning state under StrictConcurrency=targeted,
-        # including the test target (--build-tests).
-        run: swift build --build-tests -Xswiftc -warnings-as-errors
+        # Warnings-as-errors is enforced per-target in Package.swift (.treatAllWarnings), which -
+        # unlike the CI-wide -Xswiftc flag - does not apply to dependencies such as swift-nio.
+        run: swift build --build-tests
       - name: Test
         run: swift test
 
@@ -43,7 +43,8 @@ jobs:
     # runner where multicast loopback works (e.g. self-hosted), at which point
     # fold the env var into the thread-sanitizer job and remove this one.
     # The filter avoids duplicating the full TSan suite run; the network-gated
-    # tests live in these two suites.
+    # tests live in these suites (loopback delivery, receiver-group bind/join, and
+    # the NIO socket facade).
     name: Loopback + TSan (macOS, non-blocking)
     runs-on: macos-26
     steps:
@@ -51,12 +52,28 @@ jobs:
       - name: Test with network loopback under TSan
         id: loopback
         continue-on-error: true
-        run: swift test --sanitize=thread --filter "LoopbackTests|ReceiverGroupTests"
+        run: swift test --sanitize=thread --filter "LoopbackTests|ReceiverGroupTests|NIOComponentSocketTests"
         env:
           SACNKIT_NETWORK_TESTS: "1"
       - name: Surface loopback result
         if: steps.loopback.outcome == 'failure'
         run: echo "::warning title=Loopback tests failed (non-blocking)::Network loopback tests failed on this runner. Multicast delivery is unreliable on shared runners; see the previous step's log before suspecting a regression."
+
+  benchmark:
+    # Non-blocking performance-trend job (workstream J). The deterministic allocation guard
+    # (PerformanceBenchmarks: the emitted packet is the pre-composed buffer, not a per-frame
+    # allocation) runs unconditionally in the Build & Test job and is the hard gate. This job
+    # additionally records wall-clock build throughput, which is noisy on shared runners and so is
+    # informational only - step-level continue-on-error keeps the check green.
+    name: Benchmark trend (macOS, non-blocking)
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build throughput trend
+        continue-on-error: true
+        run: swift test --filter "PerformanceBenchmarks"
+        env:
+          SACNKIT_BENCH: "1"
 
   format:
     name: Format check
@@ -66,6 +83,50 @@ jobs:
       - name: swift-format lint
         run: swift format lint --strict --recursive --configuration .swift-format Sources Tests
 
-# Linux (and, best-effort, Android / Windows) CI is added in Phase 3, once the
-# SwiftNIO migration removes the Objective-C CocoaAsyncSocket dependency that
-# currently prevents the package from building off-Apple. See MODERNIZATION.md.
+  linux:
+    # Non-blocking for now: the Linux toolchain surfaces pre-Phase-4 issues that don't fail the
+    # Darwin build - Swift 6 concurrency-capture diagnostics across the GCD/delegate stack (promoted
+    # to errors by warnings-as-errors) and Darwin-only symbols in vendored CwlDispatch - plus a
+    # CInt/Int IPv6 socket-option mismatch. These are resolved by the Phase 4 actor/async redesign
+    # (and CwlDispatch removal); a CInt/Int fix can land sooner. Until then a failure surfaces as a
+    # warning annotation, not a red check. Step-level continue-on-error keeps the job green (job-level
+    # would still fail the PR check). Promote back to required once Phase 4 lands / the image is pinned.
+    name: Build & Test (Linux, non-blocking)
+    runs-on: ubuntu-latest
+    container: swift:6.2-noble
+    steps:
+      - uses: actions/checkout@v7
+      - name: Swift version
+        run: swift --version
+      - name: Build & Test
+        id: buildtest
+        continue-on-error: true
+        run: swift build --build-tests && swift test
+      - name: Surface Linux result
+        if: steps.buildtest.outcome == 'failure'
+        run: echo "::warning title=Linux build/test failed (non-blocking)::Linux surfaces pre-Phase-4 concurrency/portability issues (GCD closure captures, CwlDispatch Darwin symbols, CInt/Int socket option). Non-blocking until Phase 4; see the build log."
+
+  linux-loopback:
+    # Non-blocking, same rationale as the macOS loopback job: multicast delivery may not work inside
+    # a shared-runner container. The suite includes a unicast-loopback control test - if that passes
+    # but multicast delivery fails, the failure implicates IPv4 egress routing (see risk R5 in
+    # docs/modernization/phase-3.md), not the container. Promote to required only after a stability
+    # window on a runner where multicast loopback works.
+    name: Loopback (Linux, non-blocking)
+    runs-on: ubuntu-latest
+    container: swift:6.2-noble
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test with network loopback
+        id: loopback
+        continue-on-error: true
+        run: swift test --filter "LoopbackTests|ReceiverGroupTests|NIOComponentSocketTests"
+        env:
+          SACNKIT_NETWORK_TESTS: "1"
+      - name: Surface loopback result
+        if: steps.loopback.outcome == 'failure'
+        run: echo "::warning title=Linux loopback failed (non-blocking)::Network loopback tests failed in the Linux container. If the unicast control test passed but multicast did not, suspect IPv4 multicast egress (risk R5), not a regression."
+
+# Android and Windows are best-effort stretch targets (compile-only) reachable via SwiftNIO. They are
+# deferred as follow-ups - they need non-trivial toolchain scaffolding for no runtime guarantee. See
+# MODERNIZATION.md.

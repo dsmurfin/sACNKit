@@ -35,12 +35,16 @@ These were settled with the maintainer and are no longer open:
   decision below). (watchOS is out of scope - no realistic sACN use case.) Note: these floors do **not**
   make the 6.2 `Span` bridging APIs unconditionally available (those need the 2025 OS wave, iOS 26 /
   macOS 26), so `Span` adoption is gated behind `if #available` with allocation-free fallbacks.
-- **Modern Swift, memory-safe & allocation-free:** prefer modern memory-safe, allocation-free APIs in
-  the wire-format and buffer hot paths - `Span`/`RawSpan` (SE-0447), `InlineArray` (SE-0453), and NIO
-  `ByteBuffer` typed reads. Because `Span` bridging accessors are OS-gated above our floors, adopt them
-  behind `if #available` and fall back to `withUnsafeBytes` + the stdlib non-allocating
-  `UnsafeRawPointer.loadUnaligned(fromByteOffset:as:)` (available at all floors) where gated. This
-  aligns with the `AGENTS.md` "use modern Swift idioms where it doesn't hurt readability" convention.
+- **Modern Swift, memory-safe & allocation-free (layering-scoped):** prefer modern memory-safe,
+  allocation-free APIs in the wire-format and buffer hot paths - the stdlib non-allocating
+  `UnsafeRawBufferPointer.loadUnaligned(fromByteOffset:as:)` (adopted in Phase 1; ungated, all floors,
+  Linux), with `Span`/`RawSpan` (SE-0447) and `InlineArray` (SE-0453) as optional later refinements
+  behind `if #available` + a `withUnsafeBytes` fallback where the bridging accessors are OS-gated.
+  **NIO `ByteBuffer` is confined to the transport layer and does not become a wire-format vocabulary
+  type** - the `Layers/*` codec, `Data+Extensions`, and the internal socket-delegate payload stay
+  `Data`-based, keeping a clean transport/codec boundary (see the 2026-07-15 amendment below and
+  docs/modernization/phase-3.md workstream H). This aligns with the `AGENTS.md` "use modern Swift
+  idioms where it doesn't hurt readability" convention.
 - **Cross-platform support:** **Linux is a supported target, not just a NIO side-effect.** The library
   must build and pass tests on Linux from Phase 3 onward, and all platform-specific code paths (host
   name, monotonic clock, sockets, Obj-C runtime) must be conditionalized behind `#if canImport(...)` /
@@ -50,6 +54,35 @@ These were settled with the maintainer and are no longer open:
   the empty `sACNKitTests.swift` placeholder is deleted.
 - **Delegate API (Phase 4):** **clean break.** All delegate protocols are removed in favor of
   `async`/`AsyncStream`. No deprecated compatibility shim.
+
+### Amendment (2026-07-15) - wire-format codec stays `Data`; NIO stays in transport
+
+The original "modern Swift" decision listed NIO `ByteBuffer` typed reads among the wire-format
+hot-path APIs, and Phase 3 PR 2 was scoped to migrate `Layers/*` parse/build, the in-place replacers,
+and the internal `ComponentSocketDelegate` payload to `ByteBuffer`. On review that coupling was judged
+not worth its cost, and PR 2 is re-scoped (detail in docs/modernization/phase-3.md workstream H):
+
+- **Layering (the priority):** `ByteBuffer` stays confined to `NIOComponentSocket` /
+  `NetworkInterfaceResolver`. The codec (`Layers/*`, `Data+Extensions`, `SourceUniverse`) and the
+  internal delegate payload remain `Data`. The transport/codec boundary is a maintained invariant, not
+  an incidental state - a later transport swap or test double must not drag NIO through the wire format.
+- **Performance:** the one measurable per-frame allocation - the `rootLayer + framingLayer + dmpLayer`
+  concatenation in `sACNSource.buildDataMessages` - is removed by pre-composing **one `Data` packet per
+  universe** and mutating it in place via the existing offset-based replacers. This is a data-structure
+  change (kill the per-frame join), not a type change, and captures essentially all of the transmit win
+  the `ByteBuffer` swap was credited with. Scalar reads are already allocation-free via the Phase 1
+  stdlib `loadUnaligned`.
+- **Boundary copy kept:** the PR 1 `Data(buffer:)` / `ByteBuffer(data:)` conversion at the socket edge
+  stays. At worst-case target load (~45k packets/s = ~29 MB/s, roughly 0.1% of memory bandwidth) it is
+  negligible; a fully zero-copy `ByteBuffer` pipeline is not justified by measured need and would cost
+  the layering boundary plus the centralized absolute-`Offset` parse model (idiomatic `ByteBuffer`
+  parsing is reader-index-based, a bug class the offset model avoids). Revisit only under a profiler if
+  a high-density Linux-server workload demonstrates a real bottleneck.
+- **`RawSpan`/`Span`:** remain an optional, purely internal refinement of the read/write helpers
+  (behind `if #available`), never affecting the layer/transport boundary.
+- **Regression guard:** a performance-benchmark harness is added (see the Verification strategy
+  "Performance benchmarks" item) to catch *performance* regressions - allocation counts and
+  build/parse throughput - independently of the correctness characterization net.
 
 ---
 
@@ -109,6 +142,13 @@ declares only `iOS`/`macOS`. Three hard blockers plus incidental ones:
 - **Undocumented serial-queue requirement** *(fixed in Phase 2)*: `sACNReceiver`/`sACNReceiverGroup`
   mutated state with no lock of their own - safe only if the client's `delegateQueue` was serial.
   Both now serialize state on internal queues.
+- **Stale per-packet priority on clear** *(fixed in Phase 3 PR 2)*: clearing a universe's per-packet
+  priority (`sACNSourceUniverse.priority` non-nil -> nil via `updateLevels(with:)`) left the previous
+  priority on the wire instead of reverting to the source priority - `SourceUniverse.update(with:)`
+  only wrote the framing priority byte when the new value was non-nil. **Wire-observable behavior
+  delta** (documented here, landed with the transmit refactor rather than deferred to Phase 5):
+  `update(with:)` now takes `sourcePriority` and writes the effective priority (`universe.priority ??
+  sourcePriority`) into both composed packets on every change. Regression-tested in `SourceTransmitTests`.
 - **Mutable "constants":** `Shared/DMX/DMX.swift:33` `public static var addressCount`; multicast
   prefix statics in `NetworkDefinitions.swift:81,104` are `var` (read-only in practice) - should be `let`.
 - **Hot-path allocation:** `Shared/Data+Extensions.swift` `loadUnaligned` (`:246`, per-call heap
@@ -238,27 +278,40 @@ Phase 1 net still applies.
 - Map socket options: `SO_REUSEADDR`/`SO_REUSEPORT`, `IPV6_MULTICAST_IF`, bind semantics
   (transmit→host/port, receive→`0.0.0.0`/`::` all-interfaces).
 - Add dependency `swift-nio`; remove `CocoaAsyncSocket` + the `NSObject`/`GCDAsyncUdpSocketDelegate`
-  conformance; retire vendored `CwlDispatch.swift` timers in favor of NIO `EventLoop` scheduling.
-- **Wire I/O on `ByteBuffer`:** migrate layer parse/build to read/write via NIO `ByteBuffer`
-  (allocation-free typed reads `readInteger(endianness:)` / `readSlice` / views), which subsumes most of
-  the manual big-endian `Data` byte extraction. Keep the in-place transmit replacers equivalent on the
-  `ByteBuffer` write path. This is the primary payoff of the modern-Swift decision on the transport side.
+  conformance. **Timers stay:** the vendored `CwlDispatch.swift` GCD timers are **deferred to Phase 4**
+  (libdispatch is portable, so they are not a Linux blocker; the async redesign deletes them wholesale,
+  avoiding churning the just-hardened timer plumbing twice). See docs/modernization/phase-3.md.
+- **Transmit allocation win on `Data` (amended 2026-07-15):** the `Layers/*` codec stays `Data`-based
+  and NIO `ByteBuffer` does not enter the wire format (see the Decisions amendment above). PR 2 instead
+  removes the per-frame `rootLayer + framingLayer + dmpLayer` concatenation by pre-composing one `Data`
+  packet per universe and mutating it in place with the existing offset-based replacers. The socket-edge
+  `ByteBuffer <-> Data` conversion from PR 1 stays. **Staged as PR 2 within the phase**, behind the
+  Phase 1 round-trip net and the new performance-benchmark guard.
 - **Cross-platform validation (now unblocked):** add **Linux** to the CI matrix (build + full test
-  suite on Ubuntu). Verify the Phase 1 conditionalized paths (host name, monotonic clock) compile and
-  pass on Linux, and add `#if canImport(FoundationNetworking)` where any Foundation networking types
-  are used. Confirm NIO multicast join/leave, reuse-addr, and IPv6 egress interface behave on Linux
-  (epoll) as on Apple (kqueue).
+  suite on Ubuntu). The Phase 1 conditionalized paths (host name, monotonic clock) are **already
+  discharged** - `Shared/Universe/Source.swift` has a portable host-name fallback and no Foundation
+  networking types are used outside Darwin guards, so no `#if canImport(FoundationNetworking)` is
+  needed. Confirm NIO multicast join/leave, reuse-addr, and IPv6 egress interface behave on Linux
+  (epoll) as on Apple (kqueue); IPv4 multicast egress is the one open question (risk R5 in phase-3.md).
 - **Extended platforms (best-effort, stretch):** **Android** and **Windows** are secondary coverage
   goals NIO makes reachable (see the Android note in the platform matrix below). Add compile-only CI
   for them where the toolchain allows; do not block the phase on green runtime tests there.
 - Optional upgrades enabled by NIO (schedule as follow-ups if time-boxed): per-packet interface info
   (`receivePacketInfo`) for multi-homed multicast dedup; vectored reads for high-universe-count RX.
 
-**Deliverable:** all transport on SwiftNIO; CocoaAsyncSocket + `CwlDispatch.swift` removed; macOS +
-Linux CI green (Android/Windows compile-checked where feasible); existing delegate API unchanged.
+**Deliverable:** all transport on SwiftNIO; CocoaAsyncSocket removed (`CwlDispatch.swift` remains until
+Phase 4); macOS + Linux CI green (Android/Windows deferred as follow-ups); existing delegate API
+unchanged, except three documented behavior deltas (ipMode-enforced families, scoped-IPv6 hostname
+format, no callback on clean close - see docs/modernization/phase-3.md).
 
-**Key files:** `Shared/ComponentSocket.swift` (→ protocol + NIO impl), `Shared/MonotonicTimer.swift`,
-`Vendor/CwlDispatch.swift` (removed), `Package.swift`, `.github/workflows/*`.
+> **Status: PR 1 (transport swap) complete** - `ComponentSocket` protocol + `NIOComponentSocket` +
+> `NetworkInterfaceResolver`, CocoaAsyncSocket removed, Linux CI added; validated under TSan. **PR 2
+> (transmit allocation win; amended 2026-07-15 - codec stays `Data`, NIO confined to transport) is
+> pending.** See docs/modernization/phase-3.md for the executed plan.
+
+**Key files:** `Shared/ComponentSocket.swift` (protocol), `Shared/NIOComponentSocket.swift` (new),
+`Shared/NetworkInterfaceResolver.swift` (new), `Shared/MonotonicTimer.swift`, `Package.swift`,
+`.github/workflows/*`.
 
 ---
 
@@ -276,11 +329,13 @@ Linux CI green (Android/Windows compile-checked where feasible); existing delega
   errors). No deprecated shim is shipped.
 - Turn on Swift 6 language mode; resolve remaining `Sendable`/isolation diagnostics.
 - Replace GCD/`DispatchSourceTimer` timing with async timing (`Task.sleep` / `ContinuousClock` /
-  NIO scheduled tasks).
-- **Modern memory-safe types (behind `if #available`):** adopt `RawSpan`/`Span` in the remaining
-  non-NIO layer/parse code and evaluate `InlineArray` for the fixed 512-slot DMX level/priority buffers,
-  with the `withUnsafeBytes` + stdlib `loadUnaligned` fallback where the floor lacks the API. Keep
-  readability first per the `AGENTS.md` convention.
+  NIO scheduled tasks), and **remove the vendored `Vendor/CwlDispatch.swift`** (deferred here from
+  Phase 3). Also remove the Phase 2 `process(data:)` receiver test-seam shim kept through Phase 3.
+- **Modern memory-safe types (behind `if #available`):** adopt `RawSpan`/`Span` in the `Data`-based
+  layer/parse code (all of it - the codec never moved to `ByteBuffer`; see the Decisions amendment) and
+  evaluate `InlineArray` for the fixed 512-slot DMX level/priority buffers, with the `withUnsafeBytes` +
+  stdlib `loadUnaligned` fallback where the floor lacks the API. Keep readability first per the
+  `AGENTS.md` convention.
 
 **Deliverable:** modern async-first public API; Swift 6 language mode clean; delegates removed. This
 is the major-version boundary.
@@ -336,6 +391,15 @@ Phase 1 net (now running on the modern stack). See the inventory below for the f
   reference behavior where feasible (e.g. Wireshark capture of sequence numbers, discovery packet
   sorting/reserved field, 3× termination packets). Compare merger output to ETC `dmx_merger` for
   representative PAP/HTP cases.
+- **Performance benchmarks (regression guard, not correctness):** a benchmark harness measuring
+  wire-format hot paths - data-packet parse, `buildDataMessages` at representative universe counts
+  (1 / 64 / 256, dual-stack), and the in-place replacers - with **allocation counts as the primary,
+  deterministic signal** and wall-clock as secondary. Its purpose is catching *performance* regressions
+  (e.g. a reintroduced per-frame allocation), separate from the correctness net. The baseline is
+  established alongside the re-scoped Phase 3 PR 2 (which removes the per-frame concatenation) so the win
+  is measured, not assumed. Runs in CI as a **non-blocking** tracking job (shared-runner wall-clock is
+  noisy); allocation-count assertions are the hard gate where deterministic. See
+  docs/modernization/phase-3.md workstream J.
 - **Per-phase gate:** each phase merges only with green CI and no regression in the characterization net.
 
 ---
