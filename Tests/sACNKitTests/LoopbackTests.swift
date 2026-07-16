@@ -70,4 +70,39 @@ struct LoopbackTests {
         #expect(information.name == "Loopback Test Source")
     }
 
+    /// IPv6 end-to-end, exercising the `IPV6_MULTICAST_IF` egress path (the one untested-and-suspect
+    /// area flagged in the Phase 3 completion note / risk R5). Requires working IPv6 multicast
+    /// loopback, so it shares the `SACNKIT_NETWORK_TESTS` gate and is never a merge blocker.
+    @Test("A source's levels arrive merged at a receiver over IPv6", .timeLimit(.minutes(1)))
+    func sourceToReceiverIPv6() throws {
+        let universe: UInt16 = 63999
+        let levels: [UInt8] = (0..<512).map { UInt8($0 % 256) }
+        let interface = TestInterface.loopback
+
+        let receiverQueue = DispatchQueue(label: "com.danielmurfin.sACNKitTests.loopbackReceiverV6")
+        let receiver = try #require(
+            sACNReceiver(ipMode: .ipv6Only, interfaces: [interface], universe: universe, delegateQueue: receiverQueue))
+        let delegate = DelegateMock()
+        receiver.setDelegate(delegate)
+        try receiver.start()
+
+        let source = sACNSource(
+            name: "Loopback Test Source v6", ipMode: .ipv6Only, interfaces: [interface],
+            delegateQueue: DispatchQueue(label: "com.danielmurfin.sACNKitTests.loopbackSourceV6"))
+        try source.addUniverse(sACNSourceUniverse(number: universe, levels: levels))
+        try source.start()
+        defer {
+            source.stop()
+            receiver.stop()
+        }
+
+        #expect(
+            delegate.mergedSemaphore.wait(timeout: .now() + .seconds(10)) == .success,
+            "expected merged data from the loopback source over IPv6")
+        let merged = try #require(delegate.merged.last)
+        #expect(merged.universe == universe)
+        #expect(merged.levels == levels)
+        #expect(merged.numberOfActiveSources == 1)
+    }
+
 }
