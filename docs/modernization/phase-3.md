@@ -1,5 +1,11 @@
 # sACNKit Modernization - Phase 3: SwiftNIO Transport Migration (Detailed Plan)
 
+> **Status: complete** - PR 1 (transport swap) + PR 2 (transmit allocation win) merged as #43. The
+> honest-history outcomes (behavior deltas B-1..B-3 shipped; **R6 resolved** via `@unchecked Sendable`;
+> **R5 open** - Linux IPv4 multicast egress untested; the broader `isFatal` errno set; and the
+> **non-blocking, known-not-green Linux CI**) are consolidated in the MODERNIZATION.md Phase 3 Status
+> note. This document remains the executed plan of record.
+
 ## Context
 
 This executes **Phase 3** of `MODERNIZATION.md`: replace CocoaAsyncSocket (`GCDAsyncUdpSocket`) with SwiftNIO beneath a stable internal socket abstraction, and make **Linux a first-class CI target**. The phase is **behavior-preserving** except for three deliberate, documented deltas (see "Deliberate behavior deltas" below): the public delegate API is unchanged, the Phase 1/2 characterization net stays green, and the actor/async redesign remains Phase 4.
@@ -246,7 +252,7 @@ Purpose: catch **performance** regressions independently of the correctness net 
 4. C: **protocol flip** - `ComponentSocket` becomes the protocol, GCD class renamed `GCDComponentSocket` and conforms, 15 construction sites updated. Behavioral no-op. *Guard: full suite + gated network suites locally.*
 5. D + G(macOS): `NIOComponentSocket` added alongside (unused by owners) + gated `NIOComponentSocketTests` + macOS loopback job filter extended. *Guard: gated NIO tests locally + macOS loopback job.*
 6. E: **the swap** - construction sites -> `NIOComponentSocket`, `GCDComponentSocket` + CocoaAsyncSocket dependency deleted. *Guard: full suite, TSan, gated network suites + LoopbackTests locally.*
-7. G(Linux): Linux CI jobs incl. the R5 evidence loop. *Guard: the new jobs themselves; first commit where Linux compiles.*
+7. G(Linux): Linux CI jobs incl. the R5 evidence loop, added **non-blocking**. *Guard: the new jobs themselves. Note: Linux does not yet build (concurrency captures under warnings-as-errors, CwlDispatch Darwin symbols, a CInt/Int socket-option mismatch); the job is non-blocking, not a merge gate - see the completion note.*
 8. I: docs/rules amendments.
 
 **PR 2 (after PR 1 merges) - amended 2026-07-15:**
@@ -265,7 +271,7 @@ Purpose: catch **performance** regressions independently of the correctness net 
 - PR 2: byte-identical packet output where asserted (round-trip and TX emission suites unchanged in expectations); the transmit per-frame allocation count is bounded and universe-count-independent (benchmark allocation assertion, workstream J); NIO `ByteBuffer` appears in no file under `Layers/`, `Data+Extensions.swift`, or the `ComponentSocketDelegate` payload (grep-verifiable layering check).
 - `swift format lint --strict` clean.
 
-**Verification boundary (untested at runtime):** the gated socket tests are IPv4-only, so the IPv6 paths have **no runtime coverage** and are compile-/API-verified only - specifically the `IPV6_V6ONLY` family separation (the v4-mapped `::ffff:` continuity hazard), the `IPV6_MULTICAST_IF` egress (correct `IPPROTO_IPV6` option level), and the `withPort` scope-id preservation for link-local binds. An IPv6 multicast delivery test was deliberately declined to avoid flakiness on runners without reliable v6 loopback; add one once a known-good v6 runner is available before treating these as tested.
+**Verification boundary (partial runtime coverage; completion addendum):** originally the gated socket tests were IPv4-only, leaving the IPv6 paths compile-/API-verified only. A gated **IPv6 loopback delivery test** (`LoopbackTests.sourceToReceiverIPv6`, `SACNKIT_NETWORK_TESTS=1`) has since been added and passes on macOS, so the `IPV6_MULTICAST_IF` egress (correct `IPPROTO_IPV6` option level) and end-to-end v6 send/receive are now runtime-validated on Darwin. Still uncovered by CI: the test is non-blocking (v6 multicast loopback is unreliable on shared runners), so `IPV6_V6ONLY` family separation (the v4-mapped `::ffff:` continuity hazard) and `withPort` scope-id preservation for link-local binds remain unverified in CI, and IPv6 egress on **Linux** is untested (risk R5). See docs/modernization/pre-phase-4-baseline.md for the coverage matrix and the Linux-host run to perform before Phase 4.
 
 ## Risks / notes
 
