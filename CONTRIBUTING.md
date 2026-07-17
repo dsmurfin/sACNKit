@@ -5,7 +5,7 @@ Thanks for your interest in contributing.
 ## Requirements
 
 - Swift 6.2 toolchain (Xcode 26 or newer)
-- iOS 17+ / macOS 14+ / tvOS 17+ / visionOS 1+
+- iOS 18+ / macOS 15+ / tvOS 18+ / visionOS 2+ / Linux
 
 ## Build, test and format
 

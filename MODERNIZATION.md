@@ -28,7 +28,10 @@ These were settled with the maintainer and are no longer open:
 - **Order:** **foundation first** - tooling/CI/tests/toolchain, then modernization, then the larger
   behavioral fixes land on the modern foundation. (Exception: confirmed crash-safety and the
   confirmed transmit bug are cheap and land in Phase 1 behind tests - see note in Phase 1.)
-- **Platform floors:** **iOS 17 / macOS 14 / tvOS 17 / visionOS 1**, plus **Linux** (server-side
+- **Platform floors:** **iOS 18 / macOS 15 / tvOS 18 / visionOS 2** (raised from iOS 17 / macOS 14 /
+  tvOS 17 / visionOS 1 in Phase 4: the actor-on-NIO-loop synchronous delivery relies on
+  `SerialExecutor.checkIsolated()`, which is `@available(macOS 15, iOS 18)`; see docs/modernization/phase-4.md),
+  plus **Linux** (server-side
   Swift, headless nodes) as a first-class target. These floors make async/await, `AsyncStream`, and
   Swift 6 concurrency ergonomic (fewer `@available` guards) and run `swift-testing`; SwiftNIO supports
   all of them. Minimum Swift toolchain **6.2** (for `Span`/`RawSpan`/`InlineArray`; see the modern-Swift
@@ -193,7 +196,8 @@ against regressions.
 rewrite - plus the cheap crash-safety and confirmed-bug fixes.
 
 - **Toolchain:** bump `swift-tools-version` to 6.0 and require the **Swift 6.2 toolchain** to build
-  (for `Span`/`InlineArray`); declare platforms **iOS 17 / macOS 14 / tvOS 17 / visionOS 1** (Linux
+  (for `Span`/`InlineArray`); declare platforms **iOS 17 / macOS 14 / tvOS 17 / visionOS 1** (later raised
+  to iOS 18 / macOS 15 / tvOS 18 / visionOS 2 in Phase 4) (Linux
   needs no `platforms` entry - it's implicit once the Obj-C dependency is gone in Phase 3); regenerate
   `Package.resolved`; delete the stray `.swiftpm/xcode/…` metadata and gitignore `.swiftpm/`.
 - **Cross-platform prep (non-socket Darwin APIs):** conditionalize the two Darwin-only code paths that
@@ -436,18 +440,19 @@ Phase 1 net (now running on the modern stack). See the inventory below for the f
 
 | Platform | Tier | Floor | Enabled by | Notes |
 |---|---|---|---|---|
-| macOS | Primary | 14 | Phase 1 (raise) | Full test + runtime CI. |
-| iOS | Primary | 17 | Phase 1 (raise) | Full support; runtime CI via simulator. |
-| tvOS | Primary | 17 | Phase 1 (declare) | Same code path as iOS. |
-| visionOS | Primary | 1 | Phase 1 (declare) | Same code path as iOS. |
+| macOS | Primary | 15 | Phase 1 (raise to 14), Phase 4 (raise to 15) | Full test + runtime CI. |
+| iOS | Primary | 18 | Phase 1 (raise to 17), Phase 4 (raise to 18) | Full support; runtime CI via simulator. |
+| tvOS | Primary | 18 | Phase 1 (declare 17), Phase 4 (raise to 18) | Same code path as iOS. |
+| visionOS | Primary | 2 | Phase 1 (declare 1), Phase 4 (raise to 2) | Same code path as iOS. |
 | Linux | Primary | Swift 6.2 | **Phase 3** (NIO removes Obj-C dep) | Build + full test CI (Ubuntu). Gated on CocoaAsyncSocket removal. |
 | Android | Stretch | Swift 6.2 + Android SDK | **Phase 3** (NIO) | See note below - NIO runs (epoll), but multicast **receive** needs an app-side `WifiManager.MulticastLock`. Compile-check in CI. |
 | Windows | Stretch | Swift 6.2 | **Phase 3** (NIO) | NIO supports Windows; compile-check in CI, no guaranteed runtime tests. |
 | watchOS | Out of scope | - | - | No realistic sACN use case. |
 
-> Floors are iOS 17 / macOS 14 / tvOS 17 / visionOS 1. These do **not** unconditionally unlock the
-> Swift 6.2 `Span` bridging APIs (those need the 2025 OS wave: iOS 26 / macOS 26), so `Span`/`RawSpan`
-> adoption is gated behind `if #available` with allocation-free fallbacks. Toolchain floor is Swift 6.2.
+> Floors are iOS 18 / macOS 15 / tvOS 18 / visionOS 2 (raised from 17/14/17/1 in Phase 4 - see below).
+> These do **not** unconditionally unlock the Swift 6.2 `Span` bridging APIs (those need the 2025 OS
+> wave: iOS 26 / macOS 26), so `Span`/`RawSpan` adoption is gated behind `if #available` with
+> allocation-free fallbacks. Toolchain floor is Swift 6.2.
 
 **Android note.** SwiftNIO *can* run on Android: Android is a Linux kernel, so NIOPosix's `epoll`
 backend works, NIO carries `os(Android)` compile guards, and the Swift Android Workgroup +
