@@ -79,4 +79,16 @@ protocol sACNRuntime: Sendable {
     ///
     func scheduleOnce(after: Duration, _ body: @escaping @Sendable () -> Void) -> any RuntimeTask
 
+    /// Creates a socket bound to this runtime's serial context, delivering callbacks on it so an owning
+    /// actor isolated to the same context can receive them in-isolation.
+    ///
+    /// - Parameters:
+    ///    - type: The socket type (transmit/receive).
+    ///    - ipMode: The IP mode.
+    ///    - port: The UDP port to bind (0 for an ephemeral transmit port).
+    ///
+    /// - Returns: A `ComponentSocket` on this runtime's context.
+    ///
+    func makeSocket(type: ComponentSocketType, ipMode: sACNIPMode, port: UInt16) -> ComponentSocket
+
 }

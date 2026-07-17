@@ -98,7 +98,11 @@ must be, or the synchronous hot-path delivery (below) breaks. NIO is confined to
   add `async` bind/close via `.get()` (the sync path is deleted in the final PR). Replace the close `Error?`
   (not `Sendable`) with `public struct SocketCloseReason: Error, Sendable { errnoCode: CInt?; message: String }`,
   built where `isFatal` classifies errno (`:404-411`). `SocketCloseReason` is public (it rides the public
-  `events` streams) but is NIO-agnostic.
+  `events` streams) but is NIO-agnostic. **Behavior delta (PR2):** the internal close delegate now carries
+  `SocketCloseReason`, so while the still-live public delegates (`sACNSourceDelegate` etc.) keep their
+  `socketDidCloseWithError: Error?` shape, the delivered value is now a `SocketCloseReason`, not the raw
+  NIO `IOError` - a client that downcast the error sees a different type. Acceptable: these delegates are
+  deleted this phase, and the async migration is the breaking major.
 
 ### 3. Timing - replace all 5 GCD timers via `runtime.scheduleRepeated/Once`
 
@@ -130,7 +134,10 @@ Only lifecycle check-then-act sites suspend (socket bind via `.get()`):
 
 - **Source** (`start`/`stop`/`updateInterfaces`): a `Lifecycle` enum (`idle/starting/listening/stopping`)
   set **synchronously before** the first `await`; a second `start()` sees `.starting` and throws; roll back
-  to `.idle` on bind failure. `stop()` sets `.stopping` before awaiting close.
+  to `.idle` on bind failure. `stop()` sets `.stopping` before awaiting close. **`start()` must treat a
+  `CancellationError` from `socket.startListening()` as "superseded by an interleaving `stop`", not a
+  failure**: roll the lifecycle back to `.idle` (already where `stop` left it) and do **not** emit an error
+  onto the `events` stream - it is the expected outcome of a stop-during-start race, not a socket error.
 - **Group `add(universe:)`** (`sACNReceiverGroup.swift:159-178`): a `starting: Set<UInt16>` reservation
   inserted before `await receiver.start()`, `defer`-removed; preserves "register only after successful
   start." `updateInterfaces` snapshots `Array(receivers.values)` before awaiting children.

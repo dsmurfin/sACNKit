@@ -33,10 +33,15 @@ contracts hold and must be respected when touching the code.
   (one per address family) bound on a **single shared event loop**, so cross-family callback order
   matches the total order the old shared GCD socket queue gave. **Event loops sit strictly *below*
   every component queue in the lock hierarchy.**
-- Delivery is `.async`-only and upward: a channel handler runs on the event loop, captures the
-  payload, then `delegateQueue.async` hops onto the owner's `socketDelegateQueue` and reads the
-  (weak) delegate **inside** that hop - exactly where `GCDAsyncUdpSocket` delivered. Never call a
-  delegate directly from the event loop.
+- Delivery has two modes (Phase 4 `NIOComponentSocket.deliver(_:)`). **Delegate-queue path**
+  (`delegateQueue` non-nil, the GCD components): `.async`-only and upward - a channel handler runs on
+  the event loop, then `delegateQueue.async` hops onto the owner's `socketDelegateQueue` and reads the
+  (weak) delegate **inside** that hop, exactly where `GCDAsyncUdpSocket` delivered; never call the
+  delegate directly from the loop on this path. **Actor path** (`delegateQueue` nil, sockets from
+  `sACNRuntime.makeSocket`): the owner is an actor isolated to the same event loop, so the handler calls
+  the delegate **on the loop** (synchronously when already there) and the owner's `nonisolated` delegate
+  methods `assumeIsolated` into their own isolation - same serial context, so this is not a cross-queue
+  hop and does not violate the synchronous-delivery ban.
 - **`.wait()` on a NIO future is permitted only from a GCD queue, never from an event loop or a
   channel handler.** `startListening`/`stopListening` run `bind().wait()` / `close().wait()` on the
   owner's `socketDelegateQueue`; this cannot deadlock because an event loop never blocks on, syncs

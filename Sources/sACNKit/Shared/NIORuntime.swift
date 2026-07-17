@@ -199,4 +199,8 @@ final class NIORuntime: sACNRuntime {
         return NIOOneShotTask(eventLoop: eventLoop, delay: TimeAmount(after), body: body)
     }
 
+    func makeSocket(type: ComponentSocketType, ipMode: sACNIPMode, port: UInt16) -> ComponentSocket {
+        NIOComponentSocket(type: type, ipMode: ipMode, port: port, eventLoop: eventLoop)
+    }
+
 }
