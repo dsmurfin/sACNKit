@@ -129,25 +129,31 @@ struct RuntimeTests {
     @Test("A stalled loop coalesces missed occurrences instead of replaying them")
     func stalledRepeatedCoalesces() async throws {
         // A dedicated single-thread group so stalling the loop does not disturb suites sharing the
-        // singleton group's loops.
+        // singleton group's loops. Its thread is awaited to completion at teardown (below) - a
+        // fire-and-forget `shutdownGracefully { _ in }` could leave the stalled thread outliving the test.
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { group.shutdownGracefully { _ in } }
-        let runtime = NIORuntime(eventLoop: group.next())
-        let counter = Counter()
+        do {
+            let runtime = NIORuntime(eventLoop: group.next())
+            let counter = Counter()
 
-        let task = runtime.scheduleRepeated(after: .milliseconds(50), every: .milliseconds(50)) { counter.increment() }
-        try await Task.sleep(for: .milliseconds(75))
-        let beforeStall = counter.value
+            let task = runtime.scheduleRepeated(after: .milliseconds(50), every: .milliseconds(50)) { counter.increment() }
+            try await Task.sleep(for: .milliseconds(75))
+            let beforeStall = counter.value
 
-        // Stall the loop across ~10 would-be occurrences, then observe shortly after it resumes.
-        runtime.eventLoop.execute { Thread.sleep(forTimeInterval: 0.5) }
-        try await Task.sleep(for: .milliseconds(560))
-        let burst = counter.value - beforeStall
-        task.cancel()
+            // Stall the loop across ~10 would-be occurrences, then observe shortly after it resumes.
+            runtime.eventLoop.execute { Thread.sleep(forTimeInterval: 0.5) }
+            try await Task.sleep(for: .milliseconds(560))
+            let burst = counter.value - beforeStall
+            task.cancel()
 
-        // Coalescing yields the single advanced-deadline fire plus a few on-schedule fires in the
-        // observation margin (~3); replaying every missed occurrence would yield 10 or more.
-        #expect(burst <= 5, "missed occurrences must be coalesced, not replayed (burst=\(burst))")
+            // Coalescing yields the single advanced-deadline fire plus a few on-schedule fires in the
+            // observation margin (~3); replaying every missed occurrence would yield 10 or more.
+            #expect(burst <= 5, "missed occurrences must be coalesced, not replayed (burst=\(burst))")
+        } catch {
+            try? await group.shutdownGracefully()
+            throw error
+        }
+        try await group.shutdownGracefully()
     }
 
 }
