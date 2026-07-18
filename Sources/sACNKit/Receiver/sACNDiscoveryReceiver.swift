@@ -84,28 +84,11 @@ public actor sACNDiscoveryReceiver {
 
     // MARK: Lifecycle
 
-    /// The lifecycle state, reserved synchronously before any `await` so a reentrant call cannot race.
-    ///
-    /// `.starting`, `.reconfiguring` and `.stopping` are exclusive "busy" reservations that make `start`,
-    /// `stop` and `updateInterfaces` mutually exclusive across their suspension points.
-    private enum Lifecycle {
+    /// The reserve-before-await lifecycle state machine (shared with the other component actors).
+    private var gate = LifecycleGate()
 
-        case idle, starting, listening, reconfiguring, stopping
-
-    }
-
-    private var lifecycle: Lifecycle = .idle
-
-    /// Whether the receiver is actively listening. Derived from `lifecycle` - `.listening` or
-    /// `.reconfiguring` - rather than a separate flag, so the two can never desync.
-    public var isListening: Bool { lifecycle == .listening || lifecycle == .reconfiguring }
-
-    /// A stop requested while `.starting` or `.reconfiguring`: the in-flight operation observes it and
-    /// unwinds to idle instead of proceeding.
-    private var stopRequested = false
-
-    /// Continuations from `stop()` callers, all resumed when teardown reaches `.idle`.
-    private var stopContinuations: [CheckedContinuation<Void, Never>] = []
+    /// Whether the receiver is actively listening.
+    public var isListening: Bool { gate.isListening }
 
     // MARK: Sockets
 
@@ -171,30 +154,28 @@ public actor sACNDiscoveryReceiver {
     /// - Throws: An error of type `sACNReceiverValidationError` or `sACNComponentSocketError`.
     ///
     public func start() async throws {
-        switch lifecycle {
-        case .idle:
+        switch gate.reserveStart() {
+        case .reserved:
             break
-        case .listening, .reconfiguring:
+        case .alreadyActive:
             throw sACNReceiverValidationError.receiverStarted
-        case .starting, .stopping:
+        case .busy:
             throw sACNReceiverValidationError.receiverBusy
         }
-        lifecycle = .starting
-        stopRequested = false
         sources = [:]
 
         do {
             for (interface, socket) in sockets {
                 try await listenForSocket(socket, on: interface.isEmpty ? nil : interface)
                 // A `stop()` that interleaved this bind closed the sockets; unwind rather than proceed.
-                if stopRequested { throw CancellationError() }
+                if gate.stopRequested { throw CancellationError() }
             }
         } catch {
             // Roll back: close anything opened, return to idle, and release any waiting `stop()` caller.
             // When a stop superseded the start, report `CancellationError` uniformly - a mid-bind abort
             // already throws it, but a mid-*join* abort surfaces the socket's `couldNotJoin`, a spurious
             // multicast failure that is not the real outcome.
-            let superseded = stopRequested
+            let superseded = gate.stopRequested
             sockets.values.forEach { socket in
                 socket.delegate = nil
                 socket.close()
@@ -203,7 +184,7 @@ public actor sACNDiscoveryReceiver {
             throw superseded ? CancellationError() : error
         }
 
-        lifecycle = .listening
+        gate.toListening()
         startHeartbeat()
     }
 
@@ -216,27 +197,27 @@ public actor sACNDiscoveryReceiver {
     /// asynchronously, but `SO_REUSEPORT` keeps an immediate re-bind safe.
     ///
     public func stop() async {
-        switch lifecycle {
+        switch gate.state {
         case .idle:
             return
         case .starting, .reconfiguring:
             // Supersede the in-flight start/reconfigure: close the sockets (which aborts any in-flight
             // bind) and flag it; that operation observes `stopRequested` and unwinds to idle, resuming us.
-            stopRequested = true
+            gate.requestStop()
             sockets.values.forEach { $0.close() }
-            await withCheckedContinuation { stopContinuations.append($0) }
+            await withCheckedContinuation { gate.addStopWaiter($0) }
         case .listening:
             await teardown()
         case .stopping:
             // A teardown is already underway; wait for the same completion.
-            await withCheckedContinuation { stopContinuations.append($0) }
+            await withCheckedContinuation { gate.addStopWaiter($0) }
         }
     }
 
     /// Tears down from `.listening` (or a superseded `.reconfiguring`): stops the heartbeat, closes every
     /// socket (awaiting the close), clears state, and reaches idle.
     private func teardown() async {
-        lifecycle = .stopping
+        gate.toStopping()
         stopHeartbeat()
         for socket in sockets.values {
             socket.delegate = nil
@@ -249,11 +230,7 @@ public actor sACNDiscoveryReceiver {
     /// Returns to idle and resumes every waiting `stop()` caller. Called from `teardown()` and from
     /// `start()`'s stop-superseded rollback.
     private func reachedIdle() {
-        lifecycle = .idle
-        stopRequested = false
-        let continuations = stopContinuations
-        stopContinuations.removeAll()
-        continuations.forEach { $0.resume() }
+        gate.reachedIdle().forEach { $0.resume() }
     }
 
     /// Updates the interfaces on which this receiver listens for sACN Universe Discovery messages.
@@ -270,24 +247,15 @@ public actor sACNDiscoveryReceiver {
     public func updateInterfaces(_ newInterfaces: Set<String> = []) async throws {
         precondition(!ipMode.usesIPv6() || !newInterfaces.isEmpty, "At least one interface must be provided for IPv6.")
 
-        switch lifecycle {
-        case .idle, .listening:
-            break
-        case .starting, .reconfiguring, .stopping:
-            throw sACNReceiverValidationError.receiverBusy
-        }
+        let reservation = gate.reserveReconfigure()
+        guard reservation != .busy else { throw sACNReceiverValidationError.receiverBusy }
 
-        // The keys are `""` (all interfaces) or one per named interface; the two shapes never coexist.
-        let existingInterfaces = sockets.keys.contains("") ? Set<String>() : Set(sockets.keys.filter { !$0.isEmpty })
+        let (existingInterfaces, keysToAdd, keysToRemove) = interfaceDiff(
+            currentKeys: Set(sockets.keys), newInterfaces: newInterfaces)
         guard existingInterfaces != newInterfaces else { return }
 
-        let newKeys: Set<String> = newInterfaces.isEmpty ? [""] : newInterfaces
-        let currentKeys = Set(sockets.keys)
-        let keysToAdd = newKeys.subtracting(currentKeys)
-        let keysToRemove = currentKeys.subtracting(newKeys)
-
         // Idle: no sockets are bound, so there are no awaits - mutate directly with no reservation.
-        guard lifecycle == .listening else {
+        guard reservation == .proceedListening else {
             keysToRemove.forEach { sockets.removeValue(forKey: $0) }
             for key in keysToAdd {
                 sockets[key] = runtime.makeSocket(type: .receive, ipMode: ipMode, port: UDP.sdtPort)
@@ -297,20 +265,20 @@ public actor sACNDiscoveryReceiver {
 
         // Listening: reserve `.reconfiguring` and bind + join every new socket into a temp map first. If any
         // fails (or a `stop()` interleaves), discard the temp sockets and leave the live set untouched.
-        lifecycle = .reconfiguring
+        gate.beginReconfigure()
         var boundSockets: [String: ComponentSocket] = [:]
         do {
             for key in keysToAdd {
                 let socket = runtime.makeSocket(type: .receive, ipMode: ipMode, port: UDP.sdtPort)
                 try await listenForSocket(socket, on: key.isEmpty ? nil : key)
-                if stopRequested {
+                if gate.stopRequested {
                     socket.close()
                     throw CancellationError()
                 }
                 boundSockets[key] = socket
             }
         } catch {
-            let superseded = stopRequested
+            let superseded = gate.stopRequested
             boundSockets.values.forEach { $0.close() }
             await finishReconfigure()
             // Report a supersede as `CancellationError` (a mid-join abort otherwise surfaces couldNotJoin).
@@ -336,10 +304,10 @@ public actor sACNDiscoveryReceiver {
     /// Restores the lifecycle after a `.reconfiguring` reservation: back to `.listening`, or - if a
     /// `stop()` interleaved and set `stopRequested` - through teardown to idle (resuming that caller).
     private func finishReconfigure() async {
-        if stopRequested {
+        if gate.stopRequested {
             await teardown()
         } else {
-            lifecycle = .listening
+            gate.toListening()
         }
     }
 
@@ -392,7 +360,7 @@ public actor sACNDiscoveryReceiver {
     /// The heartbeat tick: evaluates source loss while listening (guarded so a tick that outlived the
     /// listening window does nothing).
     private func heartbeatTick() {
-        guard lifecycle == .listening || lifecycle == .reconfiguring else { return }
+        guard gate.isListening else { return }
         checkForSourceLoss()
     }
 
