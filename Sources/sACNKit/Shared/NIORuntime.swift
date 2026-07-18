@@ -189,12 +189,14 @@ final class NIORuntime: sACNRuntime {
     }
 
     func scheduleRepeated(after: Duration, every: Duration, _ body: @escaping @Sendable () -> Void) -> any RuntimeTask {
+        precondition(after >= .zero, "a schedule delay must not be negative")
         precondition(every > .zero, "a repeated schedule interval must be positive")
         return NIORepeatedTask(eventLoop: eventLoop, initialDelay: TimeAmount(after), interval: TimeAmount(every), body: body)
     }
 
     func scheduleOnce(after: Duration, _ body: @escaping @Sendable () -> Void) -> any RuntimeTask {
-        NIOOneShotTask(eventLoop: eventLoop, delay: TimeAmount(after), body: body)
+        precondition(after >= .zero, "a schedule delay must not be negative")
+        return NIOOneShotTask(eventLoop: eventLoop, delay: TimeAmount(after), body: body)
     }
 
 }
