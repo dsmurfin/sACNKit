@@ -369,12 +369,19 @@ class SourceUniverse: Equatable {
 
     /// Terminates transmission of this universe.
     ///
+    /// `remove` is **sticky**: once a universe has been marked for removal (e.g. by `removeUniverse`), a
+    /// later `terminate(remove: false)` - as `stop()` issues for every universe - must not downgrade it
+    /// back to keep, or the universe would survive the drain and reappear after a restart. Cleared by
+    /// `reset()`.
+    ///
     /// - Parameters:
     ///    - remove: Whether this universe should be removed after termination.
     ///
     func terminate(remove: Bool) {
         self.shouldTerminate = true
-        self.removeAfterTerminate = remove
+        if remove {
+            self.removeAfterTerminate = true
+        }
         self.dirtyCounter = 3
     }
 

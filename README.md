@@ -30,15 +30,27 @@ Or, in Xcode: **File > Add Package Dependencies...** and enter the repository UR
 
 ### Transmitting
 
+`sACNSource` is a Swift `actor`: its lifecycle and mutation API are `async`, and it reports lifecycle
+events on an `AsyncStream` rather than a delegate.
+
 ```swift
 import sACNKit
 
-let source = sACNSource(name: "My Source", delegateQueue: .main)
-try source.addUniverse(sACNSourceUniverse(number: 1, levels: Array(repeating: 0, count: 512)))
-try source.start()
+let source = sACNSource(name: "My Source")
+try await source.addUniverse(sACNSourceUniverse(number: 1, levels: Array(repeating: 0, count: 512)))
+
+// Subscribe before start() to observe the first (edge-triggered) transmissionStarted event.
+Task {
+    for await event in source.events { print(event) }
+}
+
+try await source.start()
 
 // Update levels for universe 1.
-try source.updateLevels(Array(repeating: 255, count: 512), in: 1)
+try await source.updateLevels(Array(repeating: 255, count: 512), in: 1)
+
+// stop() awaits the termination drain (3 packets), then returns to idle.
+await source.stop()
 ```
 
 ### Receiving
@@ -55,10 +67,11 @@ Use `sACNReceiverGroup` to receive and merge many universes with a single delega
 `sACNReceiverRaw` for un-merged per-source data. `sACNDiscoveryReceiver` reports sources seen via
 universe discovery, and `sACNMerger` is a standalone HTP / per-address-priority merge engine.
 
-All delegate callbacks are delivered asynchronously on the `delegateQueue` you provide, in the
-order packets were processed. A serial queue is recommended; internal state is safe even if the
-queue is concurrent, and you may call back into a component (for example `information(for:)`)
-from within a callback.
+The receivers still use delegates (the `sACNSource` actor above is the exception, migrated to
+`async`/`AsyncStream`). Receiver delegate callbacks are delivered asynchronously on the
+`delegateQueue` you provide, in the order packets were processed. A serial queue is recommended;
+internal state is safe even if the queue is concurrent, and you may call back into a component
+(for example `information(for:)`) from within a callback.
 
 Because delivery is asynchronous, `stop()` and `setDelegate(nil)` are not delivery barriers:
 callbacks already enqueued may still arrive after either call returns (`setDelegate(nil)` keeps the

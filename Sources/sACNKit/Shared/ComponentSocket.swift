@@ -80,11 +80,32 @@ protocol ComponentSocket: AnyObject {
     /// Attempts to leave a multicast group.
     func leave(multicastGroup: String) throws
 
+    /// Attempts to join a multicast group without blocking (the actor path).
+    func join(multicastGroup: String) async throws
+
+    /// Attempts to leave a multicast group without blocking (the actor path).
+    func leave(multicastGroup: String) async throws
+
     /// Starts listening for network data, binding sockets on an optional interface.
     func startListening(onInterface interface: String?) throws
 
     /// Stops listening for network data, closing this socket.
     func stopListening()
+
+    /// Starts listening for network data without blocking, binding sockets on an optional interface.
+    ///
+    /// The actor path (sockets minted by `sACNRuntime.makeSocket`, delivering into an event-loop-isolated
+    /// actor) uses this instead of the blocking `startListening(onInterface:)`.
+    func startListening(onInterface interface: String?) async throws
+
+    /// Stops listening for network data without blocking, closing this socket.
+    func stopListening() async
+
+    /// Closes this socket's channels fire-and-forget, without blocking or awaiting.
+    ///
+    /// Safe to call from any context including the event loop (an actor teardown running on the loop uses
+    /// this rather than the blocking/awaiting stop variants).
+    func close()
 
     /// Sends a message to a specific host and port.
     func send(message data: Data, host: String, port: UInt16)
@@ -114,13 +135,13 @@ protocol ComponentSocketDelegate: AnyObject {
     func receivedMessage(
         for socket: ComponentSocket, withData data: Data, sourceHostname: String, sourcePort: UInt16, ipFamily: ComponentSocketIPFamily)
 
-    /// Called when the socket was closed.
+    /// Called when the socket was closed with an error (clean closes deliver no callback - delta B-3).
     ///
     /// - Parameters:
     ///    - socket: The socket which was closed.
-    ///    - error: An optional error which occured when the socket was closed.
+    ///    - reason: The reason the socket closed (a `Sendable` errno + message).
     ///
-    func socket(_ socket: ComponentSocket, socketDidCloseWithError error: Error?)
+    func socket(_ socket: ComponentSocket, socketDidCloseWith reason: SocketCloseReason)
 
     /// Called when a debug socket log is produced.
     ///
@@ -129,6 +150,31 @@ protocol ComponentSocketDelegate: AnyObject {
     ///    - logMessage: The debug message.
     ///
     func debugLog(for socket: ComponentSocket, with logMessage: String)
+
+}
+
+// MARK: -
+// MARK: -
+
+/// Socket Close Reason
+///
+/// A `Sendable` value describing why a socket closed, so it can cross into an `AsyncStream` event (an
+/// opaque `any Error` is not statically `Sendable`). Carried on the async component `events` streams.
+///
+public struct SocketCloseReason: Error, Sendable {
+
+    /// The errno code, if the underlying error carried one.
+    public let errnoCode: CInt?
+
+    /// A human-readable description of the close.
+    public let message: String
+
+    /// Creates a close reason. The `errnoCode` is extracted transport-side (from the underlying
+    /// `IOError`) where the errno is available, so this seam type stays free of SwiftNIO.
+    public init(errnoCode: CInt? = nil, message: String) {
+        self.errnoCode = errnoCode
+        self.message = message
+    }
 
 }
 

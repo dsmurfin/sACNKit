@@ -31,6 +31,8 @@ separately-configurable PAP keep-alive to match ETC), so verify against source b
   calls the **Darwin-only** `clock_gettime_nsec_np(CLOCK_UPTIME_RAW)`, a cross-platform blocker being
   fixed in Phase 1 (see MODERNIZATION.md). `isExpired` uses strict `>`, and `interval == 0` means
   "already expired" (used to force immediate expiry, e.g. on termination).
-- GCD timers come from the vendored `Vendor/CwlDispatch.swift` (`DispatchSource.repeatingTimer` /
-  `singleTimer`). The SwiftNIO transport migration (Phase 3) left these in place; they are removed in
-  Phase 4 with the async redesign (`Task.sleep`/`ContinuousClock`/NIO scheduled tasks).
+- The **`sACNSource` actor's** transmit and universe-discovery timers now run on **NIO scheduled tasks**
+  via `sACNRuntime.scheduleRepeated` (fixed-rate, coalescing; Phase 4 PR2), ticking in-isolation. The
+  **receiver** timers still come from the vendored `Vendor/CwlDispatch.swift`
+  (`DispatchSource.repeatingTimer` / `singleTimer`); these are removed as each receiver converts to an
+  actor later in Phase 4. The transmit constants above are unchanged - only the timer mechanism moved.

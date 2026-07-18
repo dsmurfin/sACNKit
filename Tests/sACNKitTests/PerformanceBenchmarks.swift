@@ -13,43 +13,22 @@ import Testing
 @Suite("Transmit performance")
 struct PerformanceBenchmarks {
 
-    /// Whether the emitted packet shares backing storage with the universe's stored packet.
-    ///
-    /// Same base address == the pre-composed buffer was handed over (no per-frame allocation); a
-    /// distinct buffer would mean the packet was rebuilt (e.g. by re-concatenating the layers).
-    private func sharesStorage(_ message: Data, with stored: Data) -> Bool {
-        message.withUnsafeBytes { m in
-            stored.withUnsafeBytes { s in m.baseAddress == s.baseAddress }
-        }
-    }
-
     @Test("The emitted level packet is the pre-composed buffer, not a per-frame allocation")
-    func levelPacketIsNotReallocated() throws {
-        let source = sACNSource(delegateQueue: DispatchQueue(label: "test.source"))
-        try source.addUniverse(sACNSourceUniverse(number: 1, levels: Array(repeating: 0, count: 512)))
-        source.shouldOutput(true)
-        let universe = try #require(source.universes.first)
-
-        let message = try #require(source.buildDataMessages().messages.first).data
-        #expect(sharesStorage(message, with: universe.levelsPacket))
+    func levelPacketIsNotReallocated() async throws {
+        let source = sACNSource()
+        try await source.addUniverse(sACNSourceUniverse(number: 1, levels: Array(repeating: 0, count: 512)))
+        await source.shouldOutput(true)
+        #expect(await source.emittedPacketSharesStorage(perAddressPriority: false))
     }
 
     @Test("The emitted priority packet is the pre-composed buffer, not a per-frame allocation")
-    func priorityPacketIsNotReallocated() throws {
-        let source = sACNSource(delegateQueue: DispatchQueue(label: "test.source"))
-        try source.addUniverse(
+    func priorityPacketIsNotReallocated() async throws {
+        let source = sACNSource()
+        try await source.addUniverse(
             sACNSourceUniverse(
                 number: 1, levels: Array(repeating: 0, count: 512), priorities: Array(repeating: 100, count: 512)))
-        source.shouldOutput(true)
-        let universe = try #require(source.universes.first)
-
-        let pap = try #require(
-            source.buildDataMessages().messages.first {
-                Array($0.data)[38 + DataFramingLayer.Offset.data.rawValue + DMPLayer.Offset.propertyValues.rawValue]
-                    == DMX.STARTCode.perAddressPriority.rawValue
-            }
-        ).data
-        #expect(sharesStorage(pap, with: universe.prioritiesPacket))
+        await source.shouldOutput(true)
+        #expect(await source.emittedPacketSharesStorage(perAddressPriority: true))
     }
 
     /// Non-blocking wall-clock trend. Gated behind `SACNKIT_BENCH=1` because shared-runner timing is
@@ -57,21 +36,21 @@ struct PerformanceBenchmarks {
     @Test(
         "Build throughput trend",
         .enabled(if: ProcessInfo.processInfo.environment["SACNKIT_BENCH"] == "1"))
-    func buildThroughput() throws {
+    func buildThroughput() async throws {
         // `buildDataMessages` is family-independent (the dual-stack send loop lives in
         // `sendDataMessages`), so the meaningful axis is universe count.
         for universeCount in [1, 64, 256] {
-            let source = sACNSource(delegateQueue: DispatchQueue(label: "test.source"))
+            let source = sACNSource()
             for number in 1...universeCount {
-                try source.addUniverse(sACNSourceUniverse(number: UInt16(number), levels: Array(repeating: 0, count: 512)))
+                try await source.addUniverse(sACNSourceUniverse(number: UInt16(number), levels: Array(repeating: 0, count: 512)))
             }
-            source.shouldOutput(true)
+            await source.shouldOutput(true)
 
             let iterations = 1000
-            let elapsed = ContinuousClock().measure {
-                for _ in 0..<iterations { _ = source.buildDataMessages() }
-            }
-            let perFrame = elapsed / iterations
+            let clock = ContinuousClock()
+            let start = clock.now
+            for _ in 0..<iterations { _ = await source.buildDataMessages() }
+            let perFrame = (clock.now - start) / iterations
             print("buildDataMessages @ \(universeCount) universes: \(perFrame) per frame over \(iterations) frames")
         }
     }

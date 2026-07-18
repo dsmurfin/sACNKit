@@ -41,11 +41,13 @@ import Darwin
 /// cross-family callback ordering matches the total order `GCDAsyncUdpSocket` got from its shared
 /// socket queue.
 ///
-/// Concurrency: `NIOComponentSocket` is `@unchecked Sendable`. All mutable state lives behind a
-/// single `NIOLockedValueBox`, and every delegate callback is delivered on the caller-supplied
-/// `delegateQueue` (the owner's `socketDelegateQueue`, which doubles as its state mutex) - matching
-/// where `GCDAsyncUdpSocket` delivered. See docs/modernization/phase-3.md and
-/// `.claude/rules/threading.md` for the event-loop tier of the lock hierarchy.
+/// Concurrency: `NIOComponentSocket` is `@unchecked Sendable`, all mutable state behind a single
+/// `NIOLockedValueBox`. It has two delivery modes (see `deliver(_:)`): the **delegate-queue path**
+/// (`delegateQueue` non-nil) hops callbacks via `delegateQueue.async` onto the owner's serial queue, as
+/// `GCDAsyncUdpSocket` did; the **actor path** (`delegateQueue` nil, used by `sACNRuntime.makeSocket`)
+/// delivers on `eventLoop` - synchronously when already there - so an owning actor isolated to that loop
+/// receives callbacks in-isolation (via `assumeIsolated` in its `nonisolated` delegate methods) with no
+/// queue hop. See docs/modernization/phase-4.md and `.claude/rules/threading.md`.
 ///
 final class NIOComponentSocket: ComponentSocket, @unchecked Sendable {
 
@@ -61,8 +63,10 @@ final class NIOComponentSocket: ComponentSocket, @unchecked Sendable {
     /// The UDP port on which to bind this socket.
     private let port: UInt16
 
-    /// The queue on which delegate callbacks are delivered (the owner's state mutex).
-    private let delegateQueue: DispatchQueue
+    /// The queue on which delegate callbacks are delivered (the owner's state mutex), or `nil` for the
+    /// actor path: an owner isolated to `eventLoop` receives callbacks **on the loop** (synchronously when
+    /// already there), so its `nonisolated` delegate methods can `assumeIsolated` in with no queue hop.
+    private let delegateQueue: DispatchQueue?
 
     /// The single event loop on which this facade's channels are bound and read.
     private let eventLoop: EventLoop
@@ -82,30 +86,35 @@ final class NIOComponentSocket: ComponentSocket, @unchecked Sendable {
         /// Whether a close callback has already been delivered for the current listen cycle.
         var closeReported = false
 
-        /// The first error seen during the current listen cycle.
-        var firstError: Error?
+        /// A monotonic listen-cycle epoch, bumped on every stop, so an async bind that suspended across a
+        /// stop can detect it is stale and not store channels into a stopped socket.
+        var epoch: UInt64 = 0
 
     }
 
     /// The lock-guarded mutable state.
     private let state = NIOLockedValueBox(State())
 
-    /// A unique identifier for this socket.
-    ///
-    /// Component sockets are used for joining multicast groups, and sending and receiving network data.
-    ///
-    /// - Parameters:
-    ///    - type: The type of socket (transmit, receive).
-    ///    - ipMode: IP mode for this socket (IPv4/IPv6/Both).
-    ///    - port: Optional: UDP port to bind.
-    ///    - delegateQueue: The dispatch queue on which to receive delegate calls from this component.
-    ///
-    init(type: ComponentSocketType, ipMode: sACNIPMode, port: UInt16 = 0, delegateQueue: DispatchQueue) {
+    /// The designated initializer. Prefer the two convenience initializers, which document the delivery
+    /// modes: a non-nil `delegateQueue` delivers asynchronously on that queue (GCD path), `nil` delivers
+    /// on `eventLoop` (actor path).
+    private init(type: ComponentSocketType, ipMode: sACNIPMode, port: UInt16, delegateQueue: DispatchQueue?, eventLoop: EventLoop) {
         self.socketType = type
         self.ipMode = ipMode
         self.port = port
         self.delegateQueue = delegateQueue
-        self.eventLoop = MultiThreadedEventLoopGroup.singleton.next()
+        self.eventLoop = eventLoop
+    }
+
+    /// Creates a socket delivering callbacks asynchronously on a `delegateQueue` (the GCD-component path).
+    convenience init(type: ComponentSocketType, ipMode: sACNIPMode, port: UInt16 = 0, delegateQueue: DispatchQueue) {
+        self.init(type: type, ipMode: ipMode, port: port, delegateQueue: delegateQueue, eventLoop: MultiThreadedEventLoopGroup.singleton.next())
+    }
+
+    /// Creates a socket bound to a specific event loop, delivering callbacks **on that loop** (the actor
+    /// path; used by `sACNRuntime.makeSocket` so the socket and its owning actor share one serial context).
+    convenience init(type: ComponentSocketType, ipMode: sACNIPMode, port: UInt16 = 0, eventLoop: EventLoop) {
+        self.init(type: type, ipMode: ipMode, port: port, delegateQueue: nil, eventLoop: eventLoop)
     }
 
     deinit {
@@ -147,15 +156,35 @@ final class NIOComponentSocket: ComponentSocket, @unchecked Sendable {
     /// - Throws: An error of type `sACNComponentSocketError`.
     ///
     func join(multicastGroup: String) throws {
-        guard socketType == .receive else { return }
+        precondition(!eventLoop.inEventLoop, "the blocking join is not callable from the event loop; use the async overload")
+        guard let future = membershipFuture(joining: true, multicastGroup: multicastGroup) else { return }
+        do {
+            try future.wait()
+        } catch {
+            throw sACNComponentSocketError.couldNotJoin(multicastGroup: multicastGroup)
+        }
+    }
+
+    func join(multicastGroup: String) async throws {
+        guard let future = membershipFuture(joining: true, multicastGroup: multicastGroup) else { return }
+        do {
+            try await future.get()
+        } catch {
+            throw sACNComponentSocketError.couldNotJoin(multicastGroup: multicastGroup)
+        }
+    }
+
+    /// The future to join or leave a multicast group, or `nil` for a transmit socket / missing channel.
+    private func membershipFuture(joining: Bool, multicastGroup: String) -> EventLoopFuture<Void>? {
+        guard socketType == .receive else { return nil }
         let family: ComponentSocketIPFamily = multicastGroup.contains(":") ? .IPv6 : .IPv4
-        guard let channel = channel(for: family) as? MulticastChannel else { return }
+        guard let channel = channel(for: family) as? MulticastChannel else { return nil }
         do {
             let group = try SocketAddress(ipAddress: multicastGroup, port: Int(port))
             let device = try joinDevice(family: family)
-            try channel.joinGroup(group, device: device).wait()
+            return joining ? channel.joinGroup(group, device: device) : channel.leaveGroup(group, device: device)
         } catch {
-            throw sACNComponentSocketError.couldNotJoin(multicastGroup: multicastGroup)
+            return channel.eventLoop.makeFailedFuture(error)
         }
     }
 
@@ -167,13 +196,19 @@ final class NIOComponentSocket: ComponentSocket, @unchecked Sendable {
     /// - Throws: An error of type `sACNComponentSocketError`.
     ///
     func leave(multicastGroup: String) throws {
-        guard socketType == .receive else { return }
-        let family: ComponentSocketIPFamily = multicastGroup.contains(":") ? .IPv6 : .IPv4
-        guard let channel = channel(for: family) as? MulticastChannel else { return }
+        precondition(!eventLoop.inEventLoop, "the blocking leave is not callable from the event loop; use the async overload")
+        guard let future = membershipFuture(joining: false, multicastGroup: multicastGroup) else { return }
         do {
-            let group = try SocketAddress(ipAddress: multicastGroup, port: Int(port))
-            let device = try joinDevice(family: family)
-            try channel.leaveGroup(group, device: device).wait()
+            try future.wait()
+        } catch {
+            throw sACNComponentSocketError.couldNotLeave(multicastGroup: multicastGroup)
+        }
+    }
+
+    func leave(multicastGroup: String) async throws {
+        guard let future = membershipFuture(joining: false, multicastGroup: multicastGroup) else { return }
+        do {
+            try await future.get()
         } catch {
             throw sACNComponentSocketError.couldNotLeave(multicastGroup: multicastGroup)
         }
@@ -193,12 +228,13 @@ final class NIOComponentSocket: ComponentSocket, @unchecked Sendable {
     /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interface must not be nil.
     ///
     func startListening(onInterface interface: String?) throws {
+        precondition(!eventLoop.inEventLoop, "the blocking startListening is not callable from the event loop; use the async overload")
+        precondition(delegateQueue != nil, "the blocking startListening is for the delegate-queue path")
         precondition(!ipMode.usesIPv6() || interface != nil, "An interface must be provided for IPv6.")
 
         state.withLockedValue { state in
             state.interface = interface
             state.closeReported = false
-            state.firstError = nil
         }
 
         var opened: [ComponentSocketIPFamily: Channel] = [:]
@@ -221,15 +257,93 @@ final class NIOComponentSocket: ComponentSocket, @unchecked Sendable {
 
     /// Stops listening for network data, synchronously closing this socket's channels.
     func stopListening() {
+        precondition(!eventLoop.inEventLoop, "the blocking stopListening is not callable from the event loop; use the async overload")
+        precondition(delegateQueue != nil, "the blocking stopListening is for the delegate-queue path")
         let channels = state.withLockedValue { state -> [Channel] in
             let channels = Array(state.channels.values)
             state.channels = [:]
             // An intentional stop is a clean close: suppress any late error callback for this cycle.
             state.closeReported = true
+            state.epoch &+= 1
             return channels
         }
         for channel in channels {
             try? channel.close().wait()
+        }
+    }
+
+    /// Starts listening without blocking (the actor path), binding fresh channels for the enabled families.
+    ///
+    /// If a `stopListening()` interleaves the bind (actor reentrancy across the suspension), this throws
+    /// `CancellationError` after closing the just-opened channels - the stop wins, and the socket is left
+    /// stopped. Returning without throwing therefore means the socket is listening.
+    func startListening(onInterface interface: String?) async throws {
+        precondition(delegateQueue == nil, "the async startListening is for the actor / loop-delivery path")
+        precondition(!ipMode.usesIPv6() || interface != nil, "An interface must be provided for IPv6.")
+
+        let epoch = state.withLockedValue { state -> UInt64 in
+            state.interface = interface
+            state.closeReported = false
+            return state.epoch
+        }
+
+        var opened: [ComponentSocketIPFamily: Channel] = [:]
+        do {
+            if ipMode.usesIPv4() {
+                opened[.IPv4] = try await bindChannelAsync(family: .IPv4, interface: interface)
+            }
+            if ipMode.usesIPv6() {
+                opened[.IPv6] = try await bindChannelAsync(family: .IPv6, interface: interface)
+            }
+        } catch {
+            for channel in opened.values {
+                try? await channel.close().get()
+            }
+            throw error
+        }
+
+        // A stop that interleaved the binds above bumped the epoch: the socket is now stopped, so close
+        // the just-opened channels rather than resurrecting a stopped socket, and report cancellation.
+        let stale = state.withLockedValue { state -> Bool in
+            guard state.epoch == epoch else { return true }
+            state.channels = opened
+            return false
+        }
+        if stale {
+            for channel in opened.values {
+                try? await channel.close().get()
+            }
+            throw CancellationError()
+        }
+    }
+
+    /// Stops listening without blocking (the actor path), closing this socket's channels.
+    func stopListening() async {
+        precondition(delegateQueue == nil, "the async stopListening is for the actor / loop-delivery path")
+        let channels = state.withLockedValue { state -> [Channel] in
+            let channels = Array(state.channels.values)
+            state.channels = [:]
+            state.closeReported = true
+            state.epoch &+= 1
+            return channels
+        }
+        for channel in channels {
+            try? await channel.close().get()
+        }
+    }
+
+    /// Closes this socket's channels fire-and-forget (no blocking, no awaiting), so it is safe from any
+    /// context including the event loop.
+    func close() {
+        let channels = state.withLockedValue { state -> [Channel] in
+            let channels = Array(state.channels.values)
+            state.channels = [:]
+            state.closeReported = true
+            state.epoch &+= 1
+            return channels
+        }
+        for channel in channels {
+            channel.close(promise: nil)
         }
     }
 
@@ -329,11 +443,60 @@ final class NIOComponentSocket: ComponentSocket, @unchecked Sendable {
         return channel
     }
 
+    /// Binds a channel without blocking (the actor path), bridging futures via `.get()` rather than `.wait()`.
+    private func bindChannelAsync(family: ComponentSocketIPFamily, interface: String?) async throws -> Channel {
+        let channel: Channel
+        do {
+            let address: SocketAddress
+            switch socketType {
+            case .transmit:
+                address = try NetworkInterfaceResolver.bindAddress(interface: interface, family: family, port: port)
+            case .receive:
+                address = NetworkInterfaceResolver.wildcard(family: family, port: port)
+            }
+            channel = try await makeBootstrap(family: family).bind(to: address).get()
+        } catch {
+            throw sACNComponentSocketError.couldNotBind(message: "\(id): Could not bind \(socketType.rawValue) socket.")
+        }
+
+        if socketType == .transmit, family == .IPv6, let interface {
+            do {
+                let device = try NetworkInterfaceResolver.device(matching: interface, family: .IPv6)
+                // IPV6_MULTICAST_IF is an IPPROTO_IPV6-level option; the default socketOption level is
+                // SOL_SOCKET, so name the level explicitly. The value type is platform-dependent (CInt on
+                // Darwin, Int on Linux), so build it from the alias rather than hardcoding CInt.
+                try await channel.setOption(
+                    ChannelOptions.Types.SocketOption(level: .ipv6, name: .ipv6_multicast_if),
+                    value: ChannelOptions.Types.SocketOption.Value(device.interfaceIndex)
+                ).get()
+            } catch {
+                try? await channel.close().get()
+                throw sACNComponentSocketError.couldNotAssignMulticastInterface(
+                    message: "\(id): Could not assign interface for sending multicast on \(socketType.rawValue) socket.")
+            }
+        }
+
+        return channel
+    }
+
     // MARK: - Delivery
 
-    /// Delivers a received datagram on the delegate queue.
+    /// Delivers work to the owner. On the delegate-queue path it hops via `delegateQueue.async`; on the
+    /// actor path it runs the work **on the event loop** (synchronously when already there - the hot path -
+    /// so the owner's `nonisolated` delegate methods can `assumeIsolated` in without a queue hop).
+    private func deliver(_ work: @escaping @Sendable () -> Void) {
+        if let delegateQueue {
+            delegateQueue.async(execute: work)
+        } else if eventLoop.inEventLoop {
+            work()
+        } else {
+            eventLoop.execute(work)
+        }
+    }
+
+    /// Delivers a received datagram to the owner.
     fileprivate func deliverReceived(data: Data, host: String, port: UInt16, family: ComponentSocketIPFamily) {
-        delegateQueue.async { [self] in
+        deliver { [self] in
             guard let delegate = state.withLockedValue({ $0.delegate }) else { return }
             delegate.debugLog(for: self, with: "Socket received data of length \(data.count), from \(family.rawValue) \(host):\(port)")
             delegate.receivedMessage(for: self, withData: data, sourceHostname: host, sourcePort: port, ipFamily: family)
@@ -350,7 +513,6 @@ final class NIOComponentSocket: ComponentSocket, @unchecked Sendable {
         let (channels, shouldReport) = state.withLockedValue { state -> ([Channel], Bool) in
             let shouldReport = !state.closeReported
             state.closeReported = true
-            if state.firstError == nil { state.firstError = error }
             let channels = state.channels
             state.channels = [:]
             return (Array(channels.values), shouldReport)
@@ -359,15 +521,21 @@ final class NIOComponentSocket: ComponentSocket, @unchecked Sendable {
             channel.close(promise: nil)
         }
         guard shouldReport else { return }
-        delegateQueue.async { [self] in
+        let reason = Self.closeReason(error)
+        deliver { [self] in
             guard let delegate = state.withLockedValue({ $0.delegate }) else { return }
-            delegate.socket(self, socketDidCloseWithError: error)
+            delegate.socket(self, socketDidCloseWith: reason)
         }
     }
 
-    /// Delivers a send failure to the debug delegate on the delegate queue.
+    /// Builds a `SocketCloseReason`, extracting the errno from the underlying NIO `IOError` when present.
+    private static func closeReason(_ error: Error) -> SocketCloseReason {
+        SocketCloseReason(errnoCode: (error as? IOError)?.errnoCode, message: "\(error)")
+    }
+
+    /// Delivers a send failure to the debug delegate.
     private func reportSendFailure(_ error: Error) {
-        delegateQueue.async { [self] in
+        deliver { [self] in
             guard let delegate = state.withLockedValue({ $0.delegate }) else { return }
             delegate.debugLog(for: self, with: "\(socketTypeString) socket did not send data due to error \(error.localizedDescription)")
         }

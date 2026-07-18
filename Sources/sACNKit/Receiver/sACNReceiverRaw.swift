@@ -944,10 +944,10 @@ extension sACNReceiverRaw: ComponentSocketDelegate {
     ///    - socket: The socket which was closed.
     ///    - error: An optional error which occured when the socket was closed.
     ///
-    func socket(_ socket: ComponentSocket, socketDidCloseWithError error: Error?) {
-        guard error != nil, self._isListening else { return }
+    func socket(_ socket: ComponentSocket, socketDidCloseWith reason: SocketCloseReason) {
+        guard self._isListening else { return }
         let delegate = delegate
-        delegateQueue.async { delegate?.receiver(self, interface: socket.interface, socketDidCloseWithError: error) }
+        delegateQueue.async { delegate?.receiver(self, interface: socket.interface, socketDidCloseWithError: reason) }
     }
 
     /// Called when a debug socket log is produced.

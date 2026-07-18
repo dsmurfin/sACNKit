@@ -37,7 +37,7 @@ final class RecordingSocketDelegate: ComponentSocketDelegate {
 
     private let lock = NSLock()
     private var _received: [Received] = []
-    private var _closeError: Error?
+    private var _closeReason: SocketCloseReason?
 
     /// Signalled on each received datagram.
     let receivedSemaphore = DispatchSemaphore(value: 0)
@@ -45,8 +45,8 @@ final class RecordingSocketDelegate: ComponentSocketDelegate {
     /// All datagrams received so far.
     var received: [Received] { lock.withLock { _received } }
 
-    /// The error reported by the last socket close, if any.
-    var closeError: Error? { lock.withLock { _closeError } }
+    /// The reason reported by the last socket close, if any.
+    var closeReason: SocketCloseReason? { lock.withLock { _closeReason } }
 
     func receivedMessage(
         for socket: ComponentSocket, withData data: Data, sourceHostname: String, sourcePort: UInt16, ipFamily: ComponentSocketIPFamily
@@ -55,8 +55,8 @@ final class RecordingSocketDelegate: ComponentSocketDelegate {
         receivedSemaphore.signal()
     }
 
-    func socket(_ socket: ComponentSocket, socketDidCloseWithError error: Error?) {
-        lock.withLock { _closeError = error }
+    func socket(_ socket: ComponentSocket, socketDidCloseWith reason: SocketCloseReason) {
+        lock.withLock { _closeReason = reason }
     }
 
     func debugLog(for socket: ComponentSocket, with logMessage: String) {}

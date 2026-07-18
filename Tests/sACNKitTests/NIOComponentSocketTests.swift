@@ -31,6 +31,26 @@ struct NIOComponentSocketTests {
         socket.stopListening()
     }
 
+    // MARK: Async lifecycle (actor path)
+
+    @Test("An actor-path transmit socket binds and re-listens without blocking")
+    func asyncTransmitBindsAndRelistens() async throws {
+        let socket = NIORuntime().makeSocket(type: .transmit, ipMode: .ipv4Only, port: 0)
+        try await socket.startListening(onInterface: nil)
+        await socket.stopListening()
+        // re-listen on the same socket
+        try await socket.startListening(onInterface: nil)
+        await socket.stopListening()
+    }
+
+    @Test("An actor-path transmit socket surfaces couldNotBind for a bogus interface")
+    func asyncTransmitBogusInterfaceThrows() async {
+        let socket = NIORuntime().makeSocket(type: .transmit, ipMode: .ipv4Only, port: 0)
+        await #expect(throws: sACNComponentSocketError.self) {
+            try await socket.startListening(onInterface: "sacnkit-no-such-interface")
+        }
+    }
+
     @Test("A receive socket binds the wildcard port")
     func receiveBinds() throws {
         let socket = NIOComponentSocket(type: .receive, ipMode: .ipv4Only, port: Self.testPort, delegateQueue: makeQueue("nio.rx"))

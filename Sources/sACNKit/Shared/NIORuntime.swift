@@ -171,21 +171,23 @@ final class NIORuntime: sACNRuntime {
     /// The event loop backing this runtime.
     let eventLoop: EventLoop
 
-    /// The loop's own serial executor. On the platform floor (macOS 15 / iOS 18) this implements
-    /// `checkIsolated()`, which is what makes synchronous in-isolation packet delivery (`assumeIsolated`
-    /// from the channel handler) valid - to be wired when the first actor needs a socket.
-    var serialExecutor: any SerialExecutor { eventLoop.executor }
+    /// The serial executor a component actor isolates itself to: our own `EventLoopSerialExecutor` over the
+    /// loop, whose `checkIsolated()` (compiled at the package's macOS 15 / iOS 18 floor) makes synchronous
+    /// in-isolation delivery (`assumeIsolated` from a timer tick or channel handler) valid. See that type
+    /// for why `eventLoop.executor` cannot be used here.
+    private let executor: EventLoopSerialExecutor
+
+    var serialExecutor: any SerialExecutor { executor }
 
     /// Creates a runtime over an event loop.
     ///
     /// - Parameters:
     ///    - eventLoop: The event loop to run on. Defaults to the shared singleton group's next loop, so
-    ///      all runtimes (like all sockets today) share the singleton group's threads. The loop **must**
-    ///      conform to `NIOSerialEventLoopExecutor` (as `MultiThreadedEventLoopGroup`'s loops do) for the
-    ///      actor-isolation delivery to work - `EmbeddedEventLoop`'s executor traps, so it is not usable.
+    ///      all runtimes (like all sockets today) share the singleton group's threads.
     ///
     init(eventLoop: EventLoop = MultiThreadedEventLoopGroup.singleton.next()) {
         self.eventLoop = eventLoop
+        self.executor = EventLoopSerialExecutor(eventLoop: eventLoop)
     }
 
     func scheduleRepeated(after: Duration, every: Duration, _ body: @escaping @Sendable () -> Void) -> any RuntimeTask {
@@ -197,6 +199,10 @@ final class NIORuntime: sACNRuntime {
     func scheduleOnce(after: Duration, _ body: @escaping @Sendable () -> Void) -> any RuntimeTask {
         precondition(after >= .zero, "a schedule delay must not be negative")
         return NIOOneShotTask(eventLoop: eventLoop, delay: TimeAmount(after), body: body)
+    }
+
+    func makeSocket(type: ComponentSocketType, ipMode: sACNIPMode, port: UInt16) -> ComponentSocket {
+        NIOComponentSocket(type: type, ipMode: ipMode, port: port, eventLoop: eventLoop)
     }
 
 }
