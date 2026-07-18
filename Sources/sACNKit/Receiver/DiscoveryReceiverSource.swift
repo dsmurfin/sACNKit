@@ -43,9 +43,6 @@ class DiscoveryReceiverSource {
     /// Whether there are un-notified changes.
     var dirty: Bool
 
-    /// The most recently notified number of universes.
-    var lastNotifiedUniverseCount: Int
-
     /// The next expected universe index.
     var nextUniverseIndex: Int
 
@@ -60,7 +57,6 @@ class DiscoveryReceiverSource {
         self.universes = []
         self.universeCount = 0
         self.dirty = true
-        self.lastNotifiedUniverseCount = 0
         self.nextUniverseIndex = 0
         self.nextPage = 0
         self.timer = MonotonicTimer()

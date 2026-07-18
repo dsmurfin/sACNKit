@@ -24,15 +24,16 @@ separately-configurable PAP keep-alive to match ETC), so verify against source b
 - **New-source PAP wait: 1500 ms**, `perAddressPriorityWait`. A new source's levels are held this long
   awaiting a `0xDD` packet before falling back to universe priority.
 - **Receiver heartbeat: 500 ms**, `heartbeatTime` (drives timeout evaluation).
-- **Discovery receiver heartbeat: 500 ms** (`Receiver/sACNDiscoveryReceiver.swift`).
+- **Discovery receiver heartbeat: 500 ms** (`Receiver/sACNDiscoveryReceiver.swift`; the discovery receiver
+  is now an actor (PR3), so this runs on a NIO scheduled task via `sACNRuntime`, not `CwlDispatch`).
 
 ## Clock
 - Timeouts use `Shared/MonotonicTimer.swift` (monotonic, immune to wall-clock changes). It currently
   calls the **Darwin-only** `clock_gettime_nsec_np(CLOCK_UPTIME_RAW)`, a cross-platform blocker being
   fixed in Phase 1 (see MODERNIZATION.md). `isExpired` uses strict `>`, and `interval == 0` means
   "already expired" (used to force immediate expiry, e.g. on termination).
-- The **`sACNSource` actor's** transmit and universe-discovery timers now run on **NIO scheduled tasks**
-  via `sACNRuntime.scheduleRepeated` (fixed-rate, coalescing; Phase 4 PR2), ticking in-isolation. The
-  **receiver** timers still come from the vendored `Vendor/CwlDispatch.swift`
-  (`DispatchSource.repeatingTimer` / `singleTimer`); these are removed as each receiver converts to an
-  actor later in Phase 4. The transmit constants above are unchanged - only the timer mechanism moved.
+- The **`sACNSource`** and **`sACNDiscoveryReceiver` actors'** timers now run on **NIO scheduled tasks**
+  via `sACNRuntime.scheduleRepeated` (fixed-rate, coalescing; Phase 4 PR2/PR3), ticking in-isolation. Only
+  **`sACNReceiverRaw`'s** timers still come from the vendored `Vendor/CwlDispatch.swift`
+  (`DispatchSource.repeatingTimer` / `singleTimer`); these go with its Phase 4 conversion. The constants
+  above are unchanged - only the timer mechanism moved.

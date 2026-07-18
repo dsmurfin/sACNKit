@@ -223,8 +223,28 @@ isolation boundaries, which is exactly the intended constraint.
   `socketsShouldTerminate` is now `Set<String>` (membership = pending removal). Added `.sourceBusy` error
   and an `unownedExecutor` doc. (Only the per-packet hostname/`inet_pton` perf items remain deferred to the
   optional hot-path follow-up.)
-- **PR3 - `sACNDiscoveryReceiver` -> actor.** `discovery`+`events` streams; heartbeat -> scheduled;
-  internal `async process(data:)` seam; delete `sACNDiscoveryReceiverDelegate.swift`.
+- **PR3 - `sACNDiscoveryReceiver` -> actor.** *Done.* `discovery`+`events`+`debugLog` streams; heartbeat ->
+  scheduled task; reserve-before-await `Lifecycle` (no drain - `stop()` awaits the socket close); internal
+  `process(data:)` seam; added `sACNReceiverValidationError.receiverBusy`; deleted
+  `sACNDiscoveryReceiverDelegate.swift`. **First actor-path socket *inbound* delivery** (channel handler on
+  the loop -> `assumeIsolated { process(...) }`), validated by a gated end-to-end test (real source
+  transmitting discovery -> `discovery` stream + `.sourcesLost`). New `DiscoveryReceiverTests` characterize
+  the paged assembly via the seam; `sACNTestDiscoveryPacket` fixture added. De-risks PR4's inbound path.
+  **Review pass:** fixed `process`'s typed catches (were logging `DataFraming`/`DMP` errors - dead here -
+  instead of the `UniverseDiscovery{Framing,}LayerValidationError` this path actually throws, so parse
+  errors reached `debugLog`); normalized a stop-superseded `start`/`updateInterfaces` to `CancellationError`
+  (a mid-*join* abort otherwise surfaced a spurious `couldNotJoin`); `start` now throws `.receiverBusy` for
+  transient states (matching `updateInterfaces`); nil the delegate before the fire-and-forget close on
+  interface removal; scoped the `stop()` doc (only `.listening` awaits the close - supersede is
+  fire-and-forget, rebind-safe via `SO_REUSEPORT`); removed dead `lastNotifiedUniverseCount` and `process`'s
+  unused per-socket params; added loss-path (coalesce+remove) and malformed-packet tests; swept README/DocC.
+- **Between PR3 and PR4 - extract a shared lifecycle gate.** The reserve-before-await machinery (the
+  `Lifecycle` enum + `stopRequested`/`stopContinuations`/`reachedIdle` + the all-or-nothing interface diff)
+  is now hand-copied in two actors and PR4 would copy it into three more. Extract it (e.g. a non-`Sendable`
+  `LifecycleGate` held as actor state + a pure interface-diff helper; teardown stays per-component) and
+  adopt it in `sACNSource` and `sACNDiscoveryReceiver` first, so the receiver vertical is written against
+  the twice-debugged machinery. This also unifies the minor `start`-busy-signal inconsistency the source
+  still carries.
 - **PR4 - Receiver vertical (`sACNReceiverRaw` + `sACNReceiver` + `sACNReceiverGroup`) -> actors, one PR.**
   They are coupled by the sync-down/async-up contract (a GCD parent cannot synchronously drive an actor
   child, and the semaphore bridge is forbidden), so they convert together. `sACNMerger` unchanged. Replace

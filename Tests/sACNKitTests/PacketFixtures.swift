@@ -28,3 +28,20 @@ func sACNTestDataPacket(
     packet.replaceSubrange(propertyValueCountOffset...propertyValueCountOffset + 1, with: UInt16(values.count + 1).data)
     return packet
 }
+
+/// Builds a complete sACN universe-discovery packet (root extended + universe-discovery framing +
+/// discovery layer) for one page, for injection into the discovery receiver seam. Mirrors
+/// `sACNSource.updateUniverseDiscoveryMessages`.
+func sACNTestDiscoveryPacket(
+    cid: UUID, name: String = "Test Source", page: UInt8 = 0, lastPage: UInt8 = 0, universes: [UInt16]
+) -> Data {
+    var rootLayer = RootLayer.createAsData(vector: .extended, cid: cid)
+    var framingLayer = UniverseDiscoveryFramingLayer.createAsData(nameData: Source.buildNameData(from: name))
+    let discoveryLayer = UniverseDiscoveryLayer.createAsData(page: page, lastPage: lastPage, universeList: universes)
+
+    framingLayer.replacingUniverseDiscoveryFramingFlagsAndLength(with: UInt16(framingLayer.count + discoveryLayer.count))
+    rootLayer.replacingRootLayerFlagsAndLength(
+        with: UInt16(rootLayer.count + framingLayer.count + discoveryLayer.count - RootLayer.lengthCountOffset))
+
+    return rootLayer + framingLayer + discoveryLayer
+}
