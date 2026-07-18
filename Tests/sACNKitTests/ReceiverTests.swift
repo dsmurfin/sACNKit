@@ -3,138 +3,74 @@ import Testing
 
 @testable import sACNKit
 
-/// Exercises `sACNReceiver` state safety and merge delivery by driving its internal
-/// raw receiver directly, without sockets.
+/// Exercises `sACNReceiver` state safety and merge delivery by driving its internal raw receiver directly,
+/// without sockets, and observing the merged `data`/`events` streams.
 @Suite("Receiver")
 struct ReceiverTests {
-
-    /// A key used to identify the client delegate queue inside delegate callbacks.
-    private static let clientQueueKey = DispatchSpecificKey<Bool>()
-
-    /// The timeout for waiting on an expected delegate callback or bounded call.
-    /// Generous because CI runners are small and heavily loaded under parallel
-    /// test execution; a passing wait returns as soon as it is signalled.
-    private static let callbackTimeout: DispatchTimeInterval = .milliseconds(10000)
-
-    /// The timeout for asserting a callback does not arrive.
-    private static let quietTimeout: DispatchTimeInterval = .milliseconds(100)
 
     /// Fast timing constants for tests that drive per-address priority expiry.
     private static let fastTimeout: UInt64 = 150
 
     /// How long to sleep to guarantee a `fastTimeout` timer has expired.
-    private static let fastTimeoutExpiry: TimeInterval = 0.3
+    private static let fastTimeoutExpiry: Duration = .milliseconds(300)
 
     // MARK: Helpers
 
-    /// A recording `sACNReceiverDelegate`.
-    private final class DelegateMock: sACNReceiverDelegate {
-
-        private let lock = NSLock()
-        let mergedSemaphore = DispatchSemaphore(value: 0)
-        private var _merged: [sACNReceiverMergedData] = []
-        private var _mergedInClientContext: [Bool] = []
-        var merged: [sACNReceiverMergedData] { lock.withLock { _merged } }
-        var mergedInClientContext: [Bool] { lock.withLock { _mergedInClientContext } }
-        var onMerged: ((sACNReceiverMergedData) -> Void)?
-
-        func receiver(_ receiver: sACNReceiver, interface: String?, socketDidCloseWithError error: Error?) {}
-
-        func receiverMergedData(_ receiver: sACNReceiver, mergedData: sACNReceiverMergedData) {
-            lock.withLock {
-                _merged.append(mergedData)
-                _mergedInClientContext.append(DispatchQueue.getSpecific(key: ReceiverTests.clientQueueKey) == true)
-            }
-            onMerged?(mergedData)
-            mergedSemaphore.signal()
-        }
-
-        func receiverStartedSampling(_ receiver: sACNReceiver) {}
-
-        func receiverEndedSampling(_ receiver: sACNReceiver) {}
-
-        func receiver(_ receiver: sACNReceiver, lostSources: [UUID]) {}
-
-        func receiverExceededSources(_ receiver: sACNReceiver) {}
-
-    }
-
-    /// A receiver wired to its internal raw receiver, with a recording delegate.
+    /// A receiver wired to its internal raw receiver, with collectors on its streams.
     private struct Harness {
 
         let receiver: sACNReceiver
-        let delegate: DelegateMock
-        let clientQueue: DispatchQueue
+        let merged: StreamCollector<sACNReceiverMergedData>
 
         /// Injects a packet into the internal raw receiver, as socket callbacks do.
-        func inject(_ packet: Data, socketId: UUID = UUID()) {
-            receiver.receiver.socketDelegateQueue.sync {
-                receiver.receiver.process(data: packet, ipFamily: .IPv4, socketId: socketId, hostname: "192.168.1.10")
-            }
+        func inject(_ packet: Data, socketId: UUID = UUID()) async {
+            await receiver.receiver.process(data: packet, ipFamily: .IPv4, socketId: socketId, hostname: "192.168.1.10")
         }
 
-        /// Waits for a merged-data callback, returning whether one arrived in time.
-        func waitForMerge(timeout: DispatchTimeInterval = ReceiverTests.callbackTimeout) -> Bool {
-            delegate.mergedSemaphore.wait(timeout: .now() + timeout) == .success
-        }
-
-        /// Waits until the most recent merged data satisfies the predicate, returning whether it did in time.
-        func waitUntilMerged(where predicate: (sACNReceiverMergedData) -> Bool) -> Bool {
-            let deadline = Date() + 10.0
-            while Date() < deadline {
-                if let merged = delegate.merged.last, predicate(merged) { return true }
-                Thread.sleep(forTimeInterval: 0.02)
-            }
-            return false
+        /// Waits until the most recent merged data satisfies the predicate.
+        func waitUntilMerged(timeout: Duration = .seconds(10), where predicate: @Sendable (sACNReceiverMergedData) -> Bool) async -> Bool {
+            await merged.waitFor(timeout: timeout) { predicate($0) }
         }
 
     }
 
-    /// Creates a wired receiver for universe 1 with a recording delegate, without sockets.
+    /// Creates a wired receiver for universe 1, with the merge sink connected as `start()` would, but
+    /// without opening sockets.
     private func makeReceiver(
-        clientQueue: DispatchQueue, sourceLossTimeout: UInt64, perAddressPriorityWait: UInt64
-    ) throws -> (receiver: sACNReceiver, delegate: DelegateMock) {
-        clientQueue.setSpecific(key: Self.clientQueueKey, value: true)
+        sourceLossTimeout: UInt64, perAddressPriorityWait: UInt64
+    ) async throws -> sACNReceiver {
         let receiver = try #require(
             sACNReceiver(
                 ipMode: .ipv4Only, interfaces: [], universe: 1, sourceLimit: 4, filterPreviewData: true, filterCIDs: [],
-                delegateQueue: clientQueue, sourceLossTimeout: sourceLossTimeout, perAddressPriorityWait: perAddressPriorityWait))
-        let delegate = DelegateMock()
-        receiver.setDelegate(delegate)
-        // wire the raw receiver as start() would, without opening sockets
-        receiver.receiver.setDelegate(receiver)
-        return (receiver, delegate)
+                sourceLossTimeout: sourceLossTimeout, perAddressPriorityWait: perAddressPriorityWait))
+        // wire the raw receiver's sink as start() would, without opening sockets
+        await receiver.receiver.setSink(receiver)
+        return receiver
     }
 
     /// Creates a receiver for universe 1 whose raw receiver delivers without sockets.
     private func makeHarness(
-        clientQueue: DispatchQueue? = nil, sourceLossTimeout: UInt64 = sACNReceiverRaw.sourceLossTimeout,
-        perAddressPriorityWait: UInt64 = sACNReceiverRaw.perAddressPriorityWait
-    ) throws -> Harness {
-        let queue = clientQueue ?? DispatchQueue(label: "com.danielmurfin.sACNKitTests.receiverClient")
-        let (receiver, delegate) = try makeReceiver(
-            clientQueue: queue, sourceLossTimeout: sourceLossTimeout, perAddressPriorityWait: perAddressPriorityWait)
-        receiver.receiver.endedSamplingPeriod()
-        return Harness(receiver: receiver, delegate: delegate, clientQueue: queue)
+        sourceLossTimeout: UInt64 = sACNReceiverRaw.sourceLossTimeout, perAddressPriorityWait: UInt64 = sACNReceiverRaw.perAddressPriorityWait
+    ) async throws -> Harness {
+        let receiver = try await makeReceiver(sourceLossTimeout: sourceLossTimeout, perAddressPriorityWait: perAddressPriorityWait)
+        let merged = StreamCollector(receiver.data)
+        await receiver.receiver.endedSamplingPeriod()
+        return Harness(receiver: receiver, merged: merged)
     }
 
     /// Creates a receiver for universe 1 whose raw receiver is actively sampling, without sockets.
     ///
-    /// - Returns: The harness and the socket identifier registered as sampling,
-    /// which must be passed when injecting packets.
+    /// - Returns: The harness and the socket identifier registered as sampling, which must be passed when
+    /// injecting packets.
     ///
     private func makeSamplingHarness(
-        sourceLossTimeout: UInt64 = sACNReceiverRaw.sourceLossTimeout,
-        perAddressPriorityWait: UInt64 = sACNReceiverRaw.perAddressPriorityWait
-    ) throws -> (harness: Harness, socketId: UUID) {
-        let queue = DispatchQueue(label: "com.danielmurfin.sACNKitTests.receiverClient")
-        let (receiver, delegate) = try makeReceiver(
-            clientQueue: queue, sourceLossTimeout: sourceLossTimeout, perAddressPriorityWait: perAddressPriorityWait)
-        receiver.receiver.socketDelegateQueue.sync {
-            receiver.receiver.beginSamplingPeriod()
-        }
-        let socketId = try #require(receiver.receiver.socketsSampling.keys.first)
-        return (Harness(receiver: receiver, delegate: delegate, clientQueue: queue), socketId)
+        sourceLossTimeout: UInt64 = sACNReceiverRaw.sourceLossTimeout, perAddressPriorityWait: UInt64 = sACNReceiverRaw.perAddressPriorityWait
+    ) async throws -> (harness: Harness, socketId: UUID) {
+        let receiver = try await makeReceiver(sourceLossTimeout: sourceLossTimeout, perAddressPriorityWait: perAddressPriorityWait)
+        let merged = StreamCollector(receiver.data)
+        await receiver.receiver.beginSamplingPeriod()
+        let socketId = try #require(await receiver.receiver.socketsSampling.keys.first)
+        return (Harness(receiver: receiver, merged: merged), socketId)
     }
 
     /// Builds a complete sACN data packet (root + framing + DMP).
@@ -152,139 +88,111 @@ struct ReceiverTests {
     }
 
     /// Delivers levels then per-address priority then levels, producing a merged notification.
-    private func establishAndMerge(cid: UUID, levels: [UInt8], in harness: Harness) {
-        harness.inject(dataPacket(cid: cid, sequence: 0, values: levels))
-        harness.inject(dataPacket(cid: cid, sequence: 1, startCode: .perAddressPriority, values: Array(repeating: 100, count: 512)))
-        harness.inject(dataPacket(cid: cid, sequence: 2, values: levels))
+    private func establishAndMerge(cid: UUID, levels: [UInt8], in harness: Harness) async {
+        await harness.inject(dataPacket(cid: cid, sequence: 0, values: levels))
+        await harness.inject(dataPacket(cid: cid, sequence: 1, startCode: .perAddressPriority, values: Array(repeating: 100, count: 512)))
+        await harness.inject(dataPacket(cid: cid, sequence: 2, values: levels))
     }
 
     // MARK: Tests
 
-    @Test("Merged data is delivered in the client queue's context")
-    func mergedDataDelivered() throws {
-        let harness = try makeHarness()
+    @Test("Merged data is delivered on the data stream")
+    func mergedDataDelivered() async throws {
+        let harness = try await makeHarness()
         let cid = UUID()
         let levels: [UInt8] = (0..<512).map { UInt8($0 % 256) }
 
-        establishAndMerge(cid: cid, levels: levels, in: harness)
-        #expect(harness.waitForMerge())
+        await establishAndMerge(cid: cid, levels: levels, in: harness)
+        #expect(await harness.merged.waitForCount(1))
 
-        let merged = try #require(harness.delegate.merged.first)
+        let merged = try #require(harness.merged.all.first)
         #expect(merged.universe == 1)
         #expect(merged.levels == levels)
         #expect(merged.activeSources == [cid])
         #expect(merged.numberOfActiveSources == 1)
-        #expect(harness.delegate.mergedInClientContext.allSatisfy { $0 }, "callbacks must execute in the client queue's context")
     }
 
-    @Test("information(for:) may be called from within a delegate callback")
-    func informationFromCallback() throws {
-        let harness = try makeHarness()
+    @Test("information(for:) may be called from within a data-stream consumer")
+    func informationFromConsumer() async throws {
+        let harness = try await makeHarness()
         let cid = UUID()
 
-        let obtained = DispatchSemaphore(value: 0)
-        let information = LockedBox<sACNReceiverSource>()
-        harness.delegate.onMerged = { [weak receiver = harness.receiver] _ in
-            information.value = try? receiver?.information(for: cid)
-            obtained.signal()
-        }
-
-        establishAndMerge(cid: cid, levels: Array(repeating: 128, count: 512), in: harness)
-        #expect(
-            obtained.wait(timeout: .now() + Self.callbackTimeout) == .success,
-            "information(for:) must not deadlock when called from a delegate callback")
-        #expect(information.value?.cid == cid)
-    }
-
-    @Test("information(for:) may be called from the client's serial queue")
-    func informationFromClientQueue() throws {
-        let harness = try makeHarness()
-        let cid = UUID()
-
-        establishAndMerge(cid: cid, levels: Array(repeating: 128, count: 512), in: harness)
-        #expect(harness.waitForMerge())
-
-        let obtained = DispatchSemaphore(value: 0)
-        let information = LockedBox<sACNReceiverSource>()
-        DispatchQueue.global(qos: .userInitiated).async { [receiver = harness.receiver, clientQueue = harness.clientQueue] in
-            clientQueue.sync {
-                information.value = try? receiver.information(for: cid)
+        // a consumer runs off-actor; re-entering the receiver (information) from within a merged delivery
+        // must not deadlock and must observe the just-delivered source
+        let dataStream = harness.receiver.data
+        let obtained = Task { [receiver = harness.receiver] () -> sACNReceiverSource? in
+            for await _ in dataStream {
+                return try? await receiver.information(for: cid)
             }
-            obtained.signal()
+            return nil
         }
-        #expect(
-            obtained.wait(timeout: .now() + Self.callbackTimeout) == .success,
-            "information(for:) must not deadlock when called from the client queue")
-        #expect(information.value?.cid == cid)
+
+        await establishAndMerge(cid: cid, levels: Array(repeating: 128, count: 512), in: harness)
+        #expect(await obtained.value?.cid == cid)
     }
 
-    @Test("information(for:) may be called from an unrelated queue")
-    func informationFromUnrelatedQueue() throws {
-        let harness = try makeHarness()
+    @Test("information(for:) returns source information after a merge")
+    func informationReturnsSource() async throws {
+        let harness = try await makeHarness()
         let cid = UUID()
 
-        establishAndMerge(cid: cid, levels: Array(repeating: 128, count: 512), in: harness)
-        #expect(harness.waitForMerge())
+        await establishAndMerge(cid: cid, levels: Array(repeating: 128, count: 512), in: harness)
+        #expect(await harness.merged.waitForCount(1))
 
-        let obtained = DispatchSemaphore(value: 0)
-        let information = LockedBox<sACNReceiverSource>()
-        DispatchQueue.global(qos: .userInitiated).async { [receiver = harness.receiver] in
-            information.value = try? receiver.information(for: cid)
-            obtained.signal()
-        }
-        #expect(
-            obtained.wait(timeout: .now() + Self.callbackTimeout) == .success,
-            "information(for:) must not deadlock when called from an unrelated queue")
-        #expect(information.value?.cid == cid)
+        let information = try await harness.receiver.information(for: cid)
+        #expect(information.cid == cid)
     }
 
     @Test("information(for:) throws for an unknown source")
-    func informationUnknownSourceThrows() throws {
-        let harness = try makeHarness()
-        #expect(throws: sACNReceiverValidationError.self) {
-            try harness.receiver.information(for: UUID())
+    func informationUnknownSourceThrows() async throws {
+        let harness = try await makeHarness()
+        await #expect(throws: sACNReceiverValidationError.self) {
+            try await harness.receiver.information(for: UUID())
         }
     }
 
-    @Test("State stays consistent when the client supplies a concurrent queue")
-    func concurrentClientQueue() throws {
-        let concurrentQueue = DispatchQueue(label: "com.danielmurfin.sACNKitTests.concurrentClient", qos: .userInitiated, attributes: .concurrent)
-        let harness = try makeHarness(clientQueue: concurrentQueue)
+    @Test("State stays consistent under concurrent public API calls while packets arrive")
+    func concurrentAPIAccess() async throws {
+        let harness = try await makeHarness()
         let cid = UUID()
-        establishAndMerge(cid: cid, levels: Array(repeating: 128, count: 512), in: harness)
-        #expect(harness.waitForMerge())
+        await establishAndMerge(cid: cid, levels: Array(repeating: 128, count: 512), in: harness)
+        #expect(await harness.merged.waitForCount(1))
 
-        // hammer the public API from many threads while more packets arrive
-        DispatchQueue.concurrentPerform(iterations: 100) { iteration in
-            switch iteration % 3 {
-            case 0:
-                _ = try? harness.receiver.information(for: cid)
-            case 1:
-                harness.receiver.setDelegate(harness.delegate)
-            default:
-                harness.inject(dataPacket(cid: cid, sequence: UInt8((3 + iteration) % 256), values: Array(repeating: 64, count: 512)))
+        // hammer the public API and packet injection concurrently; the actor serializes all of it
+        await withTaskGroup(of: Void.self) { group in
+            for iteration in 0..<100 {
+                group.addTask { [receiver = harness.receiver] in
+                    switch iteration % 3 {
+                    case 0:
+                        _ = try? await receiver.information(for: cid)
+                    case 1:
+                        _ = await receiver.isListening
+                    default:
+                        await harness.inject(dataPacket(cid: cid, sequence: UInt8((3 + iteration) % 256), values: Array(repeating: 64, count: 512)))
+                    }
+                }
             }
         }
-        #expect(harness.delegate.merged.count >= 1)
+        #expect(harness.merged.count >= 1)
     }
 
     // MARK: Per-address priority and sampling regression tests
 
     @Test("Per-address priorities captured during sampling are applied when sampling ends")
-    func samplingPAPAppliedWhenSamplingEnds() throws {
-        let (harness, socketId) = try makeSamplingHarness()
+    func samplingPAPAppliedWhenSamplingEnds() async throws {
+        let (harness, socketId) = try await makeSamplingHarness()
         let cid = UUID()
         let levels = Array(repeating: UInt8(255), count: 512)
         var priorities = Array(repeating: UInt8(100), count: 512)
         priorities[0] = 0
 
-        harness.inject(dataPacket(cid: cid, sequence: 0, values: levels), socketId: socketId)
-        harness.inject(dataPacket(cid: cid, sequence: 1, startCode: .perAddressPriority, values: priorities), socketId: socketId)
-        #expect(!harness.waitForMerge(timeout: Self.quietTimeout), "no merged data should be delivered while sampling")
+        await harness.inject(dataPacket(cid: cid, sequence: 0, values: levels), socketId: socketId)
+        await harness.inject(dataPacket(cid: cid, sequence: 1, startCode: .perAddressPriority, values: priorities), socketId: socketId)
+        #expect(await harness.merged.expectNoMore(count: 0), "no merged data should be delivered while sampling")
 
-        harness.receiver.receiver.endedSamplingPeriod()
-        #expect(harness.waitForMerge())
-        let merged = try #require(harness.delegate.merged.last)
+        await harness.receiver.receiver.endedSamplingPeriod()
+        #expect(await harness.merged.waitForCount(1))
+        let merged = try #require(harness.merged.all.last)
         #expect(merged.levels[0] == 0, "slot 0 has per-address priority 0 (unsourced) so must not output its level")
         #expect(merged.winners[0] == nil)
         #expect(merged.levels[1] == 255)
@@ -292,72 +200,70 @@ struct ReceiverTests {
     }
 
     @Test("Losing per-address priority for a sampling source does not deliver merged data")
-    func papLossWhileSamplingStaysQuiet() throws {
-        let (harness, socketId) = try makeSamplingHarness(
-            sourceLossTimeout: Self.fastTimeout, perAddressPriorityWait: Self.fastTimeout)
+    func papLossWhileSamplingStaysQuiet() async throws {
+        let (harness, socketId) = try await makeSamplingHarness(sourceLossTimeout: Self.fastTimeout, perAddressPriorityWait: Self.fastTimeout)
         let cid = UUID()
 
-        harness.inject(dataPacket(cid: cid, sequence: 0), socketId: socketId)
-        harness.inject(
-            dataPacket(cid: cid, sequence: 1, startCode: .perAddressPriority, values: Array(repeating: 100, count: 512)),
-            socketId: socketId)
+        await harness.inject(dataPacket(cid: cid, sequence: 0), socketId: socketId)
+        await harness.inject(
+            dataPacket(cid: cid, sequence: 1, startCode: .perAddressPriority, values: Array(repeating: 100, count: 512)), socketId: socketId)
 
         // let the per-address priority timer expire, then deliver levels to surface the loss
-        Thread.sleep(forTimeInterval: Self.fastTimeoutExpiry)
-        harness.inject(dataPacket(cid: cid, sequence: 2), socketId: socketId)
-        #expect(!harness.waitForMerge(timeout: Self.quietTimeout), "per-address priority loss must not notify merged data while sampling")
+        try await Task.sleep(for: Self.fastTimeoutExpiry)
+        await harness.inject(dataPacket(cid: cid, sequence: 2), socketId: socketId)
+        #expect(await harness.merged.expectNoMore(count: 0), "per-address priority loss must not notify merged data while sampling")
     }
 
     @Test("Per-address priority loss, resumption and a second loss are all reflected in merged data")
-    func secondPAPLossReflectedInMergedData() throws {
-        let harness = try makeHarness(sourceLossTimeout: Self.fastTimeout, perAddressPriorityWait: Self.fastTimeout)
+    func secondPAPLossReflectedInMergedData() async throws {
+        let harness = try await makeHarness(sourceLossTimeout: Self.fastTimeout, perAddressPriorityWait: Self.fastTimeout)
         let cid = UUID()
         let levels = Array(repeating: UInt8(255), count: 512)
         var priorities = Array(repeating: UInt8(100), count: 512)
         priorities[0] = 0
 
         // establish the source with per-address priorities (slot 0 unsourced)
-        harness.inject(dataPacket(cid: cid, sequence: 0, values: levels))
-        harness.inject(dataPacket(cid: cid, sequence: 1, startCode: .perAddressPriority, values: priorities))
-        harness.inject(dataPacket(cid: cid, sequence: 2, values: levels))
-        #expect(harness.waitUntilMerged { $0.levels[0] == 0 && $0.levels[1] == 255 })
+        await harness.inject(dataPacket(cid: cid, sequence: 0, values: levels))
+        await harness.inject(dataPacket(cid: cid, sequence: 1, startCode: .perAddressPriority, values: priorities))
+        await harness.inject(dataPacket(cid: cid, sequence: 2, values: levels))
+        #expect(await harness.waitUntilMerged { $0.levels[0] == 0 && $0.levels[1] == 255 })
 
         // first loss: universe priority applies to every slot again
-        Thread.sleep(forTimeInterval: Self.fastTimeoutExpiry)
-        harness.inject(dataPacket(cid: cid, sequence: 3, values: levels))
-        #expect(harness.waitUntilMerged { $0.levels[0] == 255 }, "merged data must reflect the first per-address priority loss")
+        try await Task.sleep(for: Self.fastTimeoutExpiry)
+        await harness.inject(dataPacket(cid: cid, sequence: 3, values: levels))
+        #expect(await harness.waitUntilMerged { $0.levels[0] == 255 }, "merged data must reflect the first per-address priority loss")
 
         // per-address priority resumes (slot 0 unsourced again)
-        harness.inject(dataPacket(cid: cid, sequence: 4, startCode: .perAddressPriority, values: priorities))
-        #expect(harness.waitUntilMerged { $0.levels[0] == 0 }, "merged data must reflect resumed per-address priorities")
+        await harness.inject(dataPacket(cid: cid, sequence: 4, startCode: .perAddressPriority, values: priorities))
+        #expect(await harness.waitUntilMerged { $0.levels[0] == 0 }, "merged data must reflect resumed per-address priorities")
 
         // a second loss must also be delivered and reflected
-        Thread.sleep(forTimeInterval: Self.fastTimeoutExpiry)
-        harness.inject(dataPacket(cid: cid, sequence: 5, values: levels))
-        #expect(harness.waitUntilMerged { $0.levels[0] == 255 }, "merged data must reflect a second per-address priority loss")
+        try await Task.sleep(for: Self.fastTimeoutExpiry)
+        await harness.inject(dataPacket(cid: cid, sequence: 5, values: levels))
+        #expect(await harness.waitUntilMerged { $0.levels[0] == 255 }, "merged data must reflect a second per-address priority loss")
     }
 
     @Test("Short packets during sampling still transfer to the main merger when sampling ends")
-    func samplingShortPacketsAppliedWhenSamplingEnds() throws {
-        let (harness, socketId) = try makeSamplingHarness()
+    func samplingShortPacketsAppliedWhenSamplingEnds() async throws {
+        let (harness, socketId) = try await makeSamplingHarness()
         let cid = UUID()
         let levels = Array(repeating: UInt8(255), count: 100)
         var priorities = Array(repeating: UInt8(100), count: 100)
         priorities[0] = 0
 
-        harness.inject(sACNTestDataPacket(cid: cid, sequence: 0, values: levels), socketId: socketId)
-        harness.inject(sACNTestDataPacket(cid: cid, sequence: 1, startCode: .perAddressPriority, values: priorities), socketId: socketId)
+        await harness.inject(sACNTestDataPacket(cid: cid, sequence: 0, values: levels), socketId: socketId)
+        await harness.inject(sACNTestDataPacket(cid: cid, sequence: 1, startCode: .perAddressPriority, values: priorities), socketId: socketId)
 
         // a second source sends only per-address priority during sampling;
         // it has no levels so there is nothing to transfer
         let papOnlyCid = UUID()
-        harness.inject(
+        await harness.inject(
             sACNTestDataPacket(cid: papOnlyCid, sequence: 0, startCode: .perAddressPriority, values: Array(repeating: 100, count: 100)),
             socketId: socketId)
 
-        harness.receiver.receiver.endedSamplingPeriod()
-        #expect(harness.waitForMerge())
-        let merged = try #require(harness.delegate.merged.last)
+        await harness.receiver.receiver.endedSamplingPeriod()
+        #expect(await harness.merged.waitForCount(1))
+        let merged = try #require(harness.merged.all.last)
         #expect(merged.levels[0] == 0, "slot 0 has per-address priority 0 (unsourced) so must not output its level")
         #expect(merged.levels[1] == 255, "levels from a short packet must survive the transfer out of sampling")
         #expect(merged.winners[1] == cid)
@@ -368,50 +274,49 @@ struct ReceiverTests {
     }
 
     @Test("Per-address priority loss surfaced by a preview-filtered packet still delivers merged data")
-    func papLossViaPreviewPacketDeliversMergedData() throws {
-        let harness = try makeHarness(sourceLossTimeout: Self.fastTimeout, perAddressPriorityWait: Self.fastTimeout)
+    func papLossViaPreviewPacketDeliversMergedData() async throws {
+        let harness = try await makeHarness(sourceLossTimeout: Self.fastTimeout, perAddressPriorityWait: Self.fastTimeout)
         let cid = UUID()
         let levels = Array(repeating: UInt8(255), count: 512)
         var priorities = Array(repeating: UInt8(100), count: 512)
         priorities[0] = 0
 
-        harness.inject(sACNTestDataPacket(cid: cid, sequence: 0, values: levels))
-        harness.inject(sACNTestDataPacket(cid: cid, sequence: 1, startCode: .perAddressPriority, values: priorities))
-        harness.inject(sACNTestDataPacket(cid: cid, sequence: 2, values: levels))
-        #expect(harness.waitUntilMerged { $0.levels[0] == 0 && $0.levels[1] == 255 })
+        await harness.inject(sACNTestDataPacket(cid: cid, sequence: 0, values: levels))
+        await harness.inject(sACNTestDataPacket(cid: cid, sequence: 1, startCode: .perAddressPriority, values: priorities))
+        await harness.inject(sACNTestDataPacket(cid: cid, sequence: 2, values: levels))
+        #expect(await harness.waitUntilMerged { $0.levels[0] == 0 && $0.levels[1] == 255 })
 
         // a preview-flagged packet is filtered from data delivery, so the loss
         // path's own notification is the only merged delivery
-        Thread.sleep(forTimeInterval: Self.fastTimeoutExpiry)
-        harness.inject(sACNTestDataPacket(cid: cid, sequence: 3, options: .preview, values: levels))
+        try await Task.sleep(for: Self.fastTimeoutExpiry)
+        await harness.inject(sACNTestDataPacket(cid: cid, sequence: 3, options: .preview, values: levels))
         #expect(
-            harness.waitUntilMerged { $0.levels[0] == 255 },
+            await harness.waitUntilMerged { $0.levels[0] == 255 },
             "per-address priority loss must deliver merged data even when the triggering packet is preview-filtered")
     }
 
     @Test("A pending source lost before delivering levels does not gate merged data forever")
-    func lostPendingSourceReleasesPendingCount() throws {
-        let harness = try makeHarness(sourceLossTimeout: Self.fastTimeout, perAddressPriorityWait: Self.fastTimeout)
+    func lostPendingSourceReleasesPendingCount() async throws {
+        let harness = try await makeHarness(sourceLossTimeout: Self.fastTimeout, perAddressPriorityWait: Self.fastTimeout)
         let pendingCid = UUID()
 
         // levels for a new source are held, so its first delivered packet is the
         // per-address priority packet, creating a pending source
-        harness.inject(sACNTestDataPacket(cid: pendingCid, sequence: 0))
-        harness.inject(sACNTestDataPacket(cid: pendingCid, sequence: 1, startCode: .perAddressPriority, values: Array(repeating: 100, count: 512)))
+        await harness.inject(sACNTestDataPacket(cid: pendingCid, sequence: 0))
+        await harness.inject(
+            sACNTestDataPacket(cid: pendingCid, sequence: 1, startCode: .perAddressPriority, values: Array(repeating: 100, count: 512)))
 
         // let the source time out, then drive the loss check as the heartbeat would
-        Thread.sleep(forTimeInterval: Self.fastTimeoutExpiry)
-        harness.receiver.receiver.socketDelegateQueue.sync {
-            harness.receiver.receiver.checkForSourceLoss()
-        }
+        try await Task.sleep(for: Self.fastTimeoutExpiry)
+        await harness.receiver.receiver.checkForSourceLoss()
 
         // a fresh source must still produce merged data
         let cid = UUID()
         let levels = Array(repeating: UInt8(128), count: 512)
-        harness.inject(sACNTestDataPacket(cid: cid, sequence: 0, values: levels))
-        harness.inject(sACNTestDataPacket(cid: cid, sequence: 1, startCode: .perAddressPriority, values: Array(repeating: 100, count: 512)))
-        harness.inject(sACNTestDataPacket(cid: cid, sequence: 2, values: levels))
-        #expect(harness.waitUntilMerged { $0.levels[0] == 128 }, "merged data must not be gated by a lost pending source")
+        await harness.inject(sACNTestDataPacket(cid: cid, sequence: 0, values: levels))
+        await harness.inject(sACNTestDataPacket(cid: cid, sequence: 1, startCode: .perAddressPriority, values: Array(repeating: 100, count: 512)))
+        await harness.inject(sACNTestDataPacket(cid: cid, sequence: 2, values: levels))
+        #expect(await harness.waitUntilMerged { $0.levels[0] == 128 }, "merged data must not be gated by a lost pending source")
     }
 
 }

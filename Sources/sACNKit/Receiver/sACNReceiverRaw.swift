@@ -24,85 +24,115 @@
 
 import Foundation
 
+/// A synchronous, in-isolation sink for a `sACNReceiverRaw`'s output.
+///
+/// The merged receiver (`sACNReceiver`) owns a raw receiver on the **same** runtime/event loop and adopts
+/// this to receive raw output on the loop with no `Task` hop, preserving the ordered per-packet merge. The
+/// conformer's methods are `nonisolated` and `assumeIsolated` into its own isolation (valid because it
+/// shares the raw's executor). Held **weakly** by the raw receiver (the owner holds the raw strongly).
+///
+protocol RawReceiverSink: AnyObject {
+
+    func rawReceiverDidReceive(_ data: sACNReceiverRawSourceData)
+
+    func rawReceiverDidEmit(_ event: sACNReceiverRaw.Event)
+
+    func rawReceiverDidLog(_ message: String)
+
+}
+
 /// sACN Receiver Raw
 ///
-/// An E1.31-2018 sACN Receiver Raw which receives sACN Messages from a single universe.
-/// This class provides raw source data for sources which are online, and notifies of source loss
-/// and loss of per-address priority.
-public class sACNReceiverRaw {
+/// An E1.31-2018 sACN Receiver Raw which receives sACN Messages from a single universe, providing raw
+/// per-source data for online sources and notifying of source loss and loss of per-address priority.
+///
+/// A `sACNReceiverRaw` is an `actor` isolated to an internal `sACNRuntime` (a shared NIO event loop). Its
+/// lifecycle and mutation API are `async`; per-source data arrives on the `data` `AsyncStream`, lifecycle
+/// events on `events`, and debug logs on `debugLog`, rather than via a delegate.
+///
+public actor sACNReceiverRaw {
 
-    // MARK: Socket
+    // MARK: Runtime / isolation
 
-    /// A key used to identify the socket delegate queue for the current execution context.
-    private static let socketDelegateQueueSpecificKey = DispatchSpecificKey<Bool>()
+    /// The runtime hosting this actor's isolation, timers, and sockets.
+    nonisolated let runtime: sACNRuntime
+
+    /// Pins this actor to the runtime's serial executor (the shared NIO event loop), so the transport can
+    /// deliver received packets into the actor's isolation synchronously (`assumeIsolated` from the channel
+    /// handler, no `Task` hop) - see `EventLoopSerialExecutor`.
+    public nonisolated var unownedExecutor: UnownedSerialExecutor {
+        runtime.serialExecutor.asUnownedSerialExecutor()
+    }
+
+    // MARK: Events
+
+    /// An event emitted by a raw receiver.
+    public enum Event: Sendable {
+
+        /// The initial sampling period for the universe began.
+        case samplingStarted
+
+        /// The initial sampling period for the universe ended.
+        case samplingEnded
+
+        /// One or more sources were lost (coalesced).
+        case sourcesLost([UUID])
+
+        /// A source stopped sending per-address priority (its levels revert to universe priority).
+        case perAddressPriorityLost(UUID)
+
+        /// The receiver's source limit was reached (a new source was dropped).
+        case sourceLimitExceeded
+
+        /// A socket closed with an error (per interface).
+        case socketClosed(interface: String?, reason: SocketCloseReason)
+
+    }
+
+    /// The broadcast hub backing `data`. Buffers newest-64 (not newest-1 like the merged snapshot streams):
+    /// this stream interleaves frames from distinct sources, which must not collapse into one another.
+    private nonisolated let dataHub = AsyncStreamHub<sACNReceiverRawSourceData>(bufferingPolicy: .bufferingNewest(64))
+
+    /// A stream of raw per-source universe data. Each access returns an independent subscription.
+    public nonisolated var data: AsyncStream<sACNReceiverRawSourceData> { dataHub.stream() }
+
+    /// The broadcast hub backing `events`.
+    private nonisolated let eventsHub = AsyncStreamHub<Event>(bufferingPolicy: .bufferingNewest(64))
+
+    /// A stream of receiver lifecycle events. Each access returns an independent subscription. Best-effort,
+    /// drop-oldest (buffers newest-64): a consumer that stalls for long enough can miss an event such as
+    /// `.sourcesLost` (a delta from the old never-drop delegate callbacks).
+    public nonisolated var events: AsyncStream<Event> { eventsHub.stream() }
+
+    /// The broadcast hub backing `debugLog`.
+    private nonisolated let debugLogHub = AsyncStreamHub<String>(bufferingPolicy: .bufferingNewest(64))
+
+    /// A stream of human-readable debug log messages. Each access returns an independent subscription.
+    public nonisolated var debugLog: AsyncStream<String> { debugLogHub.stream() }
+
+    /// An optional synchronous, in-isolation sink (the merged receiver embedding this raw receiver). Held
+    /// weakly. Every emit both yields to the public hub and, if set, delivers to the sink on the loop.
+    private weak var rawSink: (any RawReceiverSink)?
+
+    // MARK: Lifecycle
+
+    /// The reserve-before-await lifecycle state machine (shared with the other component actors).
+    private var gate = LifecycleGate()
+
+    /// Whether the receiver is actively listening.
+    public var isListening: Bool { gate.isListening }
+
+    // MARK: Sockets
 
     /// The Internet Protocol version(s) used by the receiver.
     private let ipMode: sACNIPMode
 
-    /// The queue on which socket notifications occur (also used to protect state).
-    /// Internal to allow tests to drive packet processing on the correct queue.
-    let socketDelegateQueue: DispatchQueue
+    /// The sockets used for communications (one per interface, keyed by interface or "" for all).
+    private var sockets: [String: ComponentSocket] = [:]
 
-    /// The identifiers of sockets and their sampling status.
-    ///
-    /// The presence of a socket identifier indicates it is either sampling or waiting to sample.
-    /// A value of `true` means it is sampling.
-    ///
-    /// If this receiver is set to listen on all interfaces there will only be a single socket.
-    /// Sampling occurs for this socket only.
-    private(set) var socketsSampling: [UUID: Bool]
-
-    /// The sockets used for communications (one per interface).
-    /// The key for each socket is the interface it is bound to (or an empty string for all interfaces).
-    private var sockets: [String: ComponentSocket]
-
-    /// The socket listening status (thread-safe getter).
-    public var isListening: Bool {
-        get { socketDelegateQueue.sync { _isListening } }
-    }
-
-    /// The private socket listening status.
-    private var _isListening: Bool
-
-    // MARK: Delegate
-
-    /// Changes the receiver delegate of this receiver to the the object passed.
-    ///
-    /// Passing `nil` does not fence in-flight deliveries: a callback already enqueued
-    /// may still be delivered to the previous delegate after this returns.
-    ///
-    /// - Parameters:
-    ///   - delegate: The delegate to receive notifications.
-    ///
-    public func setDelegate(_ delegate: sACNReceiverRawDelegate?) {
-        if DispatchQueue.getSpecific(key: Self.socketDelegateQueueSpecificKey) == true {
-            self.delegate = delegate
-        } else {
-            socketDelegateQueue.sync { self.delegate = delegate }
-        }
-    }
-
-    /// Changes the debug delegate of this receiver to the the object passed.
-    ///
-    /// - Parameters:
-    ///   - delegate: The delegate to receive notifications.
-    ///
-    public func setDebugDelegate(_ delegate: sACNComponentDebugDelegate?) {
-        if DispatchQueue.getSpecific(key: Self.socketDelegateQueueSpecificKey) == true {
-            self.debugDelegate = delegate
-        } else {
-            socketDelegateQueue.sync { self.debugDelegate = delegate }
-        }
-    }
-
-    /// The delegate which receives notifications from this receiver.
-    private weak var delegate: sACNReceiverRawDelegate?
-
-    /// The delegate which receives debug log messages from this receiver.
-    private weak var debugDelegate: sACNComponentDebugDelegate?
-
-    /// The queue on which to send delegate notifications.
-    private let delegateQueue: DispatchQueue
+    /// The identifiers of sockets and their sampling status. Presence means sampling or waiting to sample;
+    /// a value of `true` means actively sampling. `internal private(set)` so tests can inspect it.
+    private(set) var socketsSampling: [UUID: Bool] = [:]
 
     // MARK: General
 
@@ -119,20 +149,20 @@ public class sACNReceiverRaw {
     private var filterCIDs: Set<UUID>
 
     /// Whether this universe is sampling.
-    private var sampling: Bool
+    private var sampling = false
 
     /// The sources that have been received.
-    private var sources: [UUID: ReceiverRawSource]
+    private var sources: [UUID: ReceiverRawSource] = [:]
+
+    /// Whether source-limit-exceeded has been notified (latched so it fires once).
+    private var sourceLimitExceededNotified = false
 
     // MARK: Timers
-
-    /// The leeway used for timing. Informs the OS how accurate timings should be.
-    static let timingLeeway: DispatchTimeInterval = .nanoseconds(0)
 
     /// The sACN network data loss timeout (2500 ms).
     static let sourceLossTimeout: UInt64 = 2500
 
-    /// How long to wait for a per-address priority start code (0xdd) packet when discovering a source (1500 ms).
+    /// How long to wait for a per-address priority (0xDD) packet when discovering a source (1500 ms).
     static let perAddressPriorityWait: UInt64 = 1500
 
     /// The network data loss timeout for this receiver (defaults to `Self.sourceLossTimeout`; overridable for tests).
@@ -142,415 +172,376 @@ public class sACNReceiverRaw {
     let perAddressPriorityWait: UInt64
 
     /// The length of time to sample a new universe (1500 ms).
-    private static let sampleTime: DispatchTimeInterval = DispatchTimeInterval.milliseconds(1500)
+    private static let sampleTime: Duration = .milliseconds(1500)
 
-    /// The length of time for the main heartbeat (500 ms).
-    private static let heartbeatTime: DispatchTimeInterval = DispatchTimeInterval.milliseconds(500)
+    /// The main heartbeat interval (500 ms), driving source-loss evaluation.
+    private static let heartbeatInterval: Duration = .milliseconds(500)
 
-    /// The queue on which timers run.
-    static let timerQueue: DispatchQueue = DispatchQueue(label: "com.danielmurfin.sACNKit.receiverTimer")
+    /// The sampling timer (single-shot, self-re-arming for staggered per-socket sampling).
+    private var sampleTask: (any RuntimeTask)?
 
-    /// The timer used for sampling of sources.
-    private var sampleTimer: DispatchSourceTimer?
-
-    /// The timer used for checking for source loss and checks.
-    private var heartbeatTimer: DispatchSourceTimer?
-
-    /// The generation token for the sample timer, bumped whenever the timer is
-    /// installed or torn down. A tick is only honored while its generation still
-    /// matches, so a stale tick from a cancelled or replaced timer is discarded.
-    /// (The vendored timer factory attaches handlers at creation, so comparing
-    /// identity against the stored timer is not possible.)
-    private var samplingGeneration: UInt64 = 0
-
-    /// The generation token for the heartbeat timer (see `samplingGeneration`).
-    private var heartbeatGeneration: UInt64 = 0
-
-    // MARK: Notification
-
-    /// Whether source limit exceeded has been notified.
-    private var sourceLimitExceededNotified: Bool
+    /// The heartbeat timer.
+    private var heartbeatTask: (any RuntimeTask)?
 
     // MARK: - Initialization
 
-    /// Creates a new receiver using an interface and delegate queue, and optionally an IP Mode.
+    /// Creates a new receiver to receive raw sACN data for a single universe.
     ///
-    /// If the universe provided is not valid, this initializes to nil.
+    /// If the universe provided is not valid, this initializes to `nil`.
     ///
     /// - Parameters:
     ///    - ipMode: Optional: IP mode for this receiver (IPv4/IPv6/Both).
     ///    - interfaces: The network interfaces for this receiver. An interface may be a name (e.g. "en1" or "lo0") or the corresponding IP address (e.g. "192.168.4.35").
     ///    - universe: The universe this receiver listens to.
-    ///    - sourceLimit: The number of sources this receiver is able to process. This will be dependent on the hardware on which the receiver is running. Defaults to `4`.
+    ///    - sourceLimit: The number of sources this receiver is able to process (defaults to `4`).
     ///    - filterPreviewData: Optional: Whether source preview data should be filtered out (defaults to `true`).
-    ///    - filtersCIDs: Optional: A list of CIDs which should be ignored (defaults to none).
-    ///    - delegateQueue: A delegate queue on which to receive delegate calls from this receiver.
+    ///    - filterCIDs: Optional: A list of CIDs which should be ignored (defaults to none).
     ///
     /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interfaces must not be empty.
     ///
-    public convenience init?(
-        ipMode: sACNIPMode = .ipv4Only, interfaces: Set<String> = [], universe: UInt16, sourceLimit: Int? = 4, filterPreviewData: Bool = true,
-        filterCIDs: Set<UUID> = [], delegateQueue: DispatchQueue
+    public init?(
+        ipMode: sACNIPMode = .ipv4Only, interfaces: Set<String> = [], universe: UInt16, sourceLimit: Int? = 4,
+        filterPreviewData: Bool = true, filterCIDs: Set<UUID> = []
     ) {
         self.init(
-            ipMode: ipMode, interfaces: interfaces, universe: universe, sourceLimit: sourceLimit, filterPreviewData: filterPreviewData,
-            filterCIDs: filterCIDs, delegateQueue: delegateQueue, sourceLossTimeout: Self.sourceLossTimeout,
+            runtime: NIORuntime(), ipMode: ipMode, interfaces: interfaces, universe: universe, sourceLimit: sourceLimit,
+            filterPreviewData: filterPreviewData, filterCIDs: filterCIDs, sourceLossTimeout: Self.sourceLossTimeout,
             perAddressPriorityWait: Self.perAddressPriorityWait)
     }
 
-    /// Creates a new receiver, additionally allowing the timing constants to be overridden.
-    ///
-    /// Internal seam so tests can exercise timing-driven behavior quickly.
-    ///
+    /// Creates a new receiver on an injected runtime, additionally allowing the timing constants to be
+    /// overridden. Internal seam: the merged receiver shares its runtime with the raw receiver (so the merge
+    /// runs on the same loop), and tests exercise timing-driven behavior quickly.
     init?(
-        ipMode: sACNIPMode, interfaces: Set<String>, universe: UInt16, sourceLimit: Int?, filterPreviewData: Bool,
-        filterCIDs: Set<UUID>, delegateQueue: DispatchQueue, sourceLossTimeout: UInt64, perAddressPriorityWait: UInt64
+        runtime: sACNRuntime, ipMode: sACNIPMode, interfaces: Set<String>, universe: UInt16, sourceLimit: Int?,
+        filterPreviewData: Bool, filterCIDs: Set<UUID>, sourceLossTimeout: UInt64, perAddressPriorityWait: UInt64
     ) {
         precondition(!ipMode.usesIPv6() || !interfaces.isEmpty, "At least one interface must be provided for IPv6.")
-
-        // the universe provided must be valid
         guard universe.validUniverse() else { return nil }
 
-        // sockets
+        self.runtime = runtime
         self.ipMode = ipMode
-        let socketDelegateQueue = DispatchQueue(label: "com.danielmurfin.sACNKit.receiverSocketDelegate-\(universe)")
-        socketDelegateQueue.setSpecific(key: Self.socketDelegateQueueSpecificKey, value: true)
-        self.socketDelegateQueue = socketDelegateQueue
-        if interfaces.isEmpty {
-            let socket = NIOComponentSocket(type: .receive, ipMode: ipMode, port: UDP.sdtPort, delegateQueue: socketDelegateQueue)
-            self.sockets = ["": socket]
-            self.socketsSampling = [socket.id: true]
-        } else {
-            self.sockets = interfaces.reduce(into: [String: ComponentSocket]()) { dict, interface in
-                let socket = NIOComponentSocket(type: .receive, ipMode: ipMode, port: UDP.sdtPort, delegateQueue: socketDelegateQueue)
-                dict[interface] = socket
-            }
-            self.socketsSampling = sockets.map { $0.value.id }.reduce(into: [UUID: Bool]()) { dict, id in
-                dict[id] = true
-            }
-        }
-        self._isListening = false
-
-        // delegate
-        self.delegateQueue = delegateQueue
-
-        // general
         self.universe = universe
         self.filterPreviewData = filterPreviewData
         self.sourceLimit = sourceLimit
         self.filterCIDs = filterCIDs
-        self.sampling = false
-        self.sources = [:]
-
-        // notification
-        self.sourceLimitExceededNotified = false
-
-        // timing
         self.sourceLossTimeout = sourceLossTimeout
         self.perAddressPriorityWait = perAddressPriorityWait
+
+        if interfaces.isEmpty {
+            let socket = runtime.makeSocket(type: .receive, ipMode: ipMode, port: UDP.sdtPort)
+            self.sockets = ["": socket]
+            self.socketsSampling = [socket.id: true]
+        } else {
+            for interface in interfaces {
+                let socket = runtime.makeSocket(type: .receive, ipMode: ipMode, port: UDP.sdtPort)
+                sockets[interface] = socket
+                socketsSampling[socket.id] = true
+            }
+        }
     }
 
     deinit {
-        stop()
+        // The timers self-cancel when released; the sockets close on dealloc. Finish the hubs so any active
+        // consumers terminate rather than hang.
+        dataHub.finish()
+        eventsHub.finish()
+        debugLogHub.finish()
     }
 
-    // MARK: Public API
+    // MARK: - Public API
 
-    /// Starts this receiver.
+    /// Sets (or clears) the synchronous in-isolation sink (the embedding merged receiver). Internal.
+    func setSink(_ sink: (any RawReceiverSink)?) {
+        rawSink = sink
+    }
+
+    /// Starts this receiver: binds its sockets, joins the universe's multicast group, and begins listening
+    /// (with an initial sampling period) for sACN Data messages delivered on `data`.
     ///
-    /// The receiver will begin listening for sACN Data messages.
+    /// - Throws: `sACNReceiverValidationError` or `sACNComponentSocketError`.
     ///
-    /// - Throws: An error of type `sACNReceiverValidationError` or `sACNComponentSocketError`.
-    ///
-    public func start() throws {
-        try socketDelegateQueue.sync {
-            guard !_isListening else {
-                throw sACNReceiverValidationError.receiverStarted
+    public func start() async throws {
+        switch gate.reserveStart() {
+        case .reserved:
+            break
+        case .alreadyActive:
+            throw sACNReceiverValidationError.receiverStarted
+        case .busy:
+            throw sACNReceiverValidationError.receiverBusy
+        }
+
+        do {
+            for (interface, socket) in sockets {
+                try await listenForSocket(socket, on: interface.isEmpty ? nil : interface)
+                if gate.stopRequested { throw CancellationError() }
             }
-
-            // begin listening
-            try sockets.forEach { interface, socket in
-                try listenForSocket(socket, on: interface.isEmpty ? nil : interface)
+        } catch {
+            let superseded = gate.stopRequested
+            sockets.values.forEach { socket in
+                socket.delegate = nil
+                socket.close()
             }
-            self._isListening = true
+            reachedIdle()
+            throw superseded ? CancellationError() : error
+        }
 
-            // starts the main heartbeat to handle source loss
-            // and other checks
-            startHeartbeat()
+        gate.toListening()
+        startHeartbeat()
+        // Re-seed sampling for every current socket so each start begins a uniform fresh sampling period
+        // (matching first-start semantics); a restart after `updateInterfaces` otherwise leaves retained
+        // sockets absent from the map, which `processDataPacket` would reject for the whole sampling window.
+        socketsSampling = Dictionary(uniqueKeysWithValues: sockets.values.map { ($0.id, true) })
+        beginSamplingPeriod()
+    }
 
-            // begin sampling for this universe
-            beginSamplingPeriod()
+    /// Stops this receiver, suspending until its sockets have closed (a receiver has nothing to flush, so
+    /// this awaits the actual close; superseding an in-flight start/reconfigure aborts it and resolves on
+    /// unwind, rebind-safe via `SO_REUSEPORT`).
+    public func stop() async {
+        switch gate.state {
+        case .idle:
+            return
+        case .starting, .reconfiguring:
+            gate.requestStop()
+            sockets.values.forEach { $0.close() }
+            await withCheckedContinuation { gate.addStopWaiter($0) }
+        case .listening:
+            await teardown()
+        case .stopping:
+            await withCheckedContinuation { gate.addStopWaiter($0) }
         }
     }
 
-    /// Stops this receiver.
-    ///
-    /// The receiver will stop listening for sACN Data messages.
-    ///
-    /// This is not a delivery barrier: callbacks already enqueued to the delegate
-    /// queue may still be delivered after this returns.
-    public func stop() {
-        if DispatchQueue.getSpecific(key: Self.socketDelegateQueueSpecificKey) == true {
-            _stop()
-        } else {
-            socketDelegateQueue.sync { _stop() }
-        }
-    }
-
-    /// Performs the stop logic.
-    ///
-    /// Must be called on `socketDelegateQueue`.
-    private func _stop() {
-        dispatchPrecondition(condition: .onQueue(socketDelegateQueue))
-        guard _isListening else { return }
-        self._isListening = false
-
-        samplingGeneration &+= 1
-        sampleTimer?.cancel()
-        sampleTimer = nil
-        stopHeartbeat()
-
-        sockets.forEach { interface, socket in
-            socket.delegate = nil
-            socket.stopListening()
-        }
-
+    /// Tears down from `.listening`: cancels the timers, closes every socket (awaiting the close), clears
+    /// state, and reaches idle.
+    private func teardown() async {
+        gate.toStopping()
+        stopSampling()
+        // Clear `sampling` before the first await so a sample tick that already dequeued cannot run
+        // `endedSamplingPeriod` (and re-arm) mid-teardown - it guards on `sampling`.
         sampling = false
+        stopHeartbeat()
+        // Nil every delegate before any close, so no still-open socket delivers a packet (creating a source
+        // the `sources = [:]` below would silently drop, with no `.sourcesLost`) while we await the closes.
+        sockets.values.forEach { $0.delegate = nil }
+        for socket in sockets.values {
+            await socket.stopListening()
+        }
         sources = [:]
+        reachedIdle()
+    }
+
+    /// Returns to idle and resumes every waiting `stop()` caller.
+    private func reachedIdle() {
+        gate.reachedIdle().forEach { $0.resume() }
     }
 
     /// Updates the interfaces on which this receiver listens for sACN Data messages.
     ///
     /// - Parameters:
-    ///    - interfaces: The new interfaces for this receiver. An interface may be a name (e.g. "en1" or "lo0") or the corresponding IP address (e.g. "192.168.4.35").
-    ///    Empty interfaces means listen on all interfaces (IPv4 only).
+    ///    - newInterfaces: The new interfaces. An interface may be a name (e.g. "en1"/"lo0") or an IP.
+    ///      Empty means all interfaces (IPv4 only).
     ///
     /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interfaces must not be empty.
     ///
-    public func updateInterfaces(_ newInterfaces: Set<String> = []) throws {
+    /// - Throws: `sACNReceiverValidationError.receiverBusy` if a start/stop/reconfigure is in flight;
+    ///   otherwise `sACNComponentSocketError` if a bind fails (the change rolls back all-or-nothing).
+    ///
+    public func updateInterfaces(_ newInterfaces: Set<String> = []) async throws {
         precondition(!ipMode.usesIPv6() || !newInterfaces.isEmpty, "At least one interface must be provided for IPv6.")
 
-        try socketDelegateQueue.sync {
-            let existingInterfaces = {
-                if let firstSocket = self.sockets.first, firstSocket.key.isEmpty {
-                    return Set<String>()
-                } else {
-                    return Set(self.sockets.keys)
-                }
-            }()
-            guard existingInterfaces != newInterfaces else { return }
+        let reservation = gate.reserveReconfigure()
+        guard reservation != .busy else { throw sACNReceiverValidationError.receiverBusy }
 
-            if existingInterfaces.isEmpty {
-                // not possible for IPv6
+        let (existingInterfaces, keysToAdd, keysToRemove) = interfaceDiff(
+            currentKeys: Set(sockets.keys), newInterfaces: newInterfaces)
+        guard existingInterfaces != newInterfaces else { return }
 
-                // remove existing sockets
-                // stops listening on deinit if needed
-                self.sockets.removeAll()
-
-                // add each new interfaces
-                for interface in newInterfaces {
-                    let socket = NIOComponentSocket(type: .receive, ipMode: self.ipMode, port: UDP.sdtPort, delegateQueue: self.socketDelegateQueue)
-                    sockets[interface] = socket
-
-                    // attempt to listen
-                    if _isListening {
-                        try listenForSocket(socket, on: interface)
-                    }
-                }
-                let sample = sampleTimer == nil
-                self.socketsSampling = sockets.map { $0.value.id }.reduce(into: [UUID: Bool]()) { dict, id in
-                    dict[id] = sample
-                }
-
-                // begin sampling again (if not already sampling)
-                self.beginSamplingPeriod()
-            } else if newInterfaces.isEmpty {
-                // not possible for IPv6
-
-                // remove existing sockets
-                // stops listening on deinit if needed
-                sockets.removeAll()
-
-                // add socket for all interfaces
-                let socket = NIOComponentSocket(type: .receive, ipMode: self.ipMode, port: UDP.sdtPort, delegateQueue: self.socketDelegateQueue)
-                sockets[""] = socket
-                socketsSampling.removeAll()
-                let sample = sampleTimer == nil
-                socketsSampling[socket.id] = sample
-
-                // attempt to listen
-                if _isListening {
-                    try listenForSocket(socket)
-                }
-
-                // begin sampling again (if not already sampling)
-                self.beginSamplingPeriod()
-            } else {
-                let interfacesToRemove = existingInterfaces.subtracting(newInterfaces)
-                let interfacesToAdd = newInterfaces.subtracting(existingInterfaces)
-
-                // remove sockets for interfaces no longer needed
-                // stops listening on deinit if needed
-                for interface in interfacesToRemove {
-                    sockets.removeValue(forKey: interface)
-                }
-
-                // add each new interface
-                var newSocketIds: [UUID] = []
-                for interface in interfacesToAdd {
-                    let socket = NIOComponentSocket(type: .receive, ipMode: self.ipMode, port: UDP.sdtPort, delegateQueue: self.socketDelegateQueue)
-                    sockets[interface] = socket
-                    newSocketIds.append(socket.id)
-
-                    // attempt to listen
-                    if _isListening {
-                        try listenForSocket(socket, on: interface)
-                    }
-                }
-
-                let sample = sampleTimer == nil
-                for socketId in newSocketIds {
-                    socketsSampling[socketId] = sample
-                }
-
-                // begin sampling again (if not already sampling)
-                self.beginSamplingPeriod()
+        // Idle: no sockets are bound, so there are no awaits - mutate directly with no reservation.
+        guard reservation == .proceedListening else {
+            keysToRemove.forEach { key in
+                if let socket = sockets.removeValue(forKey: key) { socketsSampling.removeValue(forKey: socket.id) }
             }
+            for key in keysToAdd {
+                let socket = runtime.makeSocket(type: .receive, ipMode: ipMode, port: UDP.sdtPort)
+                sockets[key] = socket
+                socketsSampling[socket.id] = true
+            }
+            return
+        }
+
+        // Listening: reserve `.reconfiguring` and bind + join every new socket into a temp map first. Only
+        // commit if all succeed (all-or-nothing).
+        gate.beginReconfigure()
+        var boundSockets: [String: ComponentSocket] = [:]
+        do {
+            for key in keysToAdd {
+                let socket = runtime.makeSocket(type: .receive, ipMode: ipMode, port: UDP.sdtPort)
+                try await listenForSocket(socket, on: key.isEmpty ? nil : key)
+                if gate.stopRequested {
+                    socket.close()
+                    throw CancellationError()
+                }
+                boundSockets[key] = socket
+            }
+        } catch {
+            let superseded = gate.stopRequested
+            boundSockets.values.forEach { $0.close() }
+            await finishReconfigure()
+            throw superseded ? CancellationError() : error
+        }
+
+        // Commit: drop the removed sockets (and their sampling entries), install the freshly bound ones, and
+        // re-seed sampling for the added sockets (sampling only if a sampling period is not already running).
+        for key in keysToRemove {
+            if let socket = sockets.removeValue(forKey: key) {
+                socket.delegate = nil
+                socket.close()
+                socketsSampling.removeValue(forKey: socket.id)
+            }
+        }
+        let sample = sampleTask == nil
+        for (key, socket) in boundSockets {
+            sockets[key] = socket
+            socketsSampling[socket.id] = sample
+        }
+        beginSamplingPeriod()
+        await finishReconfigure()
+    }
+
+    /// Restores the lifecycle after a `.reconfiguring` reservation: back to `.listening`, or - if a `stop()`
+    /// interleaved - through teardown to idle.
+    private func finishReconfigure() async {
+        if gate.stopRequested {
+            await teardown()
+        } else {
+            gate.toListening()
         }
     }
 
     // MARK: General
 
-    /// Attempts to start listening for a socket on an optional interface.
-    ///
-    /// - Parameters:
-    ///    - socket: The socket to start listening.
-    ///    - interface: Optional: An optional interface on which to listen (`nil` means all interfaces).
-    ///
-    private func listenForSocket(_ socket: ComponentSocket, on interface: String? = nil) throws {
+    /// Attempts to start listening for a socket on an optional interface, joining the universe's multicast
+    /// group for each enabled family.
+    private func listenForSocket(_ socket: ComponentSocket, on interface: String? = nil) async throws {
         socket.delegate = self
-        try socket.enableReusePort()
-        try socket.startListening(onInterface: interface)
+        try await socket.startListening(onInterface: interface)
 
-        // attempt to join multicast groups
-        if ipMode == .ipv4Only || ipMode == .ipv4And6 {
-            let hostname = IPv4.multicastHostname(for: universe)
+        if ipMode.usesIPv4() {
             do {
-                try socket.join(multicastGroup: hostname)
+                try await socket.join(multicastGroup: IPv4.multicastHostname(for: universe))
             } catch {
-                socket.stopListening()
+                await socket.stopListening()
                 throw error
             }
         }
-        if ipMode == .ipv6Only || ipMode == .ipv4And6 {
-            let hostname = IPv6.multicastHostname(for: universe)
+        if ipMode.usesIPv6() {
             do {
-                try socket.join(multicastGroup: hostname)
+                try await socket.join(multicastGroup: IPv6.multicastHostname(for: universe))
             } catch {
-                socket.stopListening()
+                await socket.stopListening()
                 throw error
             }
         }
+    }
+
+    // MARK: Emit
+
+    /// Delivers raw source data to the public `data` stream and, if embedded, the merged receiver's sink.
+    private func emit(data: sACNReceiverRawSourceData) {
+        dataHub.yield(data)
+        rawSink?.rawReceiverDidReceive(data)
+    }
+
+    /// Delivers a lifecycle event to the public `events` stream and, if embedded, the merged receiver's sink.
+    private func emit(_ event: Event) {
+        eventsHub.yield(event)
+        rawSink?.rawReceiverDidEmit(event)
+    }
+
+    /// Delivers a debug message to the public `debugLog` stream and, if embedded, the merged receiver's sink.
+    private func log(_ message: String) {
+        debugLogHub.yield(message)
+        rawSink?.rawReceiverDidLog(message)
     }
 
     // MARK: Timers
 
-    /// Starts the main heartbeat timer, which handles source loss and other checks.
+    /// Starts the main heartbeat, which drives source-loss evaluation.
     private func startHeartbeat() {
-        heartbeatGeneration &+= 1
-        let generation = heartbeatGeneration
-        let timer = DispatchSource.repeatingTimer(interval: Self.heartbeatTime, leeway: Self.timingLeeway, queue: Self.timerQueue) { [weak self] in
-            guard let self else { return }
-            self.socketDelegateQueue.async {
-                // the generation is read on the queue that owns it, so a tick from
-                // a timer which was since cancelled or replaced is discarded here
-                guard generation == self.heartbeatGeneration else { return }
-                self.checkForSourceLoss()
-            }
+        heartbeatTask = runtime.scheduleRepeated(after: Self.heartbeatInterval, every: Self.heartbeatInterval) { [weak self] in
+            self?.assumeIsolated { $0.heartbeatTick() }
         }
-        heartbeatTimer = timer
     }
 
-    /// Stops the main heartbeat timer.
+    /// Stops the main heartbeat.
     private func stopHeartbeat() {
-        heartbeatGeneration &+= 1
-        heartbeatTimer?.cancel()
-        heartbeatTimer = nil
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
     }
 
-    /// Begins the initial sampling period for this universe.
+    /// The heartbeat tick: evaluates source loss while listening.
+    private func heartbeatTick() {
+        guard gate.isListening else { return }
+        checkForSourceLoss()
+    }
+
+    /// Cancels the sampling timer.
+    private func stopSampling() {
+        sampleTask?.cancel()
+        sampleTask = nil
+    }
+
+    /// The sampling tick: ends the sampling period if one is still active. Guards on `sampling` (which
+    /// `teardown` clears alongside cancelling the timer) so a tick that raced a stop cannot re-arm.
+    private func sampleTick() {
+        guard sampling else { return }
+        endedSamplingPeriod()
+    }
+
+    /// Begins the initial sampling period for this universe (internal seam). Schedules a single-shot timer
+    /// that re-arms per staggered socket.
     ///
     /// - Parameters:
-    ///    - notify: Whether to notify sampling has started (defaults to `true`).
+    ///    - notify: Whether to emit `.samplingStarted` (defaults to `true`).
     ///
     func beginSamplingPeriod(notify: Bool = true) {
-        dispatchPrecondition(condition: .onQueue(socketDelegateQueue))
-
         guard !sampling else { return }
         sampling = true
 
-        // notify sampling has started
         if notify {
-            let delegate = delegate
-            delegateQueue.async { delegate?.receiverStartedSampling(self) }
+            emit(.samplingStarted)
         }
 
-        samplingGeneration &+= 1
-        let generation = samplingGeneration
-        let timer = DispatchSource.singleTimer(interval: Self.sampleTime, leeway: Self.timingLeeway, queue: Self.timerQueue) { [weak self] in
-            guard let self else { return }
-            self.socketDelegateQueue.async {
-                // the generation is read on the queue that owns it, so a tick from
-                // a timer which was since cancelled or replaced is discarded here
-                guard generation == self.samplingGeneration else { return }
-                self._endedSamplingPeriod()
-            }
+        // Cancel any prior one-shot before reassigning, so a re-arm never leaks an armed timer (honours the
+        // `RuntimeTask` ownership contract; the `guard !sampling` above already prevents re-entry).
+        sampleTask?.cancel()
+        sampleTask = runtime.scheduleOnce(after: Self.sampleTime) { [weak self] in
+            self?.assumeIsolated { $0.sampleTick() }
         }
-        self.sampleTimer = timer
     }
 
-    /// Ends the initial sampling period for this universe.
+    /// Ends the initial sampling period for this universe (internal seam). Sockets that were sampling are
+    /// dropped; any remaining sockets begin sampling (staggered) and the timer re-arms, otherwise sampling
+    /// ends and `.samplingEnded` is emitted.
     func endedSamplingPeriod() {
-        if DispatchQueue.getSpecific(key: Self.socketDelegateQueueSpecificKey) == true {
-            _endedSamplingPeriod()
-        } else {
-            socketDelegateQueue.sync { _endedSamplingPeriod() }
-        }
-    }
-
-    /// Performs the end of sampling logic.
-    ///
-    /// Must be called on `socketDelegateQueue`.
-    private func _endedSamplingPeriod() {
-        dispatchPrecondition(condition: .onQueue(socketDelegateQueue))
         sampling = false
 
         // remove any sockets which were sampling
-        let keys = socketsSampling.filter { $0.value == true }.map { $0.key }
-        keys.forEach { key in
-            socketsSampling.removeValue(forKey: key)
-        }
+        socketsSampling.filter { $0.value }.keys.forEach { socketsSampling.removeValue(forKey: $0) }
 
         // any sockets left should now be sampling
         if !socketsSampling.isEmpty {
-            let keys = socketsSampling.keys
-            keys.forEach { key in
-                socketsSampling.updateValue(true, forKey: key)
-            }
-
-            self.beginSamplingPeriod(notify: false)
+            socketsSampling.keys.forEach { socketsSampling.updateValue(true, forKey: $0) }
+            beginSamplingPeriod(notify: false)
         } else {
-            samplingGeneration &+= 1
-            self.sampleTimer?.cancel()
-            self.sampleTimer = nil
-
-            // notify sampling has ended
-            let delegate = delegate
-            delegateQueue.async { delegate?.receiverEndedSampling(self) }
+            stopSampling()
+            emit(.samplingEnded)
         }
     }
 
-    /// Checks for source loss.
+    /// Checks for source loss, coalescing lost sources into a single `.sourcesLost` event (internal seam).
     func checkForSourceLoss() {
         var notifyLostSources: Set<UUID> = []
         var removeLostSources: Set<UUID> = []
@@ -558,41 +549,39 @@ public class sACNReceiverRaw {
             switch source.state {
             case .waitingForLevels:
                 if source.isPAPTimerExpired {
-                    // no need to notify, just remove this source
-                    // it timed out in a waiting state
+                    // timed out in a waiting state - remove without notifying
                     removeLostSources.insert(id)
                 }
             case .waitingForPAP:
                 if source.isPacketTimerExpired {
-                    // no need to notify, just remove this source
-                    // it timed out in a waiting state
+                    // timed out in a waiting state - remove without notifying
                     removeLostSources.insert(id)
                 }
             case .hasLevelsOnly, .hasLevelsAndPAP:
-                let available = source.available()
-                switch available {
+                switch source.available() {
                 case .offline:
-                    // notify this source was
                     notifyLostSources.insert(id)
                     removeLostSources.insert(id)
-                case .online:
-                    break
-                case .unknown:
+                case .online, .unknown:
                     break
                 }
             }
         }
 
-        // notify all lost sources
         if !notifyLostSources.isEmpty {
-            let delegate = delegate
-            delegateQueue.async { delegate?.receiver(self, lostSources: Array(notifyLostSources)) }
+            emit(.sourcesLost(Array(notifyLostSources)))
         }
 
-        // remove any expired sources
         removeLostSources.forEach { sourceId in
             sources.removeValue(forKey: sourceId)
         }
+    }
+
+    // MARK: Test seams
+
+    /// Test seam: the number of sources currently tracked.
+    var trackedSourceCount: Int {
+        sources.count
     }
 
 }
@@ -606,6 +595,9 @@ public class sACNReceiverRaw {
 extension sACNReceiverRaw {
 
     /// Processes data as sACN.
+    ///
+    /// Internal so the state machine can be characterization-tested by injecting packets directly
+    /// (`await receiver.process(data:...)`).
     ///
     /// - Parameters:
     ///    - data: The data to process.
@@ -621,21 +613,17 @@ extension sACNReceiverRaw {
 
             switch rootLayer.vector {
             case .extended:
-                // universe sync is not currently handled
-                // discovery is handled by sACNDiscoveryReceiver
+                // universe sync is not currently handled; discovery is handled by sACNDiscoveryReceiver
                 break
             case .data:
                 try processDataPacket(rootLayer: rootLayer, ipFamily: ipFamily, socketId: socketId, hostname: hostname)
             }
         } catch let error as RootLayerValidationError {
-            let debugDelegate = debugDelegate
-            delegateQueue.async { debugDelegate?.debugLog(error.logDescription) }
+            log(error.logDescription)
         } catch let error as DataFramingLayerValidationError {
-            let debugDelegate = debugDelegate
-            delegateQueue.async { debugDelegate?.debugLog(error.logDescription) }
+            log(error.logDescription)
         } catch let error as DMPLayerValidationError {
-            let debugDelegate = debugDelegate
-            delegateQueue.async { debugDelegate?.debugLog(error.logDescription) }
+            log(error.logDescription)
         } catch {
             // unknown error
         }
@@ -668,8 +656,11 @@ extension sACNReceiverRaw {
 
         var notify = false
 
-        let universeData: sACNReceiverRawSourceData?
         let previewData = framingLayer.options.contains(.preview)
+
+        // Peel the DMP layer and run the per-source state machine (existing or new). `dmpLayer` stays nil
+        // when the packet produces no source (a new terminated stream), so nothing is notified.
+        let dmpLayer: DMPLayer?
         if let existingSource = sources[rootLayer.cid] {
             // reject packets from a different IP family or hostname
             guard existingSource.ipFamily == ipFamily && existingSource.hostname == hostname else { return }
@@ -686,49 +677,37 @@ extension sACNReceiverRaw {
             guard validSequence(framingLayer.sequenceNumber, previousSequence: existingSource.sequence) else { return }
             existingSource.sequence = framingLayer.sequenceNumber
 
-            let dmpLayer = try DMPLayer.parse(fromData: framingLayer.data)
+            let layer = try DMPLayer.parse(fromData: framingLayer.data)
 
             // based on the timecode update timers
-            switch dmpLayer.startCode {
+            switch layer.startCode {
             case .null:
                 processLevels(for: existingSource, notify: &notify)
             case .perAddressPriority:
                 processPerAddressPriority(for: existingSource, notify: &notify)
             }
-
-            // construct data only if it should be notified
-            universeData =
-                notify
-                ? sACNReceiverRawSourceData(
-                    cid: rootLayer.cid, name: framingLayer.sourceName, hostname: hostname, universe: universe, priority: framingLayer.priority,
-                    preview: previewData, isSampling: isSampling, startCode: dmpLayer.startCode, valuesCount: dmpLayer.values.count,
-                    values: dmpLayer.values) : nil
+            dmpLayer = layer
         } else if !framingLayer.options.contains(.terminated) {
             // process new source data
-            let dmpLayer = try DMPLayer.parse(fromData: framingLayer.data)
+            let layer = try DMPLayer.parse(fromData: framingLayer.data)
             let source = createSource(
                 cid: rootLayer.cid, name: framingLayer.sourceName, hostname: hostname, ipFamily: ipFamily, sequence: framingLayer.sequenceNumber,
-                startCode: dmpLayer.startCode, notify: &notify)
+                startCode: layer.startCode, notify: &notify)
             sources[rootLayer.cid] = source
-
-            // construct data only if it should be notified
-            universeData =
-                notify
-                ? sACNReceiverRawSourceData(
-                    cid: rootLayer.cid, name: framingLayer.sourceName, hostname: hostname, universe: universe, priority: framingLayer.priority,
-                    preview: previewData, isSampling: isSampling, startCode: dmpLayer.startCode, valuesCount: dmpLayer.values.count,
-                    values: dmpLayer.values) : nil
+            dmpLayer = layer
         } else {
-            universeData = nil
+            dmpLayer = nil
         }
 
-        guard let universeData else { return }
-
-        // only notify if this is not preview data, or if we shouldn't filter it
+        // notify only if the state machine flagged it, and not for filtered preview data
+        guard let dmpLayer, notify else { return }
         guard !previewData || !filterPreviewData else { return }
 
-        let delegate = delegate
-        delegateQueue.async { delegate?.receiverReceivedUniverseData(self, sourceData: universeData) }
+        emit(
+            data: sACNReceiverRawSourceData(
+                cid: rootLayer.cid, name: framingLayer.sourceName, hostname: hostname, universe: universe, priority: framingLayer.priority,
+                preview: previewData, isSampling: isSampling, startCode: dmpLayer.startCode, valuesCount: dmpLayer.values.count,
+                values: dmpLayer.values))
     }
 
     /// Decides whether level data should be notified for a source.
@@ -773,9 +752,7 @@ extension sACNReceiverRaw {
             guard source.isPAPTimerExpired else { break }
             // the source stopped sending per-address priorities but continues to send levels
             if source.markPerAddressPriorityLost() {
-                let cid = source.cid
-                let delegate = delegate
-                delegateQueue.async { delegate?.receiver(self, lostPerAddressPriorityFor: cid) }
+                emit(.perAddressPriorityLost(source.cid))
             }
             source.state = .hasLevelsOnly
         }
@@ -806,22 +783,18 @@ extension sACNReceiverRaw {
         }
     }
 
-    /// Creates a new source with the information provided, and starts timer for per-address
-    /// priority and source loss as required.
-    ///
-    /// If the source limit has been reached no new source will be returned, in addition
-    /// if it has not already been notified a sources exceeded notification will occur.
+    /// Creates a new source with the information provided, and starts timers for per-address priority and
+    /// source loss as required. Returns `nil` (and emits `.sourceLimitExceeded` once) if the source limit
+    /// has been reached.
     ///
     /// - Parameters:
     ///    - cid: The unique identifier of the source.
     ///    - name: The name of the source as received.
     ///    - hostname: The hostname of the source.
-    ///    - ipFamily:The IP family.
+    ///    - ipFamily: The IP family.
     ///    - sequence: The current sequence number.
     ///    - startCode: The DMX512-A START code.
     ///    - notify: Inout: Whether to notify.
-    ///
-    /// - Returns: An optional `ReceiverSource`.
     ///
     private func createSource(
         cid: UUID, name: String, hostname: String, ipFamily: ComponentSocketIPFamily, sequence: UInt8, startCode: DMX.STARTCode, notify: inout Bool
@@ -833,8 +806,7 @@ extension sACNReceiverRaw {
         if let sourceLimit, sources.count >= sourceLimit {
             if !sourceLimitExceededNotified {
                 sourceLimitExceededNotified = true
-                let delegate = delegate
-                delegateQueue.async { delegate?.receiverExceededSources(self) }
+                emit(.sourceLimitExceeded)
             }
             return nil
         }
@@ -888,26 +860,11 @@ extension sACNReceiverRaw {
         return source
     }
 
-    /// Removes a single source from this receiver.
-    ///
-    /// - Parameters:
-    ///    - cid: The CID of the source to remove.
-    ///
-    private func removeSource(withCid cid: UUID) {
-        sources.removeValue(forKey: cid)
-    }
-
-    /// Removes all sources from this receiver.
-    private func removeAllSources() {
-        sourceLimitExceededNotified = false
-        sources = [:]
-    }
-
     /// Checks if a sequence number is valid in relation to the previous number.
     ///
     /// - Parameters:
     ///    - newSequence: The new sequence number.
-    ///    - oldSequence: The old sequence number.
+    ///    - previousSequence: The old sequence number.
     ///
     private func validSequence(_ newSequence: UInt8, previousSequence: UInt8) -> Bool {
         let seqnumCmp = Int8(bitPattern: newSequence) &- Int8(bitPattern: previousSequence)
@@ -919,45 +876,30 @@ extension sACNReceiverRaw {
 // MARK: -
 // MARK: -
 
-/// sACNReceiverRaw Extension
-///
 /// `ComponentSocketDelegate` conformance.
+///
+/// The receiver's sockets are actor-path sockets (`sACNRuntime.makeSocket`): they deliver on the event loop
+/// this actor is isolated to, so these `nonisolated` methods `assumeIsolated` into the actor with no hop.
+///
 extension sACNReceiverRaw: ComponentSocketDelegate {
-    /// Called when a message has been received.
-    ///
-    /// - Parameters:
-    ///    - socket: The socket which received a message.
-    ///    - data: The message as `Data`.
-    ///    - sourceHostname: The hostname of the source of the message.
-    ///    - sourcePort: The UDP port of the source of the message.
-    ///    - ipFamily: The `ComponentSocketIPFamily` of the source of the message.
-    ///
-    func receivedMessage(
+
+    nonisolated func receivedMessage(
         for socket: ComponentSocket, withData data: Data, sourceHostname: String, sourcePort: UInt16, ipFamily: ComponentSocketIPFamily
     ) {
-        process(data: data, ipFamily: ipFamily, socketId: socket.id, hostname: sourceHostname)
+        let socketId = socket.id
+        assumeIsolated { $0.process(data: data, ipFamily: ipFamily, socketId: socketId, hostname: sourceHostname) }
     }
 
-    /// Called when the socket was closed.
-    ///
-    /// - Parameters:
-    ///    - socket: The socket which was closed.
-    ///    - error: An optional error which occured when the socket was closed.
-    ///
-    func socket(_ socket: ComponentSocket, socketDidCloseWith reason: SocketCloseReason) {
-        guard self._isListening else { return }
-        let delegate = delegate
-        delegateQueue.async { delegate?.receiver(self, interface: socket.interface, socketDidCloseWithError: reason) }
+    nonisolated func socket(_ socket: ComponentSocket, socketDidCloseWith reason: SocketCloseReason) {
+        let interface = socket.interface
+        assumeIsolated { receiver in
+            guard receiver.isListening else { return }
+            receiver.emit(.socketClosed(interface: interface, reason: reason))
+        }
     }
 
-    /// Called when a debug socket log is produced.
-    ///
-    /// - Parameters:
-    ///    - socket: The socket for which this log event occured.
-    ///    - logMessage: The debug message.
-    ///
-    func debugLog(for socket: ComponentSocket, with logMessage: String) {
-        let debugDelegate = debugDelegate
-        delegateQueue.async { debugDelegate?.debugSocketLog(logMessage) }
+    nonisolated func debugLog(for socket: ComponentSocket, with logMessage: String) {
+        assumeIsolated { $0.log(logMessage) }
     }
+
 }

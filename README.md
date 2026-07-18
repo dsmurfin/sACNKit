@@ -55,21 +55,24 @@ await source.stop()
 
 ### Receiving
 
+Every receiver is a Swift `actor` (like `sACNSource`): the lifecycle API is `async`, and merged data
+and lifecycle events arrive on `AsyncStream`s rather than delegate callbacks.
+
 ```swift
 import sACNKit
 
-let receiver = sACNReceiver(universe: 1, delegateQueue: .main)
-receiver?.setDelegate(self) // conform to sACNReceiverDelegate
-try receiver?.start()
+let receiver = sACNReceiver(universe: 1)
+Task { for await frame in receiver!.data { print(frame.levels) } }
+Task { for await event in receiver!.events { print(event) } }
+try await receiver?.start()
 ```
 
-Use `sACNReceiverGroup` to receive and merge many universes with a single delegate, or
-`sACNReceiverRaw` for un-merged per-source data. `sACNMerger` is a standalone HTP /
+Use `sACNReceiverGroup` to receive and merge many universes behind one API (its `data`/`events` carry
+the `universe`), or `sACNReceiverRaw` for un-merged per-source data. `sACNMerger` is a standalone HTP /
 per-address-priority merge engine.
 
-`sACNDiscoveryReceiver` reports sources seen via universe discovery and is a Swift `actor` (like
-`sACNSource`): its lifecycle API is `async`, and discovered sources arrive on its `discovery`
-`AsyncStream` rather than a delegate.
+`sACNDiscoveryReceiver` reports sources seen via universe discovery; discovered sources arrive on its
+`discovery` `AsyncStream`.
 
 ```swift
 let discovery = sACNDiscoveryReceiver()
@@ -77,17 +80,14 @@ Task { for await source in discovery.discovery { print(source.cid, source.univer
 try await discovery.start()
 ```
 
-The merged/raw receivers (`sACNReceiver`, `sACNReceiverGroup`, `sACNReceiverRaw`) still use delegates.
-Their callbacks are delivered asynchronously on the `delegateQueue` you provide, in the order packets
-were processed. A serial queue is recommended; internal state is safe even if the queue is concurrent,
-and you may call back into a component (for example `information(for:)`) from within a callback.
-
-Because delivery is asynchronous, `stop()` and `setDelegate(nil)` are not delivery barriers:
-callbacks already enqueued may still arrive after either call returns (`setDelegate(nil)` keeps the
-previous delegate alive for those in-flight deliveries). Similarly, `information(for:)` reflects the
-component's current state, so it may throw for a source listed in the callback payload you are
-handling if that source was lost in the meantime. Tear down resources your delegate uses only after
-queued callbacks have drained (for example after a barrier block on your delegate queue).
+Notes on stream delivery. Each `data`/`events`/`debugLog` property returns an independent subscription,
+so multiple consumers can observe the same receiver. `data` buffers the newest frame (a slow consumer
+gets the latest DMX, not a backlog); `events` is best-effort drop-oldest, so a consumer that stalls for
+long enough can miss an event such as `.sourcesLost`. Consumers run off-actor, so you may freely call
+back into a receiver (for example `information(for:)`) from within a `for await` loop without deadlock.
+`stop()` is not a delivery barrier - elements already yielded may still be observed after it returns -
+and `information(for:)` reflects current state, so it may throw for a source a just-delivered frame
+listed as active.
 
 ### Transport notes (SwiftNIO)
 

@@ -26,91 +26,110 @@ import Foundation
 
 /// sACN Receiver Group
 ///
-/// An E1.31-2018 sACN Receiver which receives and merges sACN Messages from multiple universes.
+/// An E1.31-2018 sACN Receiver which receives and merges sACN Messages from multiple universes, managing a
+/// number of `sACNReceiver`s behind a single API. All managed receivers share the same interfaces, IP mode
+/// and source limit; instantiate `sACNReceiver`s directly for discrete settings.
 ///
-/// This provides a convenience method to manage, and receive notifications from multiple `sACNReceiver`s.
-/// All `sACNReceiver`s managed by this group listen on the same interface(s) and with the same
-/// `sACNIPMode`. They also use the same source limit.
+/// A `sACNReceiverGroup` is an `actor`. Each child `sACNReceiver` runs on its own event loop; the group
+/// consumes each child's streams via a per-child `Task` and re-yields (tagging the universe) into its own
+/// `data`/`events`/`debugLog` streams - a one-way async fan-in, so a group of actors never has to
+/// synchronously drive an actor child.
 ///
-/// To allow discrete settings, instantiate and manage a number of `sACNReceiver`s directly.
-final public class sACNReceiverGroup {
+public actor sACNReceiverGroup {
 
-    /// A key used to identify the state queue for the current execution context.
-    private static let stateQueueSpecificKey = DispatchSpecificKey<Bool>()
+    // MARK: Runtime / isolation
+
+    /// The runtime hosting this actor's isolation (the children each own their own runtime/loop).
+    nonisolated let runtime: sACNRuntime
+
+    /// Pins this actor to its runtime's serial executor (a NIO event loop). The children each own a separate
+    /// runtime/loop and fan in via async `Task`s, so the group never shares a loop with a child.
+    public nonisolated var unownedExecutor: UnownedSerialExecutor {
+        runtime.serialExecutor.asUnownedSerialExecutor()
+    }
+
+    // MARK: Events
+
+    /// An event emitted by a receiver group, tagged with the universe it came from.
+    public enum Event: Sendable {
+
+        /// The initial sampling period for a universe began.
+        case samplingStarted(universe: UInt16)
+
+        /// The initial sampling period for a universe ended.
+        case samplingEnded(universe: UInt16)
+
+        /// One or more sources were lost for a universe (coalesced).
+        case sourcesLost([UUID], universe: UInt16)
+
+        /// A universe's source limit was reached (a new source was dropped).
+        case sourceLimitExceeded(universe: UInt16)
+
+        /// A socket closed with an error (per interface and universe).
+        case socketClosed(interface: String?, reason: SocketCloseReason, universe: UInt16)
+
+    }
+
+    /// The broadcast hub backing `data`. Buffers newest-1: each merged frame is a complete DMX snapshot for
+    /// its universe, so a slow consumer should get the latest rather than replay a backlog of stale frames.
+    private nonisolated let dataHub = AsyncStreamHub<sACNReceiverMergedData>(bufferingPolicy: .bufferingNewest(1))
+
+    /// A stream of merged universe data (the universe is carried in the payload). Each access returns an
+    /// independent subscription.
+    public nonisolated var data: AsyncStream<sACNReceiverMergedData> { dataHub.stream() }
+
+    /// The broadcast hub backing `events`.
+    private nonisolated let eventsHub = AsyncStreamHub<Event>(bufferingPolicy: .bufferingNewest(64))
+
+    /// A stream of receiver-group lifecycle events. Each access returns an independent subscription.
+    /// Best-effort, drop-oldest (buffers newest-64): a consumer that stalls for long enough can miss an event
+    /// such as `.sourcesLost` (a delta from the old never-drop delegate callbacks).
+    public nonisolated var events: AsyncStream<Event> { eventsHub.stream() }
+
+    /// The broadcast hub backing `debugLog`.
+    private nonisolated let debugLogHub = AsyncStreamHub<String>(bufferingPolicy: .bufferingNewest(64))
+
+    /// A stream of human-readable debug log messages. Each access returns an independent subscription.
+    public nonisolated var debugLog: AsyncStream<String> { debugLogHub.stream() }
+
+    // MARK: General
 
     /// The Internet Protocol version(s) used by the receivers in this group.
     private let ipMode: sACNIPMode
 
-    /// The interfaces on which the receivers in this group should receive data.
-    /// Internal read to allow tests to observe interface updates.
-    private(set) var interfaces: Set<String> = []
-
-    // MARK: Delegate
-
-    /// Changes the receiver delegate of this receiver to the the object passed.
-    ///
-    /// Passing `nil` does not fence in-flight deliveries: a callback already enqueued
-    /// may still be delivered to the previous delegate after this returns.
-    ///
-    /// - Parameters:
-    ///   - delegate: The delegate to receive notifications.
-    ///
-    public func setDelegate(_ delegate: sACNReceiverGroupDelegate?) {
-        performOnStateQueue {
-            self.delegate = delegate
-        }
-    }
-
-    /// Changes the debug delegate of this receiver to the the object passed.
-    ///
-    /// - Parameters:
-    ///   - delegate: The delegate to receive notifications.
-    ///
-    public func setDebugDelegate(_ delegate: sACNComponentDebugDelegate?) {
-        performOnStateQueue {
-            self.debugDelegate = delegate
-        }
-    }
-
-    /// The delegate which receives notifications from this receiver.
-    private weak var delegate: sACNReceiverGroupDelegate?
-
-    /// The delegate which receives debug log messages from this receiver.
-    private weak var debugDelegate: sACNComponentDebugDelegate?
-
-    /// The queue on which to send delegate notifications.
-    private let delegateQueue: DispatchQueue
-
-    /// The serial queue on which state is mutated.
-    ///
-    /// State stays serialized on this queue even if the client's delegate queue is
-    /// concurrent; delegate notifications hop asynchronously to the delegate queue.
-    /// Child receivers deliver their callbacks on this queue.
-    private let stateQueue: DispatchQueue
-
-    /// Executes work synchronized on the state queue, immediately when already on it.
-    private func performOnStateQueue<T>(_ work: () throws -> T) rethrows -> T {
-        if DispatchQueue.getSpecific(key: Self.stateQueueSpecificKey) == true {
-            try work()
-        } else {
-            try stateQueue.sync { try work() }
-        }
-    }
-
-    // MARK: General
-
-    /// Whether preview data is filtered by this receivers.
+    /// Whether preview data is filtered by the receivers.
     private let filterPreviewData: Bool
 
     /// An optional limit on the number of sources the receivers in this group accept.
     private let sourceLimit: Int?
 
-    /// A list of CIDs this receiver should filter.
+    /// A list of CIDs the receivers should filter.
     private let filterCIDs: Set<UUID>
 
-    /// The receivers, identified by their universe.
-    /// Internal read to allow tests to drive child receivers without network traffic.
-    private(set) var receivers: [UInt16: sACNReceiver]
+    /// The interfaces on which the receivers in this group receive data. Internal read for tests.
+    private(set) var interfaces: Set<String>
+
+    /// A subscribed child receiver: the receiver plus the `Task`s draining its streams up into the group.
+    private struct ChildSubscription {
+
+        let receiver: sACNReceiver
+        let tasks: [Task<Void, Never>]
+
+    }
+
+    /// The child receivers and their forwarding tasks, identified by universe.
+    private var children: [UInt16: ChildSubscription] = [:]
+
+    /// Whether a structural mutation (`add`/`remove`/`updateInterfaces`) is in flight. Actor reentrancy can
+    /// interleave other calls at each `await`, so these serialize one-at-a-time through `beginMutation()`.
+    private var mutating = false
+
+    /// Callers awaiting the in-flight mutation to complete, woken in FIFO order by `endMutation()`.
+    ///
+    /// Wakeup order is not acquisition order: a caller arriving between the release and a woken waiter's
+    /// resumption may acquire first, which is why `beginMutation()` re-checks `mutating` in a loop (the
+    /// condition-variable idiom) - a barged waiter safely re-appends itself and the resume chain continues.
+    private var mutationWaiters: [CheckedContinuation<Void, Never>] = []
 
     // MARK: - Initialization
 
@@ -119,159 +138,209 @@ final public class sACNReceiverGroup {
     /// - Parameters:
     ///    - ipMode: Optional: IP mode for this receiver (IPv4/IPv6/Both).
     ///    - interfaces: The network interfaces for this receiver. An interface may be a name (e.g. "en1" or "lo0") or the corresponding IP address (e.g. "192.168.4.35").
-    ///    - sourceLimit: The number of sources this receiver is able to process. This will be dependent on the hardware on which the receiver is running. Defaults to `4`.
+    ///    - sourceLimit: The number of sources this receiver is able to process (defaults to `4`).
     ///    - filterPreviewData: Optional: Whether source preview data should be filtered out (defaults to `true`).
-    ///    - filtersCIDs: Optional: A list of CIDs which should be ignored (defaults to none).
-    ///    - delegateQueue: A delegate queue on which to receive delegate calls from this receiver.
+    ///    - filterCIDs: Optional: A list of CIDs which should be ignored (defaults to none).
     ///
     /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interfaces must not be empty.
     ///
     public init(
         ipMode: sACNIPMode = .ipv4Only, interfaces: Set<String> = [], sourceLimit: Int? = 4, filterPreviewData: Bool = true,
-        filterCIDs: Set<UUID> = [], delegateQueue: DispatchQueue
+        filterCIDs: Set<UUID> = []
     ) {
         precondition(!ipMode.usesIPv6() || !interfaces.isEmpty, "At least one interface must be provided for IPv6.")
 
+        self.runtime = NIORuntime()
         self.ipMode = ipMode
         self.interfaces = interfaces
         self.filterPreviewData = filterPreviewData
         self.sourceLimit = sourceLimit
         self.filterCIDs = filterCIDs
-        receivers = [:]
-        self.delegateQueue = delegateQueue
-        let stateQueue = DispatchQueue(label: "com.danielmurfin.sACNKit.receiverGroupState")
-        stateQueue.setSpecific(key: Self.stateQueueSpecificKey, value: true)
-        self.stateQueue = stateQueue
     }
 
-    // MARK: Public API
+    deinit {
+        // The forwarding tasks hold `self` weakly and their child's streams finish when the child (released
+        // with `children`) deinits, so they self-complete. Finish the group's hubs so consumers terminate.
+        dataHub.finish()
+        eventsHub.finish()
+        debugLogHub.finish()
+    }
+
+    // MARK: - Public API
 
     /// Adds a new universe to this receiver group.
     ///
-    /// The universe number must be valid. If the universe has already been added,
-    /// this returns successfully.
+    /// The universe number must be valid; adding an already-present universe returns successfully. The child
+    /// is registered only after it has successfully started, so a failed add leaves nothing behind and can
+    /// be retried.
     ///
     /// - Parameters:
     ///    - universe: The universe number to add.
     ///
-    /// - Throws: An `sACNReceiverValidationError` or `sACNComponentSocketError`..
+    /// - Throws: `sACNReceiverValidationError` or `sACNComponentSocketError`.
     ///
-    public func add(universe: UInt16) throws {
+    public func add(universe: UInt16) async throws {
         guard universe.validUniverse() else { throw sACNReceiverValidationError.universeNumberInvalid }
 
-        try performOnStateQueue { [self] in
-            guard receivers[universe] == nil else { return }
+        await beginMutation()
+        defer { endMutation() }
 
-            guard
-                let receiver = sACNReceiver(
-                    ipMode: ipMode, interfaces: interfaces, universe: universe, sourceLimit: sourceLimit, filterPreviewData: filterPreviewData,
-                    filterCIDs: filterCIDs, delegateQueue: stateQueue)
-            else {
-                throw sACNReceiverValidationError.universeNumberInvalid
-            }
-            receiver.setDelegate(self)
+        // Serialized: if a concurrent add already brought this universe up, it is registered here; if it
+        // threw, nothing is registered and we start it below.
+        guard children[universe] == nil else { return }
 
-            // only register the receiver once it has started, so a failed
-            // add leaves no dead receiver behind and can simply be retried
-            try receiver.start()
-            receivers[universe] = receiver
+        guard
+            let receiver = sACNReceiver(
+                ipMode: ipMode, interfaces: interfaces, universe: universe, sourceLimit: sourceLimit,
+                filterPreviewData: filterPreviewData, filterCIDs: filterCIDs)
+        else {
+            throw sACNReceiverValidationError.universeNumberInvalid
         }
+
+        // Subscribe to the child's streams before starting it, so its synchronous `.samplingStarted` (and any
+        // start-window `.socketClosed`) emitted during start() is drained rather than lost.
+        let subscription = subscription(for: receiver, universe: universe)
+        do {
+            try await receiver.start()
+        } catch {
+            subscription.tasks.forEach { $0.cancel() }
+            throw error
+        }
+        children[universe] = subscription
     }
 
-    /// Removes a universe from this receiver group.
-    ///
-    /// If this universe does not exist, this returns successfully.
+    /// Removes a universe from this receiver group. If the universe is not present, this returns
+    /// successfully. The child's forwarding tasks are cancelled and the child is released (which closes its
+    /// sockets on dealloc).
     ///
     /// - Parameters:
     ///    - universe: The universe number to remove.
     ///
-    public func remove(universe: UInt16) {
-        performOnStateQueue {
-            _ = receivers.removeValue(forKey: universe)
-        }
+    public func remove(universe: UInt16) async {
+        await beginMutation()
+        defer { endMutation() }
+
+        guard let subscription = children.removeValue(forKey: universe) else { return }
+        subscription.tasks.forEach { $0.cancel() }
     }
 
-    /// Updates the interfaces on which this receiver group listens for sACN Universe Discovery and Data messages.
+    /// Updates the interfaces on which this receiver group listens for sACN Data messages.
     ///
     /// - Parameters:
-    ///    - interfaces: The new interfaces for this receiver group. An interface may be a name (e.g. "en1" or "lo0") or the corresponding IP address (e.g. "192.168.4.35").
-    ///    Empty interfaces means listen on all interfaces (IPv4 only).
+    ///    - newInterfaces: The new interfaces. Empty means all interfaces (IPv4 only).
     ///
     /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interfaces must not be empty.
     ///
-    /// - Throws: An `sACNReceiverValidationError` error.
+    /// - Throws: `sACNReceiverValidationError` or `sACNComponentSocketError`. If this throws, the update may
+    ///   have applied to only some universes; the new interfaces are still recorded, so universes added later
+    ///   use them and retrying with the same set converges.
     ///
-    /// If this throws, the update may have been applied to only some of the existing
-    /// universes; the new interfaces are still recorded, so universes added later use
-    /// them and retrying with the same set converges.
-    ///
-    public func updateInterfaces(_ newInterfaces: Set<String> = []) throws {
+    public func updateInterfaces(_ newInterfaces: Set<String> = []) async throws {
         precondition(!ipMode.usesIPv6() || !newInterfaces.isEmpty, "At least one interface must be provided for IPv6.")
 
-        try performOnStateQueue {
-            // persist first so universes added later use the new interfaces even
-            // if updating an existing child throws part-way through
-            interfaces = newInterfaces
+        await beginMutation()
+        defer { endMutation() }
 
-            try receivers.forEach { _, receiver in
-                try receiver.updateInterfaces(newInterfaces)
-            }
+        // persist first so universes added later use the new interfaces even if a child throws part-way
+        interfaces = newInterfaces
+
+        for subscription in Array(children.values) {
+            try await subscription.receiver.updateInterfaces(newInterfaces)
         }
     }
 
-    /// Retrieves source information such as CID, IP Address and name using a sources identifier.
+    /// Retrieves source information (CID, IP address, name) for a source in a universe.
     ///
-    ///- Parameters:
-    ///   - sourceId: The identifier of the source.
-    ///   - universe: The universe for which to get the source information.
+    /// Reflects current state rather than a callback payload's snapshot, so it may throw for a source a
+    /// just-delivered payload listed as active.
     ///
-    /// - Throws: An `sACNReceiverValidationError` if the source cannot be found.
+    /// - Parameters:
+    ///    - sourceId: The identifier of the source.
+    ///    - universe: The universe for which to get the source information.
+    ///
+    /// - Throws: `sACNReceiverValidationError.sourceDoesNotExist` if the source cannot be found.
     ///
     /// - Returns: Source information.
     ///
-    /// May be called from any queue, including from within delegate callbacks.
-    /// Reflects current state rather than a callback payload's snapshot, so it may
-    /// throw for a source a just-delivered payload listed as active.
-    public func information(for sourceId: UUID, on universe: UInt16) throws -> sACNReceiverSource {
-        try performOnStateQueue {
-            guard let receiver = receivers[universe] else { throw sACNReceiverValidationError.sourceDoesNotExist }
-            return try receiver.information(for: sourceId)
+    public func information(for sourceId: UUID, on universe: UInt16) async throws -> sACNReceiverSource {
+        guard let subscription = children[universe] else { throw sACNReceiverValidationError.sourceDoesNotExist }
+        return try await subscription.receiver.information(for: sourceId)
+    }
+
+    // MARK: Mutation serialization
+
+    /// Reserves the structural-mutation lock, suspending until any in-flight `add`/`remove`/`updateInterfaces`
+    /// completes. Restores the old serialized group's one-at-a-time guarantee across the actor's suspension
+    /// points, so concurrent mutations cannot interleave into inconsistent child/interface state.
+    private func beginMutation() async {
+        while mutating {
+            await withCheckedContinuation { mutationWaiters.append($0) }
+        }
+        mutating = true
+    }
+
+    /// Releases the structural-mutation lock and resumes the next waiter (if any).
+    private func endMutation() {
+        mutating = false
+        guard !mutationWaiters.isEmpty else { return }
+        mutationWaiters.removeFirst().resume()
+    }
+
+    // MARK: Child fan-in
+
+    /// Builds a subscription that drains a child's `data`/`events`/`debugLog` up into this group's hubs
+    /// (tagging events with the universe). Each drain `Task` holds `self` weakly and captures only the
+    /// child's streams (not the child), so it neither cycles nor retains the child; it ends when the child's
+    /// stream finishes (on remove/dealloc) or the task is cancelled.
+    private func subscription(for receiver: sACNReceiver, universe: UInt16) -> ChildSubscription {
+        let dataStream = receiver.data
+        let eventsStream = receiver.events
+        let debugStream = receiver.debugLog
+
+        let dataTask = Task { [weak self] in
+            for await frame in dataStream { await self?.forward(data: frame) }
+        }
+        let eventsTask = Task { [weak self] in
+            for await event in eventsStream { await self?.forward(event: event, universe: universe) }
+        }
+        let debugTask = Task { [weak self] in
+            for await message in debugStream { await self?.forward(log: message) }
+        }
+
+        return ChildSubscription(receiver: receiver, tasks: [dataTask, eventsTask, debugTask])
+    }
+
+    /// Re-yields a child's merged data (the universe is already in the payload).
+    private func forward(data frame: sACNReceiverMergedData) {
+        dataHub.yield(frame)
+    }
+
+    /// Re-yields a child's event, tagged with the universe.
+    private func forward(event: sACNReceiver.Event, universe: UInt16) {
+        switch event {
+        case .samplingStarted:
+            eventsHub.yield(.samplingStarted(universe: universe))
+        case .samplingEnded:
+            eventsHub.yield(.samplingEnded(universe: universe))
+        case .sourcesLost(let sourceIds):
+            eventsHub.yield(.sourcesLost(sourceIds, universe: universe))
+        case .sourceLimitExceeded:
+            eventsHub.yield(.sourceLimitExceeded(universe: universe))
+        case .socketClosed(let interface, let reason):
+            eventsHub.yield(.socketClosed(interface: interface, reason: reason, universe: universe))
         }
     }
 
-}
-
-/// sACN Receiver Group Extension
-///
-/// sACN Receiver Delegate Conformance.
-extension sACNReceiverGroup: sACNReceiverDelegate {
-    public func receiver(_ receiver: sACNReceiver, interface: String?, socketDidCloseWithError error: Error?) {
-        let delegate = delegate
-        delegateQueue.async { delegate?.receiverGroup(self, interface: interface, socketDidCloseWithError: error, forUniverse: receiver.universe) }
+    /// Re-yields a child's debug log message.
+    private func forward(log message: String) {
+        debugLogHub.yield(message)
     }
 
-    public func receiverMergedData(_ receiver: sACNReceiver, mergedData: sACNReceiverMergedData) {
-        let delegate = delegate
-        delegateQueue.async { delegate?.receiverGroupMergedData(self, mergedData: mergedData) }
+    // MARK: Test seams
+
+    /// Test seam: the child receiver for a universe (drives the merge pipeline via its raw receiver).
+    func child(for universe: UInt16) -> sACNReceiver? {
+        children[universe]?.receiver
     }
 
-    public func receiverStartedSampling(_ receiver: sACNReceiver) {
-        let delegate = delegate
-        delegateQueue.async { delegate?.receiverGroupStartedSampling(self, forUniverse: receiver.universe) }
-    }
-
-    public func receiverEndedSampling(_ receiver: sACNReceiver) {
-        let delegate = delegate
-        delegateQueue.async { delegate?.receiverGroupEndedSampling(self, forUniverse: receiver.universe) }
-    }
-
-    public func receiver(_ receiver: sACNReceiver, lostSources: [UUID]) {
-        let delegate = delegate
-        delegateQueue.async { delegate?.receiverGroup(self, lostSources: lostSources, forUniverse: receiver.universe) }
-    }
-
-    public func receiverExceededSources(_ receiver: sACNReceiver) {
-        let delegate = delegate
-        delegateQueue.async { delegate?.receiverGroupExceededSources(self, forUniverse: receiver.universe) }
-    }
 }

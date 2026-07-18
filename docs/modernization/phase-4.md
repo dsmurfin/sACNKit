@@ -157,9 +157,11 @@ Only lifecycle check-then-act sites suspend (socket bind via `.get()`):
 
 `AsyncStream` is single-consumer, so a small **broadcast hub** (actor-isolated, `[UUID: Continuation]`,
 `onTermination` cleanup) backs each stream; `data`/`events` are computed properties returning a fresh
-subscribed stream. Buffering: **`data` = `.bufferingNewest(1)`** (a slow consumer gets the latest DMX
-frame, matching DMX semantics); **`events`/discovery = `.bufferingNewest(64)`** (best-effort, drop-oldest,
-documented). Yielding replaces every `delegateQueue.async { delegate?... }` site. Per-component `Event`
+subscribed stream. Buffering (shipped): **merged/group `data` = `.bufferingNewest(1)`** (each frame is a
+complete DMX snapshot - a slow consumer gets the latest, not a stale backlog); **`sACNReceiverRaw.data` =
+`.bufferingNewest(64)`** (distinct per-source frames must not collapse into one another);
+**`events`/discovery = `.bufferingNewest(64)`** (best-effort, drop-oldest, documented - a stalled consumer
+can miss an event). Yielding replaces every `delegateQueue.async { delegate?... }` site. Per-component `Event`
 enums (all `Sendable`):
 
 - `sACNReceiverRaw`: `data: AsyncStream<sACNReceiverRawSourceData>`; `Event` = samplingStarted/Ended,
@@ -260,6 +262,26 @@ isolation boundaries, which is exactly the intended constraint.
 
 Dependency order: PR1 -> {PR2, PR3} -> PR4 -> PR5.
 
+**Status: PR1-PR4 done; PR5 remaining.** PR4 shipped as two PRs: **PR-A** (the shared `LifecycleGate` +
+`interfaceDiff` extraction, adopted in `sACNSource`/`sACNDiscoveryReceiver`) and **PR-B** (the receiver
+vertical -> actors). All three receivers are actors: `sACNReceiver` owns its `sACNReceiverRaw` on the same
+runtime and receives its output synchronously on-loop via `RawReceiverSink` (`assumeIsolated`, guarded by an
+init `precondition` that the raw shares the runtime); `sACNReceiverGroup` fans its children in with per-child
+drain `Task`s. Raw's timers are NIO scheduled tasks (heartbeat `scheduleRepeated`; single-shot self-re-arming
+sampling `scheduleOnce`); the generation tokens are gone and the sample tick guards on the `sampling` flag
+(teardown clears it before its close awaits) so a stop cannot re-arm. The 3 receiver delegate files and the
+orphaned `sACNComponent.swift` (two dead delegate protocols) are deleted; `CwlDispatch` and the socket's
+legacy GCD `delegateQueue` path are now unused (deleted in PR5). Tests migrated to `await process(...)` +
+`AsyncStream` collectors (see `StreamCollector` in `TestSupport.swift`).
+
+An adversarial review of PR-B was then remediated (10 findings): the group serializes `add`/`remove`/
+`updateInterfaces` through an async mutex and subscribes to a child's streams **before** `start()` (so its
+initial `.samplingStarted` is not lost); raw `teardown` nils all socket delegates before awaiting the closes
+and clears `sampling` first; `start()` re-seeds sampling for every socket; merged/group `data` reverted to
+`.bufferingNewest(1)` (raw keeps 64); README/DocC swept off the delegate API. New gated regressions cover the
+group `.samplingStarted`-on-add, restart re-sampling, and stop-during-inbound quiescence. Full (145) + gated +
+TSan suites green; `swift-format --strict` clean.
+
 Optional follow-up (defer, not on the critical path): `RawSpan`/`InlineArray` hot-path adoption behind
 `if #available` per the MODERNIZATION.md Phase 4 bullet; and the transmit send-loop micro-costs flagged in
 the PR2 review (finding 10) - per-packet multicast-hostname `String` building + `inet_pton` re-parsing for
@@ -291,8 +313,9 @@ rather than restringifying `239.255.x.x`/`ff18::...` each frame.
 - **Shared-loop fan-out:** many components pinning to one `.next()` loop can land on the same OS thread
   (matches today, where all sockets already use the singleton). Keep consumer work off the loop (consumers
   `for await` on their own tasks).
-- **Stream back-pressure:** `.bufferingNewest(1)` on `data` silently drops frames under a stalled consumer
-  (correct for DMX; documented). `events` is best-effort drop-oldest.
+- **Stream back-pressure:** merged/group `data` is `.bufferingNewest(1)` (latest DMX snapshot; correct for
+  DMX, documented); raw `data` is `.bufferingNewest(64)` (per-source frames must not collapse). `events` is
+  best-effort drop-oldest(64) - a stalled consumer can miss an event such as `.sourcesLost`.
 
 ## Key files
 
