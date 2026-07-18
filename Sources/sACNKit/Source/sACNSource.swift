@@ -85,34 +85,17 @@ public actor sACNSource {
 
     // MARK: Lifecycle
 
-    /// The lifecycle state, reserved synchronously before any `await` so a reentrant call cannot race.
-    ///
-    /// `.starting`, `.reconfiguring` and `.stopping` are exclusive "busy" reservations that make `start`,
-    /// `stop` and `updateInterfaces` mutually exclusive across their suspension points; every mutating
-    /// entry point transitions through this.
-    private enum Lifecycle {
+    /// The reserve-before-await lifecycle state machine (shared with the other component actors). The
+    /// termination drain that reaches idle is source-specific and lives in `sendDataMessages`.
+    private var gate = LifecycleGate()
 
-        case idle, starting, listening, reconfiguring, stopping
-
-    }
-
-    private var lifecycle: Lifecycle = .idle
-
-    /// Whether the source is actively transmitting (sockets live). Derived from `lifecycle` - `.listening`
-    /// or `.reconfiguring` - rather than a separate flag, so the two can never desync.
-    public var isListening: Bool { lifecycle == .listening || lifecycle == .reconfiguring }
+    /// Whether the source is actively transmitting (sockets live).
+    public var isListening: Bool { gate.isListening }
 
     /// Whether the source is currently transmitting universe data (mirrors the last `transmissionStarted`/
     /// `transmissionEnded` event). Lets a subscriber that attached to `events` after `start()` - and so
     /// missed the edge-triggered `transmissionStarted` - seed its state.
     public var isTransmitting: Bool { transmissionState == true }
-
-    /// A stop requested while `.starting` or `.reconfiguring`: the in-flight operation observes it and
-    /// unwinds into the termination drain instead of proceeding.
-    private var stopRequested = false
-
-    /// Continuations from `stop()` callers, all resumed when the termination drain reaches `.idle`.
-    private var stopContinuations: [CheckedContinuation<Void, Never>] = []
 
     /// Whether this source should actively output sACN Universe Discovery and Data messages.
     public var shouldOutput: Bool { _shouldOutput }
@@ -130,7 +113,7 @@ public actor sACNSource {
     ///    - output: Whether the source should output.
     ///
     public func shouldOutput(_ output: Bool) {
-        guard lifecycle == .idle || lifecycle == .listening else { return }
+        guard gate.state == .idle || gate.state == .listening else { return }
         guard _shouldOutput != output else { return }
         if output {
             universes.forEach { $0.reset() }
@@ -264,11 +247,14 @@ public actor sACNSource {
     /// - Throws: An error of type `sACNSourceValidationError` or `sACNComponentSocketError`.
     ///
     public func start(shouldOutput: Bool = true) async throws {
-        guard lifecycle == .idle else {
+        switch gate.reserveStart() {
+        case .reserved:
+            break
+        case .alreadyActive:
             throw sACNSourceValidationError.sourceStarted
+        case .busy:
+            throw sACNSourceValidationError.sourceBusy
         }
-        lifecycle = .starting
-        stopRequested = false
 
         universes.forEach { $0.reset() }
         transmissionState = nil
@@ -278,7 +264,7 @@ public actor sACNSource {
             for (interface, socket) in sockets {
                 try await listenForSocket(socket, on: interface.isEmpty ? nil : interface)
                 // A `stop()` that interleaved this bind closed the sockets; unwind rather than proceed.
-                if stopRequested { throw CancellationError() }
+                if gate.stopRequested { throw CancellationError() }
             }
         } catch {
             // Roll back: close anything opened, return to idle, and release any waiting `stop()` caller.
@@ -290,7 +276,7 @@ public actor sACNSource {
         }
 
         _shouldOutput = shouldOutput
-        lifecycle = .listening
+        gate.toListening()
 
         startDataTransmit()
         startUniverseDiscovery()
@@ -308,13 +294,13 @@ public actor sACNSource {
     /// resume together when the drain completes.
     ///
     public func stop() async {
-        switch lifecycle {
+        switch gate.state {
         case .idle:
             return
         case .starting, .reconfiguring:
             // Supersede the in-flight start/reconfigure: close the sockets (which aborts any in-flight
             // bind) and flag it; that operation observes `stopRequested` and unwinds to idle, resuming us.
-            stopRequested = true
+            gate.requestStop()
             _shouldOutput = false
             sockets.values.forEach { $0.close() }
         case .listening:
@@ -323,28 +309,24 @@ public actor sACNSource {
             break  // a drain is already underway; wait for the same completion below
         }
         // Every non-idle arm resumes here when the drain reaches idle (`reachedIdle`).
-        await withCheckedContinuation { stopContinuations.append($0) }
+        await withCheckedContinuation { gate.addStopWaiter($0) }
     }
 
     /// Enters the termination drain from `.listening`: keeps the transmit timer running to push the 3 E1.31
     /// termination packets, after which `sendDataMessages` reaches idle and resumes the `stop()` callers.
     private func beginTerminationDrain() {
-        lifecycle = .stopping
+        gate.toStopping()
         _shouldOutput = false
         stopUniverseDiscovery()
         stopDataTransmit()
     }
 
-    /// Completes the termination drain: returns to idle, clears the drain flags, and resumes every waiting
-    /// `stop()` caller. Called from the `sendDataMessages` teardown and from `start()`'s stop-superseded
-    /// rollback - the two paths that reach idle.
+    /// Completes the termination drain: returns to idle, clears the source-specific drain flag, and resumes
+    /// every waiting `stop()` caller. Called from the `sendDataMessages` teardown and from `start()`'s
+    /// stop-superseded rollback - the two paths that reach idle.
     private func reachedIdle() {
-        lifecycle = .idle
         shouldTerminate = false
-        stopRequested = false
-        let continuations = stopContinuations
-        stopContinuations.removeAll()
-        continuations.forEach { $0.resume() }
+        gate.reachedIdle().forEach { $0.resume() }
     }
 
     /// Sets the transmission state and emits the matching edge event once per transition. The single owner
@@ -373,12 +355,8 @@ public actor sACNSource {
         precondition(!ipMode.usesIPv6() || !newInterfaces.isEmpty, "At least one interface must be provided for IPv6.")
 
         // Reject a reconfigure that would race an in-flight start/stop/reconfigure.
-        switch lifecycle {
-        case .idle, .listening:
-            break
-        case .starting, .reconfiguring, .stopping:
-            throw sACNSourceValidationError.sourceBusy
-        }
+        let reservation = gate.reserveReconfigure()
+        guard reservation != .busy else { throw sACNSourceValidationError.sourceBusy }
 
         // Reject while a prior reconfigure's socket-termination drain is still marking sockets: the diff
         // would be computed against a socket set that includes terminating keys, and a revert during that
@@ -388,18 +366,12 @@ public actor sACNSource {
             throw sACNSourceValidationError.sourceBusy
         }
 
-        // The keys are `""` (all interfaces) or one per named interface; the two shapes never coexist.
-        let existingKeys = Set(sockets.keys.filter { !$0.isEmpty })
-        let existingInterfaces = sockets.keys.contains("") ? Set<String>() : existingKeys
+        let (existingInterfaces, keysToAdd, keysToRemove) = interfaceDiff(
+            currentKeys: Set(sockets.keys), newInterfaces: newInterfaces)
         guard existingInterfaces != newInterfaces else { return }
 
-        let newKeys: Set<String> = newInterfaces.isEmpty ? [""] : newInterfaces
-        let currentKeys = Set(sockets.keys)
-        let keysToAdd = newKeys.subtracting(currentKeys)
-        let keysToRemove = currentKeys.subtracting(newKeys)
-
         // Idle: no sockets are bound, so there are no awaits - mutate directly with no reservation.
-        guard lifecycle == .listening else {
+        guard reservation == .proceedListening else {
             keysToRemove.forEach { sockets.removeValue(forKey: $0) }
             for key in keysToAdd {
                 sockets[key] = runtime.makeSocket(type: .transmit, ipMode: ipMode, port: 0)
@@ -411,14 +383,14 @@ public actor sACNSource {
         // Listening: reserve `.reconfiguring` and bind every new socket into a temp map first. If any bind
         // fails (or a `stop()` interleaves), discard the temp sockets and leave the live set untouched -
         // all-or-nothing, so a partial failure never leaves a half-bound or shape-broken socket set.
-        lifecycle = .reconfiguring
+        gate.beginReconfigure()
         do {
             var boundSockets: [String: ComponentSocket] = [:]
             do {
                 for key in keysToAdd {
                     let socket = runtime.makeSocket(type: .transmit, ipMode: ipMode, port: 0)
                     try await listenForSocket(socket, on: key.isEmpty ? nil : key)
-                    if stopRequested {
+                    if gate.stopRequested {
                         socket.close()
                         throw CancellationError()
                     }
@@ -443,10 +415,10 @@ public actor sACNSource {
     /// Restores the lifecycle after a `.reconfiguring` reservation: back to `.listening`, or - if a
     /// `stop()` interleaved and set `stopRequested` - into the termination drain that resumes it.
     private func finishReconfigure() {
-        if stopRequested {
+        if gate.stopRequested {
             beginTerminationDrain()
         } else {
-            lifecycle = .listening
+            gate.toListening()
         }
     }
 
@@ -688,7 +660,7 @@ public actor sACNSource {
 
     /// Sends the Universe Discovery messages for this source.
     private func sendUniverseDiscoveryMessage() {
-        guard lifecycle != .idle, _shouldOutput else { return }
+        guard gate.state != .idle, _shouldOutput else { return }
 
         sockets.forEach { _, socket in
             for message in universeDiscoveryMessages {
@@ -711,7 +683,7 @@ public actor sACNSource {
     /// and dropping ticks for the bind duration would starve NULL keep-alives and time the source out at
     /// otherwise-healthy receivers.
     private func sendDataMessages() {
-        guard lifecycle == .listening || lifecycle == .reconfiguring || lifecycle == .stopping else { return }
+        guard gate.state == .listening || gate.state == .reconfiguring || gate.state == .stopping else { return }
 
         let universesToRemove = universes.filter { $0.removeAfterTerminate && $0.shouldTerminate && $0.dirtyCounter < 1 }
         let universesReadyForSocketRemoval = universes.filter { $0.pendingSocketRemoval && $0.dirtyCounter < 1 }
