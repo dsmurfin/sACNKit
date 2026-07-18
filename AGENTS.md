@@ -35,9 +35,11 @@ API, Swift 6, cross-platform incl. Linux) and the current-state baseline.
 
 ## Platforms & toolchain
 
-- Swift tools version: **5.5** today -> **migrating to 6.0 (Swift 6.2 toolchain)** (MODERNIZATION.md Phase 1).
-- Supported platforms: **iOS 12+ / macOS 11+** today -> target **iOS 17 / macOS 14 / tvOS 17 /
-  visionOS 1 + Linux** post-migration (Android/Windows are best-effort stretch targets).
+- Swift tools version: **6.2** (declared in `Package.swift`); language mode is still `.v5` until the
+  Phase 4 Swift 6 cutover (MODERNIZATION.md Phase 4).
+- Supported platforms (current, in `Package.swift`): **iOS 18 / macOS 15 / tvOS 18 / visionOS 2 + Linux**
+  (raised from iOS 17 / macOS 14 / tvOS 17 / visionOS 1 in Phase 4 for `SerialExecutor.checkIsolated`;
+  Android/Windows are best-effort stretch targets).
 - Concurrency: **none today** - GCD serial queues (one per component, doubling as the state mutex) +
   weak-delegate callbacks; no `Sendable`/async. A full actor + `async`/`AsyncStream` redesign under
   Swift 6 strict concurrency is planned (MODERNIZATION.md Phases 2 & 4). Do not assume async APIs exist yet.
