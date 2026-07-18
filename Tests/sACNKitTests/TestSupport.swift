@@ -25,9 +25,14 @@ final class LockedBox<T> {
 /// Drains an `AsyncStream` into a thread-safe, growing buffer for assertions.
 ///
 /// The component actors deliver via `AsyncStream`s rather than delegate callbacks, so the socket-facing
-/// suites subscribe once at construction (before injecting packets) and poll the accumulated elements. The
-/// data hubs buffer `bufferingNewest(64)`, so a burst smaller than that is captured losslessly and in order
-/// even if this collector's drain `Task` lags the producer.
+/// suites subscribe once at construction (before injecting packets) and poll the accumulated elements.
+///
+/// What a collector can observe depends on the hub's buffering. The raw per-source `data` stream and every
+/// `events`/`debugLog` stream buffer `.bufferingNewest(64)`, so a burst smaller than 64 is captured
+/// losslessly and in order even if this collector's drain `Task` lags the producer. The **merged and group
+/// `data`** streams buffer `.bufferingNewest(1)` (each frame is a complete DMX snapshot), so a collector on
+/// those reliably observes only the *latest* frame under lag - assert on latest state (e.g. `waitFor`/`all.last`)
+/// or on `count >= 1`, not on every intermediate frame.
 final class StreamCollector<Element: Sendable> {
 
     private let lock = NSLock()

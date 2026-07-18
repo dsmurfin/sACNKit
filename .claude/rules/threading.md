@@ -46,21 +46,30 @@ flip and the `Vendor/CwlDispatch.swift` deletion are the remaining Phase 4 item 
   (for the embedding merged receiver). One producer, two disjoint sinks, decided at the emit boundary.
 
 ## Group -> children: async-up `Task` fan-in
-- `sACNReceiverGroup` is an actor with its own runtime; each child `sACNReceiver` keeps its own runtime/loop.
-  On `add`, the group spawns **one drain `Task` per child stream** (`data`/`events`/`debugLog`) that
+- `sACNReceiverGroup` is an actor with its own runtime; each child `sACNReceiver` owns a separate runtime -
+  a distinct executor and isolation (the underlying event loops come from the shared singleton group and may
+  coincide, which the async fan-in tolerates; unlike raw+merged, the group and its children never share one
+  runtime). On `add`, the group spawns **one drain `Task` per child stream** (`data`/`events`/`debugLog`) that
   `for await`s the child's stream and re-yields into the group's hubs (tagging the universe). This is a
   one-way async fan-in: a group of actors never synchronously drives an actor child (which would require
-  `await` inside a non-async context). `add` reserves the universe in a `starting: Set` before
-  `await child.start()` and registers only on success; `remove` cancels the drain `Task`s and drops the
+  `await` inside a non-async context). The three structural mutations - `add`/`remove`/`updateInterfaces` -
+  are serialized through an async mutation lock (`beginMutation()`/`endMutation()` + a waiter FIFO), which
+  restores the old serialized group's one-at-a-time guarantee across the actor's suspension points, so
+  concurrent mutations cannot interleave into inconsistent child/interface state. Within `add`, the drain
+  `Task`s are **subscribed before `await child.start()`** (so the child's synchronous `.samplingStarted`
+  emitted during start is not lost), then `children[universe]` is registered **only after** start succeeds
+  (on a throw the subscription's `Task`s are cancelled); `remove` cancels the drain `Task`s and drops the
   child (closing its sockets on dealloc). The drain `Task`s capture the child's **stream** (not the child)
   and `[weak self]`, so they neither retain the child nor cycle; they end when the child's stream finishes.
 
 ## Output streams (`AsyncStream` via `AsyncStreamHub`)
 - Each actor exposes `data`/`events`/`debugLog` as `nonisolated` computed properties backed by an
-  `AsyncStreamHub` (broadcast fan-out; multiple consumers allowed). `events`/`debugLog` buffer
-  `.bufferingNewest(64)`. **`data` buffers `.bufferingNewest(64)`** (raised from the planned `(1)`): a
-  bounded backlog that a characterization test can observe losslessly, still drop-oldest for a truly stalled
-  consumer.
+  `AsyncStreamHub` (broadcast fan-out; multiple consumers allowed). Buffering is component-specific:
+  `events`/`debugLog` (and discovery's `discovery`) buffer `.bufferingNewest(64)`; **merged/group `data`
+  buffers `.bufferingNewest(1)`** (each frame is a complete DMX snapshot, so a slow consumer gets the latest,
+  not a stale backlog); **`sACNReceiverRaw`'s `data` buffers `.bufferingNewest(64)`** (it interleaves frames
+  from distinct sources, which must not collapse into one another). All are drop-oldest for a stalled
+  consumer, so a long-stalled `events` consumer can miss an event such as `.sourcesLost`.
 - Consequences of stream (vs delegate) delivery - do not add stopgap fences:
   - `stop()` is not a delivery barrier: elements already yielded may still be observed after it returns.
   - `information(for:)` reflects current state, not a payload snapshot: it may throw for a source a

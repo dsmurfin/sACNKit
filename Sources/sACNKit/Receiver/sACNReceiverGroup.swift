@@ -30,20 +30,23 @@ import Foundation
 /// number of `sACNReceiver`s behind a single API. All managed receivers share the same interfaces, IP mode
 /// and source limit; instantiate `sACNReceiver`s directly for discrete settings.
 ///
-/// A `sACNReceiverGroup` is an `actor`. Each child `sACNReceiver` runs on its own event loop; the group
-/// consumes each child's streams via a per-child `Task` and re-yields (tagging the universe) into its own
-/// `data`/`events`/`debugLog` streams - a one-way async fan-in, so a group of actors never has to
-/// synchronously drive an actor child.
+/// A `sACNReceiverGroup` is an `actor`. Each child `sACNReceiver` owns its own runtime (its own serial
+/// executor, hence its own isolation); the group consumes each child's streams via a per-child `Task` and
+/// re-yields (tagging the universe) into its own `data`/`events`/`debugLog` streams - a one-way async
+/// fan-in, so a group of actors never has to synchronously drive an actor child. The fan-in is async, so it
+/// stays correct regardless of whether a child's underlying event loop happens to coincide with another's.
 ///
 public actor sACNReceiverGroup {
 
     // MARK: Runtime / isolation
 
-    /// The runtime hosting this actor's isolation (the children each own their own runtime/loop).
+    /// The runtime hosting this actor's isolation. Each child owns a separate runtime (a distinct executor
+    /// and isolation), though the underlying event loops are drawn from a shared group and may coincide.
     nonisolated let runtime: sACNRuntime
 
-    /// Pins this actor to its runtime's serial executor (a NIO event loop). The children each own a separate
-    /// runtime/loop and fan in via async `Task`s, so the group never shares a loop with a child.
+    /// Pins this actor to its runtime's serial executor. Each child owns a separate runtime/executor and
+    /// fans in via async `Task`s, so the group never synchronously drives a child - correct whether or not
+    /// their underlying event loops coincide.
     public nonisolated var unownedExecutor: UnownedSerialExecutor {
         runtime.serialExecutor.asUnownedSerialExecutor()
     }
