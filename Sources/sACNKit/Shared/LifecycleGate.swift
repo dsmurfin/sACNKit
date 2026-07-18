@@ -171,7 +171,10 @@ struct LifecycleGate {
 func interfaceDiff(
     currentKeys: Set<String>, newInterfaces: Set<String>
 ) -> (existingInterfaces: Set<String>, keysToAdd: Set<String>, keysToRemove: Set<String>) {
-    let existingInterfaces = currentKeys.contains("") ? Set<String>() : currentKeys
+    // Enforce the never-mixed shape the callers guarantee: keys are either exactly `[""]` (all interfaces)
+    // or all named. A mixed set would make the `== [""]` test below wrong.
+    assert(!currentKeys.contains("") || currentKeys == [""], "mixed all-interfaces and named socket keys")
+    let existingInterfaces = currentKeys == [""] ? Set<String>() : currentKeys
     let newKeys: Set<String> = newInterfaces.isEmpty ? [""] : newInterfaces
     return (existingInterfaces, newKeys.subtracting(currentKeys), currentKeys.subtracting(newKeys))
 }
