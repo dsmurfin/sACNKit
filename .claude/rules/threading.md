@@ -6,13 +6,13 @@ still use GCD serial queues + weak delegates, with `StrictConcurrency=targeted` 
 (warning-clean; CI builds with warnings-as-errors). The remaining actor conversions land later in Phase 4.
 The GCD contracts below apply to the **receiver** components; do not apply them to the `sACNSource` actor.
 
-## Queue model (receivers)
-- Each socket-owning **receiver** component (`sACNReceiverRaw`, `sACNDiscoveryReceiver`) owns a
-  **`socketDelegateQueue`** (serial) that both receives socket callbacks **and doubles as the state
-  mutex**; nearly all private mutable state - including the `delegate`/`debugDelegate` references -
-  is only touched on that queue. When adding state or methods, keep that invariant. (`sACNSource` no
-  longer follows this - it is an actor; its state is actor-isolated and it reserves a `Lifecycle` enum
-  synchronously before each `await` at its lifecycle sites.)
+## Queue model (GCD receivers)
+- Each socket-owning **GCD receiver** component (`sACNReceiverRaw` only - `sACNDiscoveryReceiver` is now
+  an actor, PR3) owns a **`socketDelegateQueue`** (serial) that both receives socket callbacks **and
+  doubles as the state mutex**; nearly all private mutable state - including the `delegate`/`debugDelegate`
+  references - is only touched on that queue. When adding state or methods, keep that invariant.
+  (`sACNSource` and `sACNDiscoveryReceiver` no longer follow this - they are actors; state is actor-isolated
+  and they reserve a `Lifecycle` enum synchronously before each `await` at their lifecycle sites.)
 - `sACNReceiver` and `sACNReceiverGroup` each own a private serial **`stateQueue`** guarding their
   state (`sources`, mergers, `receivers`); public API uses `performOnStateQueue` (a
   `DispatchSpecificKey` sentinel + `stateQueue.sync`). The state queue must never target the

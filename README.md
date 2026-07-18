@@ -64,14 +64,23 @@ try receiver?.start()
 ```
 
 Use `sACNReceiverGroup` to receive and merge many universes with a single delegate, or
-`sACNReceiverRaw` for un-merged per-source data. `sACNDiscoveryReceiver` reports sources seen via
-universe discovery, and `sACNMerger` is a standalone HTP / per-address-priority merge engine.
+`sACNReceiverRaw` for un-merged per-source data. `sACNMerger` is a standalone HTP /
+per-address-priority merge engine.
 
-The receivers still use delegates (the `sACNSource` actor above is the exception, migrated to
-`async`/`AsyncStream`). Receiver delegate callbacks are delivered asynchronously on the
-`delegateQueue` you provide, in the order packets were processed. A serial queue is recommended;
-internal state is safe even if the queue is concurrent, and you may call back into a component
-(for example `information(for:)`) from within a callback.
+`sACNDiscoveryReceiver` reports sources seen via universe discovery and is a Swift `actor` (like
+`sACNSource`): its lifecycle API is `async`, and discovered sources arrive on its `discovery`
+`AsyncStream` rather than a delegate.
+
+```swift
+let discovery = sACNDiscoveryReceiver()
+Task { for await source in discovery.discovery { print(source.cid, source.universes) } }
+try await discovery.start()
+```
+
+The merged/raw receivers (`sACNReceiver`, `sACNReceiverGroup`, `sACNReceiverRaw`) still use delegates.
+Their callbacks are delivered asynchronously on the `delegateQueue` you provide, in the order packets
+were processed. A serial queue is recommended; internal state is safe even if the queue is concurrent,
+and you may call back into a component (for example `information(for:)`) from within a callback.
 
 Because delivery is asynchronous, `stop()` and `setDelegate(nil)` are not delivery barriers:
 callbacks already enqueued may still arrive after either call returns (`setDelegate(nil)` keeps the

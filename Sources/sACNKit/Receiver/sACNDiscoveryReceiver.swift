@@ -26,92 +26,107 @@ import Foundation
 
 /// sACN Discovery Receiver
 ///
-/// Discovers and provides information on sACN sources.
+/// Discovers and provides information on sACN sources by receiving E1.31-2018 universe discovery messages.
 ///
-/// An E1.31-2018 sACN Receiver which receives universe discovery messages.
-public class sACNDiscoveryReceiver {
+/// A `sACNDiscoveryReceiver` is an `actor` isolated to an internal `sACNRuntime` (the shared NIO event
+/// loop). Its lifecycle and mutation API are `async`; discovered source information arrives on the
+/// `discovery` `AsyncStream`, lifecycle events (source loss, socket closed) on `events`, and debug logs on
+/// the separate `debugLog` stream, rather than via a delegate.
+public actor sACNDiscoveryReceiver {
 
-    // MARK: Socket
+    // MARK: Runtime / isolation
 
-    /// A key used to identify the socket delegate queue for the current execution context.
-    private static let socketDelegateQueueSpecificKey = DispatchSpecificKey<Bool>()
+    /// The runtime hosting this actor's isolation, timers, and sockets.
+    nonisolated let runtime: sACNRuntime
+
+    /// Pins this actor to the runtime's serial executor (the shared NIO event loop), so the transport can
+    /// deliver received packets into the actor's isolation synchronously (`assumeIsolated` from the channel
+    /// handler, no `Task` hop) - see `EventLoopSerialExecutor`.
+    public nonisolated var unownedExecutor: UnownedSerialExecutor {
+        runtime.serialExecutor.asUnownedSerialExecutor()
+    }
+
+    // MARK: Events
+
+    /// An event emitted by a discovery receiver.
+    public enum Event: Sendable {
+
+        /// One or more sources were lost (coalesced to reduce notifications).
+        case sourcesLost([UUID])
+
+        /// A socket closed with an error (per interface).
+        case socketClosed(interface: String?, reason: SocketCloseReason)
+
+    }
+
+    /// The broadcast hub backing `discovery`.
+    private nonisolated let discoveryHub = AsyncStreamHub<sACNDiscoveryReceiverSource>(bufferingPolicy: .bufferingNewest(64))
+
+    /// A stream of discovered source information (CID, name, universe list).
+    ///
+    /// Each access returns an independent subscription. Buffering keeps the most recent 64 updates for a
+    /// slow consumer (per-source, low rate) rather than collapsing to the latest, and debug logs are
+    /// delivered on the separate `debugLog` stream.
+    public nonisolated var discovery: AsyncStream<sACNDiscoveryReceiverSource> { discoveryHub.stream() }
+
+    /// The broadcast hub backing `events`.
+    private nonisolated let eventsHub = AsyncStreamHub<Event>(bufferingPolicy: .bufferingNewest(64))
+
+    /// A stream of receiver lifecycle events. Each access returns an independent subscription.
+    public nonisolated var events: AsyncStream<Event> { eventsHub.stream() }
+
+    /// The broadcast hub backing `debugLog`.
+    private nonisolated let debugLogHub = AsyncStreamHub<String>(bufferingPolicy: .bufferingNewest(64))
+
+    /// A stream of human-readable debug log messages, kept separate from `events` so verbose logging never
+    /// competes with lifecycle events for buffer space. Each access returns an independent subscription.
+    public nonisolated var debugLog: AsyncStream<String> { debugLogHub.stream() }
+
+    // MARK: Lifecycle
+
+    /// The lifecycle state, reserved synchronously before any `await` so a reentrant call cannot race.
+    ///
+    /// `.starting`, `.reconfiguring` and `.stopping` are exclusive "busy" reservations that make `start`,
+    /// `stop` and `updateInterfaces` mutually exclusive across their suspension points.
+    private enum Lifecycle {
+
+        case idle, starting, listening, reconfiguring, stopping
+
+    }
+
+    private var lifecycle: Lifecycle = .idle
+
+    /// Whether the receiver is actively listening. Derived from `lifecycle` - `.listening` or
+    /// `.reconfiguring` - rather than a separate flag, so the two can never desync.
+    public var isListening: Bool { lifecycle == .listening || lifecycle == .reconfiguring }
+
+    /// A stop requested while `.starting` or `.reconfiguring`: the in-flight operation observes it and
+    /// unwinds to idle instead of proceeding.
+    private var stopRequested = false
+
+    /// Continuations from `stop()` callers, all resumed when teardown reaches `.idle`.
+    private var stopContinuations: [CheckedContinuation<Void, Never>] = []
+
+    // MARK: Sockets
 
     /// The Internet Protocol version(s) used by the receiver.
     private let ipMode: sACNIPMode
 
-    /// The queue on which socket notifications occur (also used to protect state).
-    private let socketDelegateQueue: DispatchQueue
-
-    /// The sockets used for communications (one per interface).
-    /// The key for each socket is the interface it is bound to (or an empty string for all interfaces).
-    private var sockets: [String: ComponentSocket]
-
-    /// The socket listening status (thread-safe getter).
-    public var isListening: Bool {
-        get { socketDelegateQueue.sync { _isListening } }
-    }
-
-    /// The private socket listening status.
-    private var _isListening: Bool
-
-    // MARK: Delegate
-
-    /// Changes the receiver delegate of this receiver to the the object passed.
-    ///
-    /// Passing `nil` does not fence in-flight deliveries: a callback already enqueued
-    /// may still be delivered to the previous delegate after this returns.
-    ///
-    /// - Parameters:
-    ///   - delegate: The delegate to receive notifications.
-    ///
-    public func setDelegate(_ delegate: sACNDiscoveryReceiverDelegate?) {
-        if DispatchQueue.getSpecific(key: Self.socketDelegateQueueSpecificKey) == true {
-            self.delegate = delegate
-        } else {
-            socketDelegateQueue.sync { self.delegate = delegate }
-        }
-    }
-
-    /// Changes the debug delegate of this receiver to the the object passed.
-    ///
-    /// - Parameters:
-    ///   - delegate: The delegate to receive notifications.
-    ///
-    public func setDebugDelegate(_ delegate: sACNComponentDebugDelegate?) {
-        if DispatchQueue.getSpecific(key: Self.socketDelegateQueueSpecificKey) == true {
-            self.debugDelegate = delegate
-        } else {
-            socketDelegateQueue.sync { self.debugDelegate = delegate }
-        }
-    }
-
-    /// The delegate which receives notifications from this receiver.
-    private weak var delegate: sACNDiscoveryReceiverDelegate?
-
-    /// The delegate which receives debug log messages from this receiver.
-    private weak var debugDelegate: sACNComponentDebugDelegate?
-
-    /// The queue on which to send delegate notifications.
-    private let delegateQueue: DispatchQueue
+    /// The sockets used for communications (one per interface, keyed by interface or "" for all).
+    private var sockets: [String: ComponentSocket] = [:]
 
     // MARK: General
 
-    /// The discovered sources and their universes:
-    private var sources: [UUID: DiscoveryReceiverSource]
+    /// The discovered sources and their universes.
+    private var sources: [UUID: DiscoveryReceiverSource] = [:]
 
     // MARK: Timers
 
-    /// The leeway used for timing. Informs the OS how accurate timings should be.
-    static let timingLeeway: DispatchTimeInterval = .nanoseconds(1_000_000)
+    /// The main heartbeat interval (500 ms), driving source-loss evaluation.
+    private static let heartbeatInterval: Duration = .milliseconds(500)
 
-    /// The length of time for the main heartbeat (500 ms).
-    private static let heartbeatTime: DispatchTimeInterval = DispatchTimeInterval.milliseconds(500)
-
-    /// The queue on which timers run.
-    static let timerQueue: DispatchQueue = DispatchQueue(label: "com.danielmurfin.sACNKit.discoveryReceiverTimer")
-
-    /// The timer used for checking for source loss.
-    private var heartbeatTimer: DispatchSourceTimer?
+    /// The heartbeat timer.
+    private var heartbeatTask: (any RuntimeTask)?
 
     // MARK: - Initialization
 
@@ -120,203 +135,240 @@ public class sACNDiscoveryReceiver {
     /// - Parameters:
     ///    - ipMode: Optional: IP mode for this receiver (IPv4/IPv6/Both).
     ///    - interfaces: The network interfaces for this receiver. An interface may be a name (e.g. "en1" or "lo0") or the corresponding IP address (e.g. "192.168.4.35").
-    ///    - delegateQueue: A delegate queue on which to receive delegate calls from this receiver.
     ///
     /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interfaces must not be empty.
     ///
-    public init(ipMode: sACNIPMode = .ipv4Only, interfaces: Set<String> = [], delegateQueue: DispatchQueue) {
+    public init(ipMode: sACNIPMode = .ipv4Only, interfaces: Set<String> = []) {
         precondition(!ipMode.usesIPv6() || !interfaces.isEmpty, "At least one interface must be provided for IPv6.")
 
-        // sockets
+        let runtime = NIORuntime()
+        self.runtime = runtime
         self.ipMode = ipMode
-        let socketDelegateQueue = DispatchQueue(label: "com.danielmurfin.sACNKit.discoveryReceiverSocketDelegate")
-        socketDelegateQueue.setSpecific(key: Self.socketDelegateQueueSpecificKey, value: true)
-        self.socketDelegateQueue = socketDelegateQueue
         if interfaces.isEmpty {
-            let socket = NIOComponentSocket(type: .receive, ipMode: ipMode, port: UDP.sdtPort, delegateQueue: socketDelegateQueue)
-            self.sockets = ["": socket]
+            self.sockets = ["": runtime.makeSocket(type: .receive, ipMode: ipMode, port: UDP.sdtPort)]
         } else {
             self.sockets = interfaces.reduce(into: [String: ComponentSocket]()) { dict, interface in
-                let socket = NIOComponentSocket(type: .receive, ipMode: ipMode, port: UDP.sdtPort, delegateQueue: socketDelegateQueue)
-                dict[interface] = socket
+                dict[interface] = runtime.makeSocket(type: .receive, ipMode: ipMode, port: UDP.sdtPort)
             }
         }
-        self._isListening = false
-
-        // delegate
-        self.delegateQueue = delegateQueue
-
-        // general
-        self.sources = [:]
     }
 
     deinit {
-        stop()
+        // The heartbeat task self-cancels when released; the sockets close on dealloc. Finish the hubs so
+        // any active consumers terminate rather than hang.
+        discoveryHub.finish()
+        eventsHub.finish()
+        debugLogHub.finish()
     }
 
-    // MARK: Public API
+    // MARK: - Public API
 
     /// Starts this discovery receiver.
     ///
-    /// The receiver will begin listening for sACN Universe Discovery messages.
+    /// The receiver binds its sockets, joins the universe-discovery multicast group, and begins listening
+    /// for sACN Universe Discovery messages delivered on `discovery`.
     ///
     /// - Throws: An error of type `sACNReceiverValidationError` or `sACNComponentSocketError`.
     ///
-    public func start() throws {
-        try socketDelegateQueue.sync {
-            guard !_isListening else {
-                throw sACNReceiverValidationError.receiverStarted
-            }
-
-            // begin listening
-            try sockets.forEach { interface, socket in
-                try listenForSocket(socket, on: interface.isEmpty ? nil : interface)
-            }
-            self._isListening = true
-
-            // starts the main heartbeat to handle source loss
-            startHeartbeat()
+    public func start() async throws {
+        switch lifecycle {
+        case .idle:
+            break
+        case .listening, .reconfiguring:
+            throw sACNReceiverValidationError.receiverStarted
+        case .starting, .stopping:
+            throw sACNReceiverValidationError.receiverBusy
         }
-    }
-
-    /// Stops this receiver.
-    ///
-    /// The receiver will stop listening for sACN Universe Discovery messages.
-    ///
-    /// This is not a delivery barrier: callbacks already enqueued to the delegate
-    /// queue may still be delivered after this returns.
-    public func stop() {
-        if DispatchQueue.getSpecific(key: Self.socketDelegateQueueSpecificKey) == true {
-            _stop()
-        } else {
-            socketDelegateQueue.sync { _stop() }
-        }
-    }
-
-    /// Performs the stop logic.
-    ///
-    /// Must be called on `socketDelegateQueue`.
-    private func _stop() {
-        dispatchPrecondition(condition: .onQueue(socketDelegateQueue))
-        guard _isListening else { return }
-        _isListening = false
-
-        stopHeartbeat()
-
-        sockets.forEach { interface, socket in
-            socket.delegate = nil
-            socket.stopListening()
-        }
-
+        lifecycle = .starting
+        stopRequested = false
         sources = [:]
+
+        do {
+            for (interface, socket) in sockets {
+                try await listenForSocket(socket, on: interface.isEmpty ? nil : interface)
+                // A `stop()` that interleaved this bind closed the sockets; unwind rather than proceed.
+                if stopRequested { throw CancellationError() }
+            }
+        } catch {
+            // Roll back: close anything opened, return to idle, and release any waiting `stop()` caller.
+            // When a stop superseded the start, report `CancellationError` uniformly - a mid-bind abort
+            // already throws it, but a mid-*join* abort surfaces the socket's `couldNotJoin`, a spurious
+            // multicast failure that is not the real outcome.
+            let superseded = stopRequested
+            sockets.values.forEach { socket in
+                socket.delegate = nil
+                socket.close()
+            }
+            reachedIdle()
+            throw superseded ? CancellationError() : error
+        }
+
+        lifecycle = .listening
+        startHeartbeat()
+    }
+
+    /// Stops this receiver, suspending until teardown completes.
+    ///
+    /// The receiver stops the heartbeat, closes its sockets (leaving the multicast group), and returns to
+    /// idle. From `.listening` this **awaits the actual socket close** - a receiver has nothing to flush -
+    /// so a subsequent `start()` on the fixed sACN port is deterministic. Superseding an in-flight
+    /// `start()`/`updateInterfaces()` instead aborts it and resolves once it unwinds; those channels close
+    /// asynchronously, but `SO_REUSEPORT` keeps an immediate re-bind safe.
+    ///
+    public func stop() async {
+        switch lifecycle {
+        case .idle:
+            return
+        case .starting, .reconfiguring:
+            // Supersede the in-flight start/reconfigure: close the sockets (which aborts any in-flight
+            // bind) and flag it; that operation observes `stopRequested` and unwinds to idle, resuming us.
+            stopRequested = true
+            sockets.values.forEach { $0.close() }
+            await withCheckedContinuation { stopContinuations.append($0) }
+        case .listening:
+            await teardown()
+        case .stopping:
+            // A teardown is already underway; wait for the same completion.
+            await withCheckedContinuation { stopContinuations.append($0) }
+        }
+    }
+
+    /// Tears down from `.listening` (or a superseded `.reconfiguring`): stops the heartbeat, closes every
+    /// socket (awaiting the close), clears state, and reaches idle.
+    private func teardown() async {
+        lifecycle = .stopping
+        stopHeartbeat()
+        for socket in sockets.values {
+            socket.delegate = nil
+            await socket.stopListening()
+        }
+        sources = [:]
+        reachedIdle()
+    }
+
+    /// Returns to idle and resumes every waiting `stop()` caller. Called from `teardown()` and from
+    /// `start()`'s stop-superseded rollback.
+    private func reachedIdle() {
+        lifecycle = .idle
+        stopRequested = false
+        let continuations = stopContinuations
+        stopContinuations.removeAll()
+        continuations.forEach { $0.resume() }
     }
 
     /// Updates the interfaces on which this receiver listens for sACN Universe Discovery messages.
     ///
     /// - Parameters:
-    ///    - interfaces: The new interfaces for this receiver. An interface may be a name (e.g. "en1" or "lo0") or the corresponding IP address (e.g. "192.168.4.35").
-    ///    Empty interfaces means listen on all interfaces (IPv4 only).
+    ///    - newInterfaces: The new interfaces. An interface may be a name (e.g. "en1"/"lo0") or an IP.
+    ///      Empty means all interfaces (IPv4 only).
     ///
     /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interfaces must not be empty.
     ///
-    public func updateInterfaces(_ newInterfaces: Set<String> = []) throws {
+    /// - Throws: `sACNReceiverValidationError.receiverBusy` if a start/stop/reconfigure is in flight;
+    ///   otherwise `sACNComponentSocketError` if a bind fails (the change then rolls back all-or-nothing).
+    ///
+    public func updateInterfaces(_ newInterfaces: Set<String> = []) async throws {
         precondition(!ipMode.usesIPv6() || !newInterfaces.isEmpty, "At least one interface must be provided for IPv6.")
 
-        try socketDelegateQueue.sync {
-            let existingInterfaces = {
-                if let firstSocket = self.sockets.first, firstSocket.key.isEmpty {
-                    return Set<String>()
-                } else {
-                    return Set(self.sockets.keys)
-                }
-            }()
-            guard existingInterfaces != newInterfaces else { return }
+        switch lifecycle {
+        case .idle, .listening:
+            break
+        case .starting, .reconfiguring, .stopping:
+            throw sACNReceiverValidationError.receiverBusy
+        }
 
-            if existingInterfaces.isEmpty {
-                // not possible for IPv6
+        // The keys are `""` (all interfaces) or one per named interface; the two shapes never coexist.
+        let existingInterfaces = sockets.keys.contains("") ? Set<String>() : Set(sockets.keys.filter { !$0.isEmpty })
+        guard existingInterfaces != newInterfaces else { return }
 
-                // remove existing sockets
-                // stops listening on deinit if needed
-                self.sockets.removeAll()
+        let newKeys: Set<String> = newInterfaces.isEmpty ? [""] : newInterfaces
+        let currentKeys = Set(sockets.keys)
+        let keysToAdd = newKeys.subtracting(currentKeys)
+        let keysToRemove = currentKeys.subtracting(newKeys)
 
-                // add each new interfaces
-                for interface in newInterfaces {
-                    let socket = NIOComponentSocket(type: .receive, ipMode: self.ipMode, port: UDP.sdtPort, delegateQueue: self.socketDelegateQueue)
-                    sockets[interface] = socket
-
-                    // attempt to listen
-                    if _isListening {
-                        try listenForSocket(socket, on: interface)
-                    }
-                }
-            } else if newInterfaces.isEmpty {
-                // not possible for IPv6
-
-                // remove existing sockets
-                // stops listening on deinit if needed
-                sockets.removeAll()
-
-                // add socket for all interfaces
-                let socket = NIOComponentSocket(type: .receive, ipMode: self.ipMode, port: UDP.sdtPort, delegateQueue: self.socketDelegateQueue)
-                sockets[""] = socket
-
-                // attempt to listen
-                if _isListening {
-                    try listenForSocket(socket)
-                }
-            } else {
-                let interfacesToRemove = existingInterfaces.subtracting(newInterfaces)
-                let interfacesToAdd = newInterfaces.subtracting(existingInterfaces)
-
-                // remove sockets for interfaces no longer needed
-                // stops listening on deinit if needed
-                for interface in interfacesToRemove {
-                    sockets.removeValue(forKey: interface)
-                }
-
-                // add each new interface
-                for interface in interfacesToAdd {
-                    let socket = NIOComponentSocket(type: .receive, ipMode: self.ipMode, port: UDP.sdtPort, delegateQueue: self.socketDelegateQueue)
-                    sockets[interface] = socket
-
-                    // attempt to listen
-                    if _isListening {
-                        try listenForSocket(socket, on: interface)
-                    }
-                }
+        // Idle: no sockets are bound, so there are no awaits - mutate directly with no reservation.
+        guard lifecycle == .listening else {
+            keysToRemove.forEach { sockets.removeValue(forKey: $0) }
+            for key in keysToAdd {
+                sockets[key] = runtime.makeSocket(type: .receive, ipMode: ipMode, port: UDP.sdtPort)
             }
+            return
+        }
+
+        // Listening: reserve `.reconfiguring` and bind + join every new socket into a temp map first. If any
+        // fails (or a `stop()` interleaves), discard the temp sockets and leave the live set untouched.
+        lifecycle = .reconfiguring
+        var boundSockets: [String: ComponentSocket] = [:]
+        do {
+            for key in keysToAdd {
+                let socket = runtime.makeSocket(type: .receive, ipMode: ipMode, port: UDP.sdtPort)
+                try await listenForSocket(socket, on: key.isEmpty ? nil : key)
+                if stopRequested {
+                    socket.close()
+                    throw CancellationError()
+                }
+                boundSockets[key] = socket
+            }
+        } catch {
+            let superseded = stopRequested
+            boundSockets.values.forEach { $0.close() }
+            await finishReconfigure()
+            // Report a supersede as `CancellationError` (a mid-join abort otherwise surfaces couldNotJoin).
+            throw superseded ? CancellationError() : error
+        }
+
+        // Commit: close the removed sockets, then install the freshly bound ones. Nil the delegate before
+        // the fire-and-forget close so an in-flight datagram from a just-removed interface cannot still
+        // enter `process()` before the async close lands. Fire-and-forget is deliberate here: there is
+        // nothing to flush, and `SO_REUSEPORT` keeps rebinding the fixed port safe.
+        for key in keysToRemove {
+            if let socket = sockets.removeValue(forKey: key) {
+                socket.delegate = nil
+                socket.close()
+            }
+        }
+        for (key, socket) in boundSockets {
+            sockets[key] = socket
+        }
+        await finishReconfigure()
+    }
+
+    /// Restores the lifecycle after a `.reconfiguring` reservation: back to `.listening`, or - if a
+    /// `stop()` interleaved and set `stopRequested` - through teardown to idle (resuming that caller).
+    private func finishReconfigure() async {
+        if stopRequested {
+            await teardown()
+        } else {
+            lifecycle = .listening
         }
     }
 
     // MARK: General
 
-    /// Attempts to start listening for a socket on an optional interface.
+    /// Attempts to start listening for a socket on an optional interface, joining the discovery multicast
+    /// group for each enabled family.
     ///
     /// - Parameters:
     ///    - socket: The socket to start listening.
     ///    - interface: Optional: An optional interface on which to listen (`nil` means all interfaces).
     ///
-    private func listenForSocket(_ socket: ComponentSocket, on interface: String? = nil) throws {
+    private func listenForSocket(_ socket: ComponentSocket, on interface: String? = nil) async throws {
         socket.delegate = self
-        try socket.enableReusePort()
-        try socket.startListening(onInterface: interface)
+        try await socket.startListening(onInterface: interface)
 
-        // attempt to join multicast grousp
-        if ipMode == .ipv4Only || ipMode == .ipv4And6 {
-            let hostname = IPv4.universeDiscoveryHostname
+        if ipMode.usesIPv4() {
             do {
-                try socket.join(multicastGroup: hostname)
+                try await socket.join(multicastGroup: IPv4.universeDiscoveryHostname)
             } catch {
-                socket.stopListening()
+                await socket.stopListening()
                 throw error
             }
         }
-        if ipMode == .ipv6Only || ipMode == .ipv4And6 {
-            let hostname = IPv6.universeDiscoveryHostname
+        if ipMode.usesIPv6() {
             do {
-                try socket.join(multicastGroup: hostname)
+                try await socket.join(multicastGroup: IPv6.universeDiscoveryHostname)
             } catch {
-                socket.stopListening()
+                await socket.stopListening()
                 throw error
             }
         }
@@ -324,26 +376,29 @@ public class sACNDiscoveryReceiver {
 
     // MARK: Timers
 
-    /// Starts the main heartbeat timer, which handles source loss.
+    /// Starts the main heartbeat, which drives source-loss evaluation.
     private func startHeartbeat() {
-        let timer = DispatchSource.repeatingTimer(interval: Self.heartbeatTime, leeway: Self.timingLeeway, queue: Self.timerQueue) { [weak self] in
-            if let _ = self?.heartbeatTimer {
-                self?.socketDelegateQueue.async {
-                    self?.checkForSourceLoss()
-                }
-            }
+        heartbeatTask = runtime.scheduleRepeated(after: Self.heartbeatInterval, every: Self.heartbeatInterval) { [weak self] in
+            self?.assumeIsolated { $0.heartbeatTick() }
         }
-        heartbeatTimer = timer
     }
 
-    /// Stops the main heartbeat timer.
+    /// Stops the main heartbeat.
     private func stopHeartbeat() {
-        heartbeatTimer?.cancel()
-        heartbeatTimer = nil
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
     }
 
-    /// Checks for source loss.
-    private func checkForSourceLoss() {
+    /// The heartbeat tick: evaluates source loss while listening (guarded so a tick that outlived the
+    /// listening window does nothing).
+    private func heartbeatTick() {
+        guard lifecycle == .listening || lifecycle == .reconfiguring else { return }
+        checkForSourceLoss()
+    }
+
+    /// Checks for source loss, coalescing every lost source into a single `.sourcesLost` event and removing
+    /// them. Internal (not lifecycle-guarded) so the loss path can be characterization-tested via the seam.
+    func checkForSourceLoss() {
         var removeLostSources: Set<UUID> = []
         sources.forEach { id, source in
             if source.isTimerExpired {
@@ -351,16 +406,26 @@ public class sACNDiscoveryReceiver {
             }
         }
 
-        // notify all lost sources
         if !removeLostSources.isEmpty {
-            let delegate = delegate
-            delegateQueue.async { delegate?.discoveryReceiver(self, lostSources: Array(removeLostSources)) }
+            eventsHub.yield(.sourcesLost(Array(removeLostSources)))
         }
 
-        // remove any expired sources
         removeLostSources.forEach { sourceId in
             sources.removeValue(forKey: sourceId)
         }
+    }
+
+    // MARK: Test seams
+
+    /// Test seam: the number of sources currently tracked (for asserting discovery/source-loss state).
+    var trackedSourceCount: Int {
+        sources.count
+    }
+
+    /// Test seam: forces every tracked source's loss timer to expire, so the source-loss path can be
+    /// exercised without waiting the 20 s discovery timeout. `interval: 0` means "already expired".
+    func expireAllSourceTimersForTesting() {
+        sources.values.forEach { $0.timer.start(interval: 0) }
     }
 
 }
@@ -375,32 +440,29 @@ extension sACNDiscoveryReceiver {
 
     /// Processes data as sACN.
     ///
+    /// Internal so the receiver's paged-assembly behavior can be characterization-tested by injecting
+    /// packets directly (`await receiver.process(data:)`).
+    ///
     /// - Parameters:
     ///    - data: The data to process.
-    ///    - ipFamily: The `ComponentSocketIPFamily` of the source of the message.
-    ///    - socketId: The identifier of the socket on which this message was received.
-    ///    - hostname: The hostname (address) of the source of the message.
     ///
-    private func process(data: Data, ipFamily: ComponentSocketIPFamily, socketId: UUID, hostname: String) {
+    func process(data: Data) {
         do {
             let rootLayer = try RootLayer.parse(fromData: data)
 
             switch rootLayer.vector {
             case .extended:
-                try processExtendedPacket(rootLayer: rootLayer, ipFamily: ipFamily, socketId: socketId, hostname: hostname)
+                try processExtendedPacket(rootLayer: rootLayer)
             case .data:
                 // handled by sACNReceiverRaw
                 break
             }
         } catch let error as RootLayerValidationError {
-            let debugDelegate = debugDelegate
-            delegateQueue.async { debugDelegate?.debugLog(error.logDescription) }
-        } catch let error as DataFramingLayerValidationError {
-            let debugDelegate = debugDelegate
-            delegateQueue.async { debugDelegate?.debugLog(error.logDescription) }
-        } catch let error as DMPLayerValidationError {
-            let debugDelegate = debugDelegate
-            delegateQueue.async { debugDelegate?.debugLog(error.logDescription) }
+            debugLogHub.yield(error.logDescription)
+        } catch let error as UniverseDiscoveryFramingLayerValidationError {
+            debugLogHub.yield(error.logDescription)
+        } catch let error as UniverseDiscoveryLayerValidationError {
+            debugLogHub.yield(error.logDescription)
         } catch {
             // unknown error
         }
@@ -412,23 +474,12 @@ extension sACNDiscoveryReceiver {
     ///
     /// - Parameters:
     ///    - rootLayer: The root layer to process.
-    ///    - ipFamily: The `ComponentSocketIPFamily` of the source of the message.
-    ///    - socketId: The identifier of the socket on which this message was received.
-    ///    - hostname: The hostname (address) of the source of the message.
     ///
-    private func processExtendedPacket(rootLayer: RootLayer, ipFamily: ComponentSocketIPFamily, socketId: UUID, hostname: String) throws {
-        do {
-            let framingLayer = try UniverseDiscoveryFramingLayer.parse(fromData: rootLayer.data)
-            let discoveryLayer = try UniverseDiscoveryLayer.parse(fromData: framingLayer.data)
+    private func processExtendedPacket(rootLayer: RootLayer) throws {
+        let framingLayer = try UniverseDiscoveryFramingLayer.parse(fromData: rootLayer.data)
+        let discoveryLayer = try UniverseDiscoveryLayer.parse(fromData: framingLayer.data)
 
-            processUniverseDiscovery(cid: rootLayer.cid, name: framingLayer.sourceName, discoveryLayer: discoveryLayer)
-        } catch {
-            // try to parse extended sync here if implemented
-            // let framingLayer = try UniverseSyncFramingLayer etc.
-
-            // throw the error
-            throw error
-        }
+        processUniverseDiscovery(cid: rootLayer.cid, name: framingLayer.sourceName, discoveryLayer: discoveryLayer)
     }
 
     /// Processes an sACN universe discovery packet.
@@ -492,10 +543,8 @@ extension sACNDiscoveryReceiver {
 
                         if source.dirty {
                             source.dirty = false
-                            source.lastNotifiedUniverseCount = source.universeCount
                             let info = sACNDiscoveryReceiverSource(cid: cid, name: name, universes: source.universes)
-                            let delegate = delegate
-                            delegateQueue.async { delegate?.discoveryReceiverReceivedInfo(self, sourceInformation: info) }
+                            discoveryHub.yield(info)
                         }
                     }
                 }
@@ -503,10 +552,11 @@ extension sACNDiscoveryReceiver {
         }
     }
 
-    /// Creates a new discovery source with the information provided, and starts timer as required.
+    /// Creates a new discovery source with the information provided, and starts its timer.
     ///
     /// - Parameters:
     ///    - cid: The unique identifier of the source.
+    ///    - name: The name of the source.
     ///
     private func createDiscoverySource(cid: UUID, name: String) {
         let source = DiscoveryReceiverSource(name: name)
@@ -519,45 +569,29 @@ extension sACNDiscoveryReceiver {
 // MARK: -
 // MARK: -
 
-/// sACNDiscoveryReceiver Extension
-///
 /// `ComponentSocketDelegate` conformance.
+///
+/// The receiver's sockets are actor-path sockets (`sACNRuntime.makeSocket`): they deliver on the event loop
+/// this actor is isolated to, so these `nonisolated` methods `assumeIsolated` into the actor with no hop.
+///
 extension sACNDiscoveryReceiver: ComponentSocketDelegate {
-    /// Called when a message has been received.
-    ///
-    /// - Parameters:
-    ///    - socket: The socket which received a message.
-    ///    - data: The message as `Data`.
-    ///    - sourceHostname: The hostname of the source of the message.
-    ///    - sourcePort: The UDP port of the source of the message.
-    ///    - ipFamily: The `ComponentSocketIPFamily` of the source of the message.
-    ///
-    func receivedMessage(
+
+    nonisolated func receivedMessage(
         for socket: ComponentSocket, withData data: Data, sourceHostname: String, sourcePort: UInt16, ipFamily: ComponentSocketIPFamily
     ) {
-        process(data: data, ipFamily: ipFamily, socketId: socket.id, hostname: sourceHostname)
+        assumeIsolated { $0.process(data: data) }
     }
 
-    /// Called when the socket was closed.
-    ///
-    /// - Parameters:
-    ///    - socket: The socket which was closed.
-    ///    - error: An optional error which occured when the socket was closed.
-    ///
-    func socket(_ socket: ComponentSocket, socketDidCloseWith reason: SocketCloseReason) {
-        guard self._isListening else { return }
-        let delegate = delegate
-        delegateQueue.async { delegate?.discoveryReceiver(self, interface: socket.interface, socketDidCloseWithError: reason) }
+    nonisolated func socket(_ socket: ComponentSocket, socketDidCloseWith reason: SocketCloseReason) {
+        let interface = socket.interface
+        assumeIsolated { receiver in
+            guard receiver.isListening else { return }
+            receiver.eventsHub.yield(.socketClosed(interface: interface, reason: reason))
+        }
     }
 
-    /// Called when a debug socket log is produced.
-    ///
-    /// - Parameters:
-    ///    - socket: The socket for which this log event occured.
-    ///    - logMessage: The debug message.
-    ///
-    func debugLog(for socket: ComponentSocket, with logMessage: String) {
-        let debugDelegate = debugDelegate
-        delegateQueue.async { debugDelegate?.debugSocketLog(logMessage) }
+    nonisolated func debugLog(for socket: ComponentSocket, with logMessage: String) {
+        assumeIsolated { $0.debugLogHub.yield(logMessage) }
     }
+
 }

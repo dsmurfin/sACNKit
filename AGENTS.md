@@ -22,7 +22,9 @@ API, Swift 6, cross-platform incl. Linux) and the current-state baseline.
   - `Source/` - sACN transmit: `sACNSource` (an `actor` with an `async` API + `events`/`debugLog`
     `AsyncStream`s; migrated in Phase 4 PR2), `SourceUniverse`.
   - `Receiver/` (+ `Receiver/Delegate/`) - receive stack: `sACNReceiverRaw` (engine), `sACNReceiver`,
-    `sACNReceiverGroup`, `sACNDiscoveryReceiver`, and their delegate/data types.
+    `sACNReceiverGroup` (still GCD + delegates), and `sACNDiscoveryReceiver` (an `actor` with
+    `discovery`/`events`/`debugLog` `AsyncStream`s; migrated in Phase 4 PR3). `Receiver/Delegate/` holds the
+    remaining GCD-receiver delegate protocols + the (still-used) `Sendable` data types.
   - `Merger/` - standalone HTP/priority merge engine: `sACNMerger`, `MergerSource`.
   - `Layers/` - E1.31 wire-format layers (Root / DataFraming / DMP / UniverseDiscovery) as value
     types with `createAsData`/`parse` + typed validation errors; byte offsets centralized per layer.
@@ -49,9 +51,9 @@ API, Swift 6, cross-platform incl. Linux) and the current-state baseline.
   not add GCD-queue/sentinel patterns to the `sACNSource` actor.
 - Networking: **SwiftNIO** (`Shared/NIOComponentSocket.swift`) behind the internal `ComponentSocket`
   protocol; interface strings are resolved to NIO devices/addresses by `NetworkInterfaceResolver`.
-  The transport migration (Phase 3) is done; the `sACNSource` actor's timers already run on NIO scheduled
-  tasks, while the GCD/`CwlDispatch` **receiver** timers run until their Phase 4 actor conversion.
-  Linux is now a supported build/test target (MODERNIZATION.md).
+  The transport migration (Phase 3) is done; the `sACNSource` and `sACNDiscoveryReceiver` actors' timers
+  already run on NIO scheduled tasks, while only `sACNReceiverRaw`'s GCD/`CwlDispatch` timers run until its
+  Phase 4 actor conversion. Linux is now a supported build/test target (MODERNIZATION.md).
 
 ## Conventions
 

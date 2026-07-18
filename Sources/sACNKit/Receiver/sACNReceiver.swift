@@ -438,6 +438,9 @@ public enum sACNReceiverValidationError: LocalizedError, Sendable {
     /// The receiver is started.
     case receiverStarted
 
+    /// The receiver is busy with an in-flight start, stop or interface reconfiguration.
+    case receiverBusy
+
     /// The universe number is invalid.
     case universeNumberInvalid
 
@@ -449,6 +452,8 @@ public enum sACNReceiverValidationError: LocalizedError, Sendable {
         switch self {
         case .receiverStarted:
             return "The receiver is already started"
+        case .receiverBusy:
+            return "The receiver is busy starting, stopping or reconfiguring"
         case .universeNumberInvalid:
             return "The universe number is invalid"
         case .sourceDoesNotExist:
