@@ -26,22 +26,78 @@ import Foundation
 
 /// sACN Receiver
 ///
-/// Combines the functionality of `sACNReceiverRaw` and `sACNMerger`.
+/// Combines the functionality of `sACNReceiverRaw` and `sACNMerger`, receiving and merging (HTP +
+/// per-address priority) sACN messages from a single universe.
 ///
-/// An E1.31-2018 sACN Receiver which receives and merges sACN Messages from a single universe.
+/// A `sACNReceiver` is an `actor` that owns a `sACNReceiverRaw` on the **same** runtime/event loop, so the
+/// raw receiver delivers each packet into the merge synchronously on the loop (via `RawReceiverSink`) with
+/// no `Task` hop - the actor equivalent of the previous shared state queue. Merged output arrives on the
+/// `data` `AsyncStream`, lifecycle events on `events`, and debug logs on `debugLog`, rather than via a
+/// delegate.
 ///
-/// Provides merging of DMX512-A NULL start code (0x00) data.
-/// It also supports per-address priority start code (0xdd) merging.
-public class sACNReceiver {
+public actor sACNReceiver {
 
-    /// A key used to identify the state queue for the current execution context.
-    private static let stateQueueSpecificKey = DispatchSpecificKey<Bool>()
+    // MARK: Runtime / isolation
+
+    /// The runtime hosting this actor's isolation - **shared with `receiver`** so the raw receiver's on-loop
+    /// `assumeIsolated` sink delivery into this actor is valid.
+    nonisolated let runtime: sACNRuntime
+
+    /// Pins this actor to the runtime's serial executor (the shared NIO event loop) - the same loop its owned
+    /// `sACNReceiverRaw` runs on, so the raw delivers into the merge synchronously on-loop.
+    public nonisolated var unownedExecutor: UnownedSerialExecutor {
+        runtime.serialExecutor.asUnownedSerialExecutor()
+    }
+
+    // MARK: Events
+
+    /// An event emitted by a receiver.
+    public enum Event: Sendable {
+
+        /// The initial sampling period for the universe began.
+        case samplingStarted
+
+        /// The initial sampling period for the universe ended.
+        case samplingEnded
+
+        /// One or more sources were lost (coalesced).
+        case sourcesLost([UUID])
+
+        /// The receiver's source limit was reached (a new source was dropped).
+        case sourceLimitExceeded
+
+        /// A socket closed with an error (per interface).
+        case socketClosed(interface: String?, reason: SocketCloseReason)
+
+    }
+
+    /// The broadcast hub backing `data`. Buffers newest-1: each merged frame is a complete DMX snapshot, so a
+    /// slow consumer should get the latest frame rather than replay a backlog of stale ones.
+    private nonisolated let dataHub = AsyncStreamHub<sACNReceiverMergedData>(bufferingPolicy: .bufferingNewest(1))
+
+    /// A stream of merged universe data. Each access returns an independent subscription.
+    public nonisolated var data: AsyncStream<sACNReceiverMergedData> { dataHub.stream() }
+
+    /// The broadcast hub backing `events`.
+    private nonisolated let eventsHub = AsyncStreamHub<Event>(bufferingPolicy: .bufferingNewest(64))
+
+    /// A stream of receiver lifecycle events. Each access returns an independent subscription. Best-effort,
+    /// drop-oldest (buffers newest-64): a consumer that stalls for long enough can miss an event such as
+    /// `.sourcesLost` (a delta from the old never-drop delegate callbacks).
+    public nonisolated var events: AsyncStream<Event> { eventsHub.stream() }
+
+    /// The broadcast hub backing `debugLog`.
+    private nonisolated let debugLogHub = AsyncStreamHub<String>(bufferingPolicy: .bufferingNewest(64))
+
+    /// A stream of human-readable debug log messages. Each access returns an independent subscription.
+    public nonisolated var debugLog: AsyncStream<String> { debugLogHub.stream() }
+
+    // MARK: General
 
     /// The universe for this receiver.
     public let universe: UInt16
 
-    /// The receiver.
-    /// Internal to allow tests to drive the merge pipeline without sockets.
+    /// The raw receiver. Internal so tests can drive the merge pipeline via `receiver.process(...)`.
     let receiver: sACNReceiverRaw
 
     /// The merger.
@@ -51,186 +107,142 @@ public class sACNReceiver {
     private let samplingMerger: sACNMerger
 
     /// The sources that have been received.
-    private var sources: [UUID: ReceiverSource]
+    private var sources: [UUID: ReceiverSource] = [:]
 
     /// The number of sources which are pending.
     private var numberOfPendingSources = 0
 
-    /// Whether the merger is sampling.
-    private var isSampling: Bool = true
-
-    /// The receiver listening status.
+    /// Whether this receiver is actively listening (delegates to the raw receiver, which shares this loop).
     public var isListening: Bool {
-        receiver.isListening
-    }
-
-    // MARK: Delegate
-
-    /// Changes the receiver delegate of this receiver to the the object passed.
-    ///
-    /// Passing `nil` does not fence in-flight deliveries: a callback already enqueued
-    /// may still be delivered to the previous delegate after this returns.
-    ///
-    /// - Parameters:
-    ///   - delegate: The delegate to receive notifications.
-    ///
-    public func setDelegate(_ delegate: sACNReceiverDelegate?) {
-        performOnStateQueue {
-            self.delegate = delegate
-        }
-    }
-
-    /// Changes the debug delegate of this receiver to the the object passed.
-    ///
-    /// - Parameters:
-    ///   - delegate: The delegate to receive notifications.
-    ///
-    public func setDebugDelegate(_ delegate: sACNComponentDebugDelegate?) {
-        performOnStateQueue {
-            self.debugDelegate = delegate
-        }
-    }
-
-    /// The delegate which receives notifications from this receiver merger.
-    private weak var delegate: sACNReceiverDelegate?
-
-    /// The delegate which receives debug log messages from this receiver.
-    private weak var debugDelegate: sACNComponentDebugDelegate?
-
-    /// The queue on which to send delegate notifications.
-    private let delegateQueue: DispatchQueue
-
-    /// The serial queue on which state is mutated.
-    ///
-    /// State stays serialized on this queue even if the client's delegate queue is
-    /// concurrent; delegate notifications hop asynchronously to the delegate queue.
-    private let stateQueue: DispatchQueue
-
-    /// Executes work synchronized on the state queue, immediately when already on it.
-    private func performOnStateQueue<T>(_ work: () throws -> T) rethrows -> T {
-        if DispatchQueue.getSpecific(key: Self.stateQueueSpecificKey) == true {
-            try work()
-        } else {
-            try stateQueue.sync { try work() }
-        }
+        get async { await receiver.isListening }
     }
 
     // MARK: - Initialization
 
-    /// Creates a new receiver to receive sACN for a universe.
+    /// Creates a new receiver to receive merged sACN for a universe.
     ///
-    /// If the universe provided is not valid, this initializes to nil.
+    /// If the universe provided is not valid, this initializes to `nil`.
     ///
     /// - Parameters:
     ///    - ipMode: Optional: IP mode for this receiver (IPv4/IPv6/Both).
     ///    - interfaces: The network interfaces for this receiver. An interface may be a name (e.g. "en1" or "lo0") or the corresponding IP address (e.g. "192.168.4.35").
     ///    - universe: The universe this receiver listens to.
-    ///    - sourceLimit: The number of sources this receiver is able to process. This will be dependent on the hardware on which the receiver is running. Defaults to `4`.
+    ///    - sourceLimit: The number of sources this receiver is able to process (defaults to `4`).
     ///    - filterPreviewData: Optional: Whether source preview data should be filtered out (defaults to `true`).
-    ///    - filtersCIDs: Optional: A list of CIDs which should be ignored (defaults to none).
-    ///    - delegateQueue: A delegate queue on which to receive delegate calls from this receiver.
+    ///    - filterCIDs: Optional: A list of CIDs which should be ignored (defaults to none).
     ///
     /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interfaces must not be empty.
     ///
-    public convenience init?(
-        ipMode: sACNIPMode = .ipv4Only, interfaces: Set<String> = [], universe: UInt16, sourceLimit: Int? = 4, filterPreviewData: Bool = true,
-        filterCIDs: Set<UUID> = [], delegateQueue: DispatchQueue
+    public init?(
+        ipMode: sACNIPMode = .ipv4Only, interfaces: Set<String> = [], universe: UInt16, sourceLimit: Int? = 4,
+        filterPreviewData: Bool = true, filterCIDs: Set<UUID> = []
     ) {
         self.init(
             ipMode: ipMode, interfaces: interfaces, universe: universe, sourceLimit: sourceLimit, filterPreviewData: filterPreviewData,
-            filterCIDs: filterCIDs, delegateQueue: delegateQueue, sourceLossTimeout: sACNReceiverRaw.sourceLossTimeout,
+            filterCIDs: filterCIDs, sourceLossTimeout: sACNReceiverRaw.sourceLossTimeout,
             perAddressPriorityWait: sACNReceiverRaw.perAddressPriorityWait)
     }
 
-    /// Creates a new receiver, additionally allowing the timing constants to be overridden.
-    ///
-    /// Internal seam so tests can exercise timing-driven behavior quickly.
-    ///
+    /// Creates a new receiver, additionally allowing the timing constants to be overridden. Internal seam so
+    /// tests can exercise timing-driven behavior quickly.
     init?(
         ipMode: sACNIPMode, interfaces: Set<String>, universe: UInt16, sourceLimit: Int?, filterPreviewData: Bool,
-        filterCIDs: Set<UUID>, delegateQueue: DispatchQueue, sourceLossTimeout: UInt64, perAddressPriorityWait: UInt64
+        filterCIDs: Set<UUID>, sourceLossTimeout: UInt64, perAddressPriorityWait: UInt64
     ) {
         precondition(!ipMode.usesIPv6() || !interfaces.isEmpty, "At least one interface must be provided for IPv6.")
-
-        // the universe provided must be valid
         guard universe.validUniverse() else { return nil }
 
-        self.universe = universe
-        let stateQueue = DispatchQueue(label: "com.danielmurfin.sACNKit.receiverState-\(universe)")
-        stateQueue.setSpecific(key: Self.stateQueueSpecificKey, value: true)
-        self.stateQueue = stateQueue
+        // The raw receiver MUST share this receiver's runtime: the merge runs synchronously on-loop via the
+        // `RawReceiverSink`, whose `assumeIsolated` is only valid because both actors share this executor.
+        let runtime = NIORuntime()
         guard
             let receiver = sACNReceiverRaw(
-                ipMode: ipMode, interfaces: interfaces, universe: universe, sourceLimit: sourceLimit, filterPreviewData: filterPreviewData,
-                filterCIDs: filterCIDs, delegateQueue: stateQueue, sourceLossTimeout: sourceLossTimeout,
+                runtime: runtime, ipMode: ipMode, interfaces: interfaces, universe: universe, sourceLimit: sourceLimit,
+                filterPreviewData: filterPreviewData, filterCIDs: filterCIDs, sourceLossTimeout: sourceLossTimeout,
                 perAddressPriorityWait: perAddressPriorityWait)
         else { return nil }
+
+        self.runtime = runtime
+        self.universe = universe
         self.receiver = receiver
         let config = sACNMergerConfig(sourceLimit: sourceLimit)
-        merger = sACNMerger(id: universe, config: config)
-        samplingMerger = sACNMerger(id: universe, config: config)
-        sources = [:]
-        self.delegateQueue = delegateQueue
+        self.merger = sACNMerger(id: universe, config: config)
+        self.samplingMerger = sACNMerger(id: universe, config: config)
     }
 
-    // MARK: Public API
-
-    /// Starts this receiver.
-    ///
-    /// The receiver will begin listening for sACN Data messages and provide
-    /// merged output using the delegate.
-    ///
-    /// - Throws: An error of type `sACNReceiverValidationError` or `sACNComponentSocketError`.
-    ///
-    public func start() throws {
-        receiver.setDelegate(self)
-        try receiver.start()
+    deinit {
+        dataHub.finish()
+        eventsHub.finish()
+        debugLogHub.finish()
     }
 
-    /// Stops this receiver.
+    // MARK: - Public API
+
+    /// Starts this receiver: begins listening for sACN Data messages and providing merged output on `data`.
     ///
-    /// The receiver will stop listening for sACN Data messages and cease
-    /// providing merged output.
+    /// - Throws: `sACNReceiverValidationError` or `sACNComponentSocketError`.
     ///
-    /// This is not a delivery barrier: callbacks already enqueued to the delegate
-    /// queue may still be delivered after this returns.
+    public func start() async throws {
+        await receiver.setSink(self)
+        try await receiver.start()
+    }
+
+    /// Stops this receiver, suspending until teardown completes.
     ///
-    /// To receive again, prefer creating a fresh receiver instead of restarting this
-    /// one: previously learned sources are not cleared from the merged output when
-    /// the receiver is stopped, so a restart republishes them.
+    /// Previously-learned sources are not cleared from the merged output when the receiver stops, so a
+    /// restart republishes them - prefer creating a fresh receiver to receive again.
     ///
-    public func stop() {
-        receiver.stop()
+    public func stop() async {
+        await receiver.stop()
     }
 
     /// Updates the interfaces on which this receiver listens for sACN Data messages.
     ///
     /// - Parameters:
-    ///    - interfaces: The new interfaces for this receiver. An interface may be a name (e.g. "en1" or "lo0") or the corresponding IP address (e.g. "192.168.4.35").
-    ///    Empty interfaces means listen on all interfaces (IPv4 only).
+    ///    - newInterfaces: The new interfaces. Empty means all interfaces (IPv4 only).
     ///
     /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interfaces must not be empty.
     ///
-    public func updateInterfaces(_ newInterfaces: Set<String> = []) throws {
-        try receiver.updateInterfaces(newInterfaces)
+    /// - Throws: `sACNReceiverValidationError` or `sACNComponentSocketError`.
+    ///
+    public func updateInterfaces(_ newInterfaces: Set<String> = []) async throws {
+        try await receiver.updateInterfaces(newInterfaces)
     }
 
-    /// Retrieves source information such as CID, IP Address and name using a sources identifier.
+    /// Retrieves source information (CID, IP address, name) for a source identifier.
     ///
-    ///- Parameters:
-    ///   - sourceId: The identifier of the source.
+    /// Reflects current state rather than a callback payload's snapshot, so it may throw for a source a
+    /// just-delivered payload listed as active.
     ///
-    /// - Throws: An `sACNReceiverValidationError` if the source cannot be found.
+    /// - Parameters:
+    ///    - sourceId: The identifier of the source.
+    ///
+    /// - Throws: `sACNReceiverValidationError.sourceDoesNotExist` if the source cannot be found.
     ///
     /// - Returns: Source information.
     ///
-    /// May be called from any queue, including from within delegate callbacks.
-    /// Reflects current state rather than a callback payload's snapshot, so it may
-    /// throw for a source a just-delivered payload listed as active.
     public func information(for sourceId: UUID) throws -> sACNReceiverSource {
-        try performOnStateQueue {
-            guard let source = sources[sourceId] else { throw sACNReceiverValidationError.sourceDoesNotExist }
-            return sACNReceiverSource(receiverSource: source)
+        guard let source = sources[sourceId] else { throw sACNReceiverValidationError.sourceDoesNotExist }
+        return sACNReceiverSource(receiverSource: source)
+    }
+
+    // MARK: Raw event handling
+
+    /// Dispatches a raw receiver event (delivered synchronously via the sink) to the merge handlers.
+    private func handle(rawEvent: sACNReceiverRaw.Event) {
+        switch rawEvent {
+        case .samplingStarted:
+            samplingStarted()
+        case .samplingEnded:
+            samplingEnded()
+        case .sourcesLost(let sourceIds):
+            sourcesLost(sourceIds)
+        case .perAddressPriorityLost(let sourceId):
+            perAddressPriorityLost(for: sourceId)
+        case .sourceLimitExceeded:
+            eventsHub.yield(.sourceLimitExceeded)
+        case .socketClosed(let interface, let reason):
+            eventsHub.yield(.socketClosed(interface: interface, reason: reason))
         }
     }
 
@@ -286,15 +298,11 @@ public class sACNReceiver {
 
     /// The receiver started sampling.
     private func samplingStarted() {
-        isSampling = true
-        let delegate = delegate
-        delegateQueue.async { delegate?.receiverStartedSampling(self) }
+        eventsHub.yield(.samplingStarted)
     }
 
     /// The receiver ended sampling.
     private func samplingEnded() {
-        isSampling = false
-
         sources.forEach { cid, source in
             guard source.sampling else { return }
             guard let sourceData = samplingMerger.source(identified: cid) else { return }
@@ -326,14 +334,13 @@ public class sACNReceiver {
             notifyMerge()
         }
 
-        let delegate = delegate
-        delegateQueue.async { delegate?.receiverEndedSampling(self) }
+        eventsHub.yield(.samplingEnded)
     }
 
     /// The receiver lost sources.
     ///
     /// - Parameters:
-    ///    - sourceIds: The identifiers of the source which were lost.
+    ///    - sourceIds: The identifiers of the sources which were lost.
     ///
     private func sourcesLost(_ sourceIds: [UUID]) {
         var nonSamplingMergeOccurred = false
@@ -357,11 +364,10 @@ public class sACNReceiver {
             notifyMerge()
         }
 
-        let delegate = delegate
-        delegateQueue.async { delegate?.receiver(self, lostSources: sourceIds) }
+        eventsHub.yield(.sourcesLost(sourceIds))
     }
 
-    /// The receiver lost per-address priority for a source.
+    /// The receiver lost per-address priority for a source (folded into a re-merge, no public event).
     ///
     /// - Parameters:
     ///    - sourceId: The identifier of the source which lost per-address priority.
@@ -377,62 +383,47 @@ public class sACNReceiver {
         }
     }
 
-    /// The receiver discovered too many sources.
-    private func sourceLimitExceeded() {
-        let delegate = delegate
-        delegateQueue.async { delegate?.receiverExceededSources(self) }
-    }
-
-    /// Notifies the new merge values.
+    /// Notifies the new merge values on `data`.
     private func notifyMerge() {
         let activeSources = sources.compactMap { !$0.value.sampling ? $0.value.cid : nil }
         let mergedNotification = sACNReceiverMergedData(
             universe: universe, levels: merger.levels, winners: merger.winners, activeSources: activeSources,
             numberOfActiveSources: activeSources.count)
-        let delegate = delegate
-        delegateQueue.async { delegate?.receiverMergedData(self, mergedData: mergedNotification) }
+        dataHub.yield(mergedNotification)
     }
 
 }
 
-/// sACN Receiver Extension
+// MARK: -
+// MARK: -
+
+/// `RawReceiverSink` conformance.
 ///
-/// sACN Receiver Raw Delegate Conformance.
-extension sACNReceiver: sACNReceiverRawDelegate {
-    public func receiver(_ receiver: sACNReceiverRaw, interface: String?, socketDidCloseWithError error: Error?) {
-        let delegate = delegate
-        delegateQueue.async { delegate?.receiver(self, interface: interface, socketDidCloseWithError: error) }
+/// The raw receiver shares this actor's event loop, so it delivers on the loop and these `nonisolated`
+/// methods `assumeIsolated` into this actor with no hop - the ordered per-packet merge pipeline.
+///
+extension sACNReceiver: RawReceiverSink {
+
+    nonisolated func rawReceiverDidReceive(_ data: sACNReceiverRawSourceData) {
+        assumeIsolated { $0.mergeData(from: data) }
     }
 
-    public func receiverReceivedUniverseData(_ receiver: sACNReceiverRaw, sourceData: sACNReceiverRawSourceData) {
-        mergeData(from: sourceData)
+    nonisolated func rawReceiverDidEmit(_ event: sACNReceiverRaw.Event) {
+        assumeIsolated { $0.handle(rawEvent: event) }
     }
 
-    public func receiverStartedSampling(_ receiver: sACNReceiverRaw) {
-        samplingStarted()
-    }
-
-    public func receiverEndedSampling(_ receiver: sACNReceiverRaw) {
-        samplingEnded()
-    }
-
-    public func receiver(_ receiver: sACNReceiverRaw, lostSources: [UUID]) {
-        sourcesLost(lostSources)
-    }
-
-    public func receiver(_ receiver: sACNReceiverRaw, lostPerAddressPriorityFor source: UUID) {
-        perAddressPriorityLost(for: source)
-    }
-
-    public func receiverExceededSources(_ receiver: sACNReceiverRaw) {
-        sourceLimitExceeded()
+    nonisolated func rawReceiverDidLog(_ message: String) {
+        assumeIsolated { $0.debugLogHub.yield(message) }
     }
 
 }
+
+// MARK: -
+// MARK: -
 
 /// sACN Receiver Validation Error
 ///
-/// Enumerates all possible `sACNReceiver` parsing errors.
+/// Enumerates all possible `sACNReceiver` validation errors.
 public enum sACNReceiverValidationError: LocalizedError, Sendable {
 
     /// The receiver is started.

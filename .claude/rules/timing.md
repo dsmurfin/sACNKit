@@ -23,17 +23,19 @@ separately-configurable PAP keep-alive to match ETC), so verify against source b
   regardless of start code; anti-flicker on discovery.
 - **New-source PAP wait: 1500 ms**, `perAddressPriorityWait`. A new source's levels are held this long
   awaiting a `0xDD` packet before falling back to universe priority.
-- **Receiver heartbeat: 500 ms**, `heartbeatTime` (drives timeout evaluation).
+- **Receiver heartbeat: 500 ms**, `sACNReceiverRaw.heartbeatInterval` (drives timeout evaluation).
 - **Discovery receiver heartbeat: 500 ms** (`Receiver/sACNDiscoveryReceiver.swift`; the discovery receiver
   is now an actor (PR3), so this runs on a NIO scheduled task via `sACNRuntime`, not `CwlDispatch`).
 
 ## Clock
-- Timeouts use `Shared/MonotonicTimer.swift` (monotonic, immune to wall-clock changes). It currently
-  calls the **Darwin-only** `clock_gettime_nsec_np(CLOCK_UPTIME_RAW)`, a cross-platform blocker being
-  fixed in Phase 1 (see MODERNIZATION.md). `isExpired` uses strict `>`, and `interval == 0` means
-  "already expired" (used to force immediate expiry, e.g. on termination).
-- The **`sACNSource`** and **`sACNDiscoveryReceiver` actors'** timers now run on **NIO scheduled tasks**
-  via `sACNRuntime.scheduleRepeated` (fixed-rate, coalescing; Phase 4 PR2/PR3), ticking in-isolation. Only
-  **`sACNReceiverRaw`'s** timers still come from the vendored `Vendor/CwlDispatch.swift`
-  (`DispatchSource.repeatingTimer` / `singleTimer`); these go with its Phase 4 conversion. The constants
-  above are unchanged - only the timer mechanism moved.
+- Timeouts use `Shared/MonotonicTimer.swift` (monotonic, immune to wall-clock changes). It is
+  cross-platform (Phase 1): `#if canImport(Darwin)` uses `clock_gettime_nsec_np(CLOCK_UPTIME_RAW)`,
+  otherwise `clock_gettime(CLOCK_MONOTONIC)` on Glibc. `isExpired` uses strict `>`, and `interval == 0`
+  means "already expired" (used to force immediate expiry, e.g. on termination).
+- **Every component actor's** timers now run on **NIO scheduled tasks** via `sACNRuntime` (Phase 4),
+  ticking in-isolation: `scheduleRepeated` (fixed-rate, coalescing) for the source transmit / discovery /
+  receiver heartbeats, and `scheduleOnce` for `sACNReceiverRaw`'s single-shot, self-re-arming sampling
+  timer (`sampleTask`). Ticks guard before acting - the heartbeat on `gate.isListening`, the sample tick on
+  the `sampling` flag (which `teardown` clears) - so a tick that raced a stop cannot act or re-arm; the old
+  GCD generation tokens are gone. `Vendor/CwlDispatch.swift` is now unreferenced (deleted in PR5). The
+  constants above are unchanged - only the timer mechanism moved.

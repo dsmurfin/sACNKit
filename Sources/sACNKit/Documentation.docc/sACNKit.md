@@ -9,19 +9,18 @@ transmitting ``sACNSource``, receivers for merged (``sACNReceiver``, ``sACNRecei
 (``sACNReceiverRaw``) data, a universe-discovery receiver (``sACNDiscoveryReceiver``), and a
 standalone HTP / per-address-priority merge engine (``sACNMerger``).
 
-``sACNSource`` and ``sACNDiscoveryReceiver`` are Swift `actor`s: their lifecycle and mutation API is
-`async`, and they report on `AsyncStream`s rather than a delegate (the source's ``sACNSource/events``,
-the discovery receiver's ``sACNDiscoveryReceiver/discovery`` and ``sACNDiscoveryReceiver/events``, each
-with a separate `debugLog`). The source's `stop()` awaits its termination drain; the discovery
-receiver's awaits its socket close.
+Every component is a Swift `actor`: the lifecycle and mutation API is `async`, and data and lifecycle
+events are reported on `AsyncStream`s rather than a delegate. The source reports on ``sACNSource/events``;
+each receiver exposes `data`, `events`, and `debugLog` streams (the merged ``sACNReceiver/data`` and
+``sACNReceiverGroup/data`` carry merged frames, ``sACNReceiverRaw/data`` carries per-source frames); the
+discovery receiver reports on ``sACNDiscoveryReceiver/discovery`` and ``sACNDiscoveryReceiver/events``.
 
-The merged and raw receivers (``sACNReceiver``, ``sACNReceiverGroup``, ``sACNReceiverRaw``) still use
-delegates. Their callbacks are delivered asynchronously on the delegate queue you provide. Because
-delivery is asynchronous, `stop()` and `setDelegate(nil)` are not delivery barriers: callbacks already
-enqueued may still arrive after either call returns (`setDelegate(nil)` keeps the previous delegate
-alive for those in-flight deliveries), and `information(for:)` reflects current state rather than a
-callback payload's snapshot. Tear down resources your delegate uses only after queued callbacks have
-drained.
+Each stream property returns an independent subscription, so multiple consumers can observe one component.
+A `data` stream buffers the newest frame (a slow consumer gets the latest, not a backlog); `events` is
+best-effort drop-oldest, so a consumer that stalls for long enough can miss an event such as `.sourcesLost`.
+Consumers run off-actor, so you may call back into a component (for example `information(for:)`) from within
+a `for await` loop. `stop()` is not a delivery barrier - elements already yielded may still be observed after
+it returns - and `information(for:)` reflects current state rather than a just-delivered frame's snapshot.
 
 - Note: The library is undergoing a phased modernization (SwiftNIO transport and a Swift Concurrency
   API). See `MODERNIZATION.md` in the repository for the roadmap.
