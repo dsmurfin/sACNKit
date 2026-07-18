@@ -112,6 +112,41 @@ protocol ComponentSocket: AnyObject {
 
 }
 
+extension ComponentSocket {
+
+    /// Starts listening on `interface`, then joins the given multicast group for each enabled address family,
+    /// rolling the listen back (via `stopListening()`) if any join fails.
+    ///
+    /// Shared by the receiver components, which differ only in the group they join (a per-universe data group
+    /// vs the fixed universe-discovery group), so the bind + join-failure rollback lives in one place. The
+    /// caller sets `delegate` and computes the group hostnames in its own isolation, passing them as plain
+    /// values.
+    ///
+    /// - Parameters:
+    ///    - interface: An optional interface on which to listen (`nil` means all interfaces).
+    ///    - ipMode: The enabled address families.
+    ///    - ipv4Group: The IPv4 multicast group hostname to join (used only when IPv4 is enabled).
+    ///    - ipv6Group: The IPv6 multicast group hostname to join (used only when IPv6 is enabled).
+    ///
+    func startListeningAndJoin(
+        onInterface interface: String?, ipMode: sACNIPMode, ipv4Group: String, ipv6Group: String
+    ) async throws {
+        try await startListening(onInterface: interface)
+        do {
+            if ipMode.usesIPv4() {
+                try await join(multicastGroup: ipv4Group)
+            }
+            if ipMode.usesIPv6() {
+                try await join(multicastGroup: ipv6Group)
+            }
+        } catch {
+            await stopListening()
+            throw error
+        }
+    }
+
+}
+
 // MARK: -
 // MARK: -
 

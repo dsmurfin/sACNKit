@@ -423,27 +423,12 @@ public actor sACNReceiverRaw {
     // MARK: General
 
     /// Attempts to start listening for a socket on an optional interface, joining the universe's multicast
-    /// group for each enabled family.
+    /// group for each enabled family (rolling back on a join failure via the shared `startListeningAndJoin`).
     private func listenForSocket(_ socket: ComponentSocket, on interface: String? = nil) async throws {
         socket.delegate = self
-        try await socket.startListening(onInterface: interface)
-
-        if ipMode.usesIPv4() {
-            do {
-                try await socket.join(multicastGroup: IPv4.multicastHostname(for: universe))
-            } catch {
-                await socket.stopListening()
-                throw error
-            }
-        }
-        if ipMode.usesIPv6() {
-            do {
-                try await socket.join(multicastGroup: IPv6.multicastHostname(for: universe))
-            } catch {
-                await socket.stopListening()
-                throw error
-            }
-        }
+        try await socket.startListeningAndJoin(
+            onInterface: interface, ipMode: ipMode, ipv4Group: IPv4.multicastHostname(for: universe),
+            ipv6Group: IPv6.multicastHostname(for: universe))
     }
 
     // MARK: Emit

@@ -322,24 +322,9 @@ public actor sACNDiscoveryReceiver {
     ///
     private func listenForSocket(_ socket: ComponentSocket, on interface: String? = nil) async throws {
         socket.delegate = self
-        try await socket.startListening(onInterface: interface)
-
-        if ipMode.usesIPv4() {
-            do {
-                try await socket.join(multicastGroup: IPv4.universeDiscoveryHostname)
-            } catch {
-                await socket.stopListening()
-                throw error
-            }
-        }
-        if ipMode.usesIPv6() {
-            do {
-                try await socket.join(multicastGroup: IPv6.universeDiscoveryHostname)
-            } catch {
-                await socket.stopListening()
-                throw error
-            }
-        }
+        try await socket.startListeningAndJoin(
+            onInterface: interface, ipMode: ipMode, ipv4Group: IPv4.universeDiscoveryHostname,
+            ipv6Group: IPv6.universeDiscoveryHostname)
     }
 
     // MARK: Timers
