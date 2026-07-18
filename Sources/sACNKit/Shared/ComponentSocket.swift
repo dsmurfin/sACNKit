@@ -101,6 +101,12 @@ protocol ComponentSocket: AnyObject {
     /// Stops listening for network data without blocking, closing this socket.
     func stopListening() async
 
+    /// Closes this socket's channels fire-and-forget, without blocking or awaiting.
+    ///
+    /// Safe to call from any context including the event loop (an actor teardown running on the loop uses
+    /// this rather than the blocking/awaiting stop variants).
+    func close()
+
     /// Sends a message to a specific host and port.
     func send(message data: Data, host: String, port: UInt16)
 

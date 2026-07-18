@@ -27,110 +27,132 @@ import Foundation
 /// sACN Source
 ///
 /// An E1.31-2018 sACN Source which Transmits sACN Messages.
-final public class sACNSource {
+///
+/// A `sACNSource` is an `actor` isolated to an internal `sACNRuntime` (the shared NIO event loop). Its
+/// lifecycle and mutation API are `async`; lifecycle events (transmission started/ended, socket closed)
+/// are delivered on the `events` `AsyncStream` and debug logs on the separate `debugLog` stream, rather
+/// than via a delegate.
+public actor sACNSource {
 
     typealias UniverseData = (universeNumber: UInt16, data: Data)
 
-    // MARK: Socket
+    // MARK: Runtime / isolation
 
-    /// A key used to identify the socket delegate queue for the current execution context.
-    private static let socketDelegateQueueSpecificKey = DispatchSpecificKey<Bool>()
+    /// The runtime hosting this actor's isolation, timers, and sockets.
+    nonisolated let runtime: sACNRuntime
 
-    /// The Internet Protocol version(s) used by the source.
-    private let ipMode: sACNIPMode
-
-    /// The queue on which socket notifications occur (also used to protect state).
-    private let socketDelegateQueue: DispatchQueue
-
-    /// The interfaces of sockets to be terminated, and whether they should be removed on completion.
-    private var socketsShouldTerminate: [String: Bool]
-
-    /// The sockets used for communications (one per interface).
-    /// The key for each socket is the interface it is bound to (or an empty string for all interfaces).
-    private var sockets: [String: ComponentSocket]
-
-    /// The socket listening status (thread-safe getter).
-    public var isListening: Bool {
-        get { socketDelegateQueue.sync { _isListening } }
+    /// Pins this actor to the runtime's serial executor (the shared NIO event loop). This is what lets the
+    /// transport deliver into the actor's isolation synchronously (`assumeIsolated` from a loop callback,
+    /// no `Task` hop) and why the platform floor is macOS 15 / iOS 18 - see `EventLoopSerialExecutor`.
+    public nonisolated var unownedExecutor: UnownedSerialExecutor {
+        runtime.serialExecutor.asUnownedSerialExecutor()
     }
 
-    /// The private socket listening status.
-    private var _isListening: Bool
+    // MARK: Events
+
+    /// An event emitted by a source.
+    public enum Event: Sendable {
+
+        /// The source began actively transmitting universe data.
+        case transmissionStarted
+
+        /// The source stopped transmitting universe data.
+        case transmissionEnded
+
+        /// A socket closed with an error (per interface).
+        case socketClosed(interface: String?, reason: SocketCloseReason)
+
+    }
+
+    /// The broadcast hub backing `events`.
+    private nonisolated let eventsHub = AsyncStreamHub<Event>(bufferingPolicy: .bufferingNewest(64))
+
+    /// A stream of source lifecycle events.
+    ///
+    /// Each access returns an independent subscription. `transmissionStarted`/`transmissionEnded` are
+    /// **edge-triggered** and not replayed, so subscribe **before** calling `start()` to observe the first
+    /// `transmissionStarted`; a subscriber attaching afterwards can seed its state from `isTransmitting`.
+    /// Debug logs are delivered on the separate `debugLog` stream, so log chatter cannot evict a lifecycle
+    /// event from this stream's buffer.
+    public nonisolated var events: AsyncStream<Event> { eventsHub.stream() }
+
+    /// The broadcast hub backing `debugLog`.
+    private nonisolated let debugLogHub = AsyncStreamHub<String>(bufferingPolicy: .bufferingNewest(64))
+
+    /// A stream of human-readable debug log messages, kept separate from `events` so verbose logging never
+    /// competes with lifecycle events for buffer space. Each access returns an independent subscription.
+    public nonisolated var debugLog: AsyncStream<String> { debugLogHub.stream() }
+
+    // MARK: Lifecycle
+
+    /// The lifecycle state, reserved synchronously before any `await` so a reentrant call cannot race.
+    ///
+    /// `.starting`, `.reconfiguring` and `.stopping` are exclusive "busy" reservations that make `start`,
+    /// `stop` and `updateInterfaces` mutually exclusive across their suspension points; every mutating
+    /// entry point transitions through this.
+    private enum Lifecycle {
+
+        case idle, starting, listening, reconfiguring, stopping
+
+    }
+
+    private var lifecycle: Lifecycle = .idle
+
+    /// Whether the source is actively transmitting (sockets live). Derived from `lifecycle` - `.listening`
+    /// or `.reconfiguring` - rather than a separate flag, so the two can never desync.
+    public var isListening: Bool { lifecycle == .listening || lifecycle == .reconfiguring }
+
+    /// Whether the source is currently transmitting universe data (mirrors the last `transmissionStarted`/
+    /// `transmissionEnded` event). Lets a subscriber that attached to `events` after `start()` - and so
+    /// missed the edge-triggered `transmissionStarted` - seed its state.
+    public var isTransmitting: Bool { transmissionState == true }
+
+    /// A stop requested while `.starting` or `.reconfiguring`: the in-flight operation observes it and
+    /// unwinds into the termination drain instead of proceeding.
+    private var stopRequested = false
+
+    /// Continuations from `stop()` callers, all resumed when the termination drain reaches `.idle`.
+    private var stopContinuations: [CheckedContinuation<Void, Never>] = []
 
     /// Whether this source should actively output sACN Universe Discovery and Data messages.
-    /// This may be useful for backup scenarios to ensure the source is ready to output as soon as required.
-    public var shouldOutput: Bool {
-        get { socketDelegateQueue.sync { _shouldOutput } }
-    }
+    public var shouldOutput: Bool { _shouldOutput }
 
-    /// The private state of should output.
-    private var _shouldOutput: Bool
+    private var _shouldOutput = false
 
-    /// Updates whether this source source should actively output sACN Universe Discovery and Data messages.
+    /// Updates whether this source should actively output sACN Universe Discovery and Data messages.
     ///
     /// This may be useful for backup scenarios to ensure the source is ready to output as soon as required.
-    ///
-    /// Calling this before `startOutput()` will have no effect.
+    /// Calling this before `start()` primes the flag; it is ignored while the source is starting, stopping
+    /// or reconfiguring - in particular a `shouldOutput(true)` during the termination drain must not
+    /// resurrect terminating universes (which would strand the drain short of idle).
     ///
     /// - Parameters:
     ///    - output: Whether the source should output.
     ///
     public func shouldOutput(_ output: Bool) {
-        socketDelegateQueue.sync {
-            guard _shouldOutput != output else { return }
-            if output {
-                universes.forEach { $0.reset() }
-            } else {
-                // terminate all universes on all sockets, but keep the sockets and universes present
-                universes.forEach { $0.terminate(remove: false) }
-            }
-            _shouldOutput = output
-        }
-    }
-
-    // MARK: Delegate
-
-    /// Changes the source delegate of this source to the the object passed.
-    ///
-    /// Passing `nil` does not fence in-flight deliveries: a callback already enqueued
-    /// may still be delivered to the previous delegate after this returns.
-    ///
-    /// - Parameters:
-    ///   - delegate: The delegate to receive notifications.
-    ///
-    public func setDelegate(_ delegate: sACNSourceDelegate?) {
-        if DispatchQueue.getSpecific(key: Self.socketDelegateQueueSpecificKey) == true {
-            self.delegate = delegate
+        guard lifecycle == .idle || lifecycle == .listening else { return }
+        guard _shouldOutput != output else { return }
+        if output {
+            universes.forEach { $0.reset() }
         } else {
-            socketDelegateQueue.sync { self.delegate = delegate }
+            universes.forEach { $0.terminate(remove: false) }
         }
+        _shouldOutput = output
     }
 
-    /// Changes the debug delegate of this source to the the object passed.
-    ///
-    /// - Parameters:
-    ///   - delegate: The delegate to receive notifications.
-    ///
-    public func setDebugDelegate(_ delegate: sACNComponentDebugDelegate?) {
-        if DispatchQueue.getSpecific(key: Self.socketDelegateQueueSpecificKey) == true {
-            self.debugDelegate = delegate
-        } else {
-            socketDelegateQueue.sync { self.debugDelegate = delegate }
-        }
-    }
+    // MARK: Sockets
 
-    /// The delegate which receives notifications from this source.
-    private weak var delegate: sACNSourceDelegate?
+    /// The Internet Protocol version(s) used by the source.
+    private let ipMode: sACNIPMode
 
-    /// The delegate which receives debug log messages from this source.
-    private weak var debugDelegate: sACNComponentDebugDelegate?
+    /// The interfaces of sockets pending removal once their termination drain completes (membership =
+    /// pending removal). Only interface reconfiguration marks sockets here; a full `stop()` does not - the
+    /// universes' own `shouldTerminate` drives termination there and the sockets close at teardown, so a
+    /// `false`/absent entry would be redundant.
+    private var socketsShouldTerminate: Set<String> = []
 
-    /// The queue on which to send delegate notifications.
-    private let delegateQueue: DispatchQueue
-
-    /// The previous delegate transmission state.
-    /// If `true`, transmission was notified already as active, if `false`, transmission was notified already as inactive.
-    private var delegateTransmissionState: Bool?
+    /// The sockets used for communications (one per interface, keyed by interface or "" for all).
+    private var sockets: [String: ComponentSocket] = [:]
 
     // MARK: General
 
@@ -153,44 +175,41 @@ final public class sACNSource {
     private var priority: UInt8
 
     /// Whether the source should terminate.
-    private var shouldTerminate: Bool
+    private var shouldTerminate = false
 
     /// The universe numbers added to this source.
-    private var universeNumbers: [UInt16]
+    private var universeNumbers: [UInt16] = []
 
     /// The universes added to this source which may be transmitted.
     /// Internal read access allows tests to stage transmit states the public API only reaches when listening.
-    private(set) var universes: [SourceUniverse]
+    private(set) var universes: [SourceUniverse] = []
 
     /// A pre-compiled root layer as `Data`.
-    private var rootLayer: Data
+    private let rootLayer: Data
 
     /// A pre-compiled universe discovery message as `Data`.
-    private var universeDiscoveryMessages: [Data]
+    private var universeDiscoveryMessages: [Data] = []
+
+    /// The last transmission state emitted on `events`, so started/ended fire once per transition.
+    private var transmissionState: Bool?
 
     // MARK: Timers
 
-    /// The leeway used for timing. Informs the OS how accurate timings should be.
-    private static let timingLeeway: DispatchTimeInterval = .nanoseconds(0)
-
     /// The universe discovery interval (10 secs).
-    private static let universeDiscoveryInterval: DispatchTimeInterval = DispatchTimeInterval.seconds(10)
+    private static let universeDiscoveryInterval: Duration = .seconds(10)
 
-    /// The data transmit interval (0.227 secs).
-    private static let dataTransmitInterval: DispatchTimeInterval = DispatchTimeInterval.interval(1 / 44)
+    /// The data transmit interval (~22.7 ms, ~44 fps).
+    private static let dataTransmitInterval: Duration = .seconds(1) / 44
 
-    /// The queue on which timers run.
-    private let timerQueue: DispatchQueue
-
-    /// The universe discovery timer
-    private var universeDiscoveryTimer: DispatchSourceTimer?
+    /// The universe discovery timer.
+    private var universeDiscoveryTask: (any RuntimeTask)?
 
     /// The data transmit timer.
-    private var dataTransmitTimer: DispatchSourceTimer?
+    private var dataTransmitTask: (any RuntimeTask)?
 
     // MARK: - Initialization
 
-    /// Creates a new source using a name, interfaces and delegate queue, and optionally a CID, IP Mode, Priority.
+    /// Creates a new source using a name and interfaces, and optionally a CID, IP Mode and priority.
     ///
     /// The CID of an sACN source should persist across launches, so should be stored in persistent storage.
     ///
@@ -199,252 +218,253 @@ final public class sACNSource {
     ///    - cid: Optional: CID for this source.
     ///    - ipMode: Optional: IP mode for this source (IPv4/IPv6/Both).
     ///    - interfaces: Optional: The network interfaces for this source. An interface may be a name (e.g. "en1" or "lo0") or the corresponding IP address (e.g. "192.168.4.35").
-    ///    - priority: Optional: Default priority for this source, used when universes do not have explicit priorities (values permitted 0-200).
-    ///    - delegateQueue: A delegate queue on which to receive delegate calls from this source.
+    ///    - priority: Optional: Default priority for this source (values permitted 0-200).
     ///
     /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interfaces must not be empty.
     ///
-    public init(
-        name: String? = nil, cid: UUID = UUID(), ipMode: sACNIPMode = .ipv4Only, interfaces: Set<String> = [], priority: UInt8 = 100,
-        delegateQueue: DispatchQueue
-    ) {
+    public init(name: String? = nil, cid: UUID = UUID(), ipMode: sACNIPMode = .ipv4Only, interfaces: Set<String> = [], priority: UInt8 = 100) {
         precondition(!ipMode.usesIPv6() || !interfaces.isEmpty, "At least one interface must be provided for IPv6.")
 
-        // sockets
+        let runtime = NIORuntime()
+        self.runtime = runtime
         self.ipMode = ipMode
-        let socketDelegateQueue = DispatchQueue(label: "com.danielmurfin.sACNKit.sourceSocketDelegate")
-        socketDelegateQueue.setSpecific(key: Self.socketDelegateQueueSpecificKey, value: true)
-        self.socketDelegateQueue = socketDelegateQueue
-        self.socketsShouldTerminate = [:]
         if interfaces.isEmpty {
-            let socket = NIOComponentSocket(type: .transmit, ipMode: ipMode, delegateQueue: socketDelegateQueue)
-            self.sockets = ["": socket]
+            self.sockets = ["": runtime.makeSocket(type: .transmit, ipMode: ipMode, port: 0)]
         } else {
             self.sockets = interfaces.reduce(into: [String: ComponentSocket]()) { dict, interface in
-                let socket = NIOComponentSocket(type: .transmit, ipMode: ipMode, delegateQueue: socketDelegateQueue)
-                dict[interface] = socket
+                dict[interface] = runtime.makeSocket(type: .transmit, ipMode: ipMode, port: 0)
             }
         }
-        self._isListening = false
-        self._shouldOutput = false
 
-        // delegate
-        self.delegateQueue = delegateQueue
-
-        // general
         self.cid = cid
         let sourceName = name ?? Source.getDeviceName()
         self.name = sourceName
         self.nameData = Source.buildNameData(from: sourceName)
         self.priority = priority.nearestValidPriority()
-        self.shouldTerminate = false
-        self.universeNumbers = []
-        self.universes = []
         self.rootLayer = RootLayer.createAsData(vector: .data, cid: cid)
-        self.universeDiscoveryMessages = []
-
-        // timers
-        self.timerQueue = DispatchQueue(label: "com.danielmurfin.sACNKit.sourceTimerQueue.\(cid.uuidString)")
     }
 
     deinit {
-        stop()
+        // The timer tasks self-cancel when released; the sockets close on dealloc. Finish the hubs so any
+        // active consumers terminate rather than hang.
+        eventsHub.finish()
+        debugLogHub.finish()
     }
 
-    // MARK: Public API
+    // MARK: - Public API
 
     /// Starts this source.
     ///
-    /// The source will begin transmitting sACN Universe Discovery and Data messages, dependent
-    /// on the state of `shouldOutput`. This may be useful for backup scenarios to ensure the source
-    /// is ready to output as soon as required.
+    /// The source will begin transmitting sACN Universe Discovery and Data messages, dependent on
+    /// `shouldOutput`. This may be useful for backup scenarios to ensure the source is ready to output.
     ///
     /// - Parameters:
     ///    - shouldOutput: Optional: Whether this source should output (defaults to `true`).
     ///
     /// - Throws: An error of type `sACNSourceValidationError` or `sACNComponentSocketError`.
     ///
-    public func start(shouldOutput: Bool = true) throws {
-        try socketDelegateQueue.sync {
-            guard !_isListening else {
-                throw sACNSourceValidationError.sourceStarted
+    public func start(shouldOutput: Bool = true) async throws {
+        guard lifecycle == .idle else {
+            throw sACNSourceValidationError.sourceStarted
+        }
+        lifecycle = .starting
+        stopRequested = false
+
+        universes.forEach { $0.reset() }
+        transmissionState = nil
+        socketsShouldTerminate = []
+
+        do {
+            for (interface, socket) in sockets {
+                try await listenForSocket(socket, on: interface.isEmpty ? nil : interface)
+                // A `stop()` that interleaved this bind closed the sockets; unwind rather than proceed.
+                if stopRequested { throw CancellationError() }
             }
+        } catch {
+            // Roll back: close anything opened, return to idle, and release any waiting `stop()` caller.
+            // No error event is emitted - a `CancellationError` here means a stop superseded the start
+            // (via `stopRequested` / the closed sockets), which is not a failure to report.
+            sockets.values.forEach { $0.close() }
+            reachedIdle()
+            throw error
+        }
 
-            universes.forEach { $0.reset() }
-            delegateTransmissionState = nil
-            socketsShouldTerminate = [:]
+        _shouldOutput = shouldOutput
+        lifecycle = .listening
 
-            // begin listening
-            try sockets.forEach { interface, socket in
-                try listenForSocket(socket, on: interface.isEmpty ? nil : interface)
-            }
-            self._isListening = true
-            self._shouldOutput = shouldOutput
+        startDataTransmit()
+        startUniverseDiscovery()
 
-            // start heartbeats
-            startDataTransmit()
-            startUniverseDiscovery()
-
-            if delegateTransmissionState != true && !universes.isEmpty {
-                delegateTransmissionState = true
-                let delegate = delegate
-                delegateQueue.async {
-                    delegate?.transmissionStarted()
-                }
-            }
+        if !universes.isEmpty {
+            setTransmitting(true)
         }
     }
 
-    /// Stops this source.
+    /// Stops this source, suspending until teardown completes.
     ///
-    /// When stopped, this source will no longer transmit sACN messages.
+    /// When stopped, the source sends its 3 E1.31 termination packets, closes its sockets and returns to
+    /// idle; this call **awaits that drain** (~68 ms from `.listening`; immediate when starting or already
+    /// idle), so `await stop()` followed by `try await start()` is safe. Concurrent `stop()` callers all
+    /// resume together when the drain completes.
     ///
-    /// This is not a delivery barrier: callbacks already enqueued to the delegate
-    /// queue may still be delivered after this returns.
-    ///
-    public func stop() {
-        if DispatchQueue.getSpecific(key: Self.socketDelegateQueueSpecificKey) == true {
-            _stop()
-        } else {
-            socketDelegateQueue.sync { _stop() }
+    public func stop() async {
+        switch lifecycle {
+        case .idle:
+            return
+        case .starting, .reconfiguring:
+            // Supersede the in-flight start/reconfigure: close the sockets (which aborts any in-flight
+            // bind) and flag it; that operation observes `stopRequested` and unwinds to idle, resuming us.
+            stopRequested = true
+            _shouldOutput = false
+            sockets.values.forEach { $0.close() }
+        case .listening:
+            beginTerminationDrain()
+        case .stopping:
+            break  // a drain is already underway; wait for the same completion below
         }
+        // Every non-idle arm resumes here when the drain reaches idle (`reachedIdle`).
+        await withCheckedContinuation { stopContinuations.append($0) }
     }
 
-    /// Performs the stop logic.
-    ///
-    /// Must be called on `socketDelegateQueue`.
-    private func _stop() {
-        dispatchPrecondition(condition: .onQueue(socketDelegateQueue))
-        guard _isListening else { return }
-        self._isListening = false
-
-        // stops heartbeats
+    /// Enters the termination drain from `.listening`: keeps the transmit timer running to push the 3 E1.31
+    /// termination packets, after which `sendDataMessages` reaches idle and resumes the `stop()` callers.
+    private func beginTerminationDrain() {
+        lifecycle = .stopping
+        _shouldOutput = false
         stopUniverseDiscovery()
         stopDataTransmit()
-
-        // stop listening on socket occurs after
-        // final termination is sent
     }
 
-    /// Updates the interfaces on which this source transmits for sACN Universe Discovery and Data messages.
+    /// Completes the termination drain: returns to idle, clears the drain flags, and resumes every waiting
+    /// `stop()` caller. Called from the `sendDataMessages` teardown and from `start()`'s stop-superseded
+    /// rollback - the two paths that reach idle.
+    private func reachedIdle() {
+        lifecycle = .idle
+        shouldTerminate = false
+        stopRequested = false
+        let continuations = stopContinuations
+        stopContinuations.removeAll()
+        continuations.forEach { $0.resume() }
+    }
+
+    /// Sets the transmission state and emits the matching edge event once per transition. The single owner
+    /// of `transmissionState`, so every start/resume/stop edge - including output resuming via
+    /// `shouldOutput(true)` after a drain - emits `transmissionStarted`/`transmissionEnded` exactly once and
+    /// `isTransmitting` never goes stale.
+    private func setTransmitting(_ transmitting: Bool) {
+        guard transmissionState != transmitting else { return }
+        transmissionState = transmitting
+        eventsHub.yield(transmitting ? .transmissionStarted : .transmissionEnded)
+    }
+
+    /// Updates the interfaces on which this source transmits.
     ///
     /// - Parameters:
-    ///    - interfaces: The new interfaces for this source. An interface may be a name (e.g. "en1" or "lo0") or the corresponding IP address (e.g. "192.168.4.35").
-    ///    Empty interfaces means receive on all interfaces (IPv4 only).
+    ///    - newInterfaces: The new interfaces. An interface may be a name (e.g. "en1"/"lo0") or an IP.
+    ///      Empty means all interfaces (IPv4 only).
     ///
     /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interfaces must not be empty.
     ///
-    /// - Throws: An error of type `sACNComponentSocketError`.
+    /// - Throws: `sACNSourceValidationError.sourceBusy` if a start/stop/reconfigure or a socket-termination
+    ///   drain from a prior reconfigure is still in flight; otherwise an error of type
+    ///   `sACNComponentSocketError` if a bind fails (the change then rolls back all-or-nothing).
     ///
-    public func updateInterfaces(_ newInterfaces: Set<String> = []) throws {
+    public func updateInterfaces(_ newInterfaces: Set<String> = []) async throws {
         precondition(!ipMode.usesIPv6() || !newInterfaces.isEmpty, "At least one interface must be provided for IPv6.")
 
-        try socketDelegateQueue.sync { [self] in
-            let existingInterfaces = {
-                if let firstSocket = sockets.first, firstSocket.key.isEmpty {
-                    return Set<String>()
-                } else {
-                    return Set(sockets.keys)
-                }
-            }()
-            guard existingInterfaces != newInterfaces else { return }
-
-            if existingInterfaces.isEmpty {
-                // not possible for IPv6
-
-                if universes.isEmpty || !_isListening {
-                    // deinit first stops listening
-                    sockets.removeAll()
-                } else {
-                    // terminate all universes on existing sockets, removing the sockets but not the universes
-                    let socketIds = sockets.reduce(into: [String: Bool]()) { dict, socket in
-                        dict[socket.key] = true
-                    }
-                    socketsShouldTerminate = socketIds
-                    universes.forEach { universe in
-                        universe.terminateSockets()
-                    }
-                }
-
-                // add each new interfaces
-                for interface in newInterfaces {
-                    let socket = NIOComponentSocket(type: .transmit, ipMode: ipMode, delegateQueue: socketDelegateQueue)
-                    sockets[interface] = socket
-                    socketsShouldTerminate.removeValue(forKey: interface)
-
-                    // attempt to listen
-                    if _isListening {
-                        try listenForSocket(socket, on: interface)
-                    }
-                }
-            } else if newInterfaces.isEmpty {
-                // not possible for IPv6
-
-                if universes.isEmpty || !_isListening {
-                    // deinit first stops listening
-                    sockets.removeAll()
-                } else {
-                    // terminate all universes on existing sockets, removing the sockets but not the universes
-                    let socketIds = sockets.reduce(into: [String: Bool]()) { dict, socket in
-                        dict[socket.key] = true
-                    }
-                    socketsShouldTerminate = socketIds
-                    universes.forEach { universe in
-                        universe.terminateSockets()
-                    }
-                }
-
-                // add socket for all interfaces
-                let socket = NIOComponentSocket(type: .transmit, ipMode: ipMode, delegateQueue: socketDelegateQueue)
-                sockets[""] = socket
-                socketsShouldTerminate.removeValue(forKey: "")
-
-                // attempt to listen
-                if _isListening {
-                    try listenForSocket(socket)
-                }
-            } else {
-                let interfacesToRemove = existingInterfaces.subtracting(newInterfaces)
-                let interfacesToAdd = newInterfaces.subtracting(existingInterfaces)
-
-                // terminate all universes on sockets no longer needed, removing the sockets but not the universes
-                let socketsToRemove = sockets.filter { interfacesToRemove.contains($0.key) }
-                if !socketsToRemove.isEmpty {
-                    if universes.isEmpty || !_isListening {
-                        for socketToRemove in socketsToRemove.keys {
-                            // deinit first stops listening
-                            sockets.removeValue(forKey: socketToRemove)
-                        }
-                    } else {
-                        let socketIds = socketsToRemove.reduce(into: [String: Bool]()) { dict, socket in
-                            dict[socket.key] = true
-                        }
-                        socketsShouldTerminate = socketIds
-                        universes.forEach { universe in
-                            universe.terminateSockets()
-                        }
-                    }
-                }
-
-                // add each new interface
-                for interface in interfacesToAdd {
-                    let socket = NIOComponentSocket(type: .transmit, ipMode: ipMode, delegateQueue: socketDelegateQueue)
-                    sockets[interface] = socket
-                    socketsShouldTerminate.removeValue(forKey: interface)
-
-                    // attempt to listen
-                    if _isListening {
-                        try listenForSocket(socket, on: interface)
-                    }
-                }
-            }
+        // Reject a reconfigure that would race an in-flight start/stop/reconfigure.
+        switch lifecycle {
+        case .idle, .listening:
+            break
+        case .starting, .reconfiguring, .stopping:
+            throw sACNSourceValidationError.sourceBusy
         }
 
+        // Reject while a prior reconfigure's socket-termination drain is still marking sockets: the diff
+        // would be computed against a socket set that includes terminating keys, and a revert during that
+        // ~68 ms window can converge to zero live sockets. The reservation discipline covers this bounded
+        // window - retry once the drain completes.
+        guard socketsShouldTerminate.isEmpty else {
+            throw sACNSourceValidationError.sourceBusy
+        }
+
+        // The keys are `""` (all interfaces) or one per named interface; the two shapes never coexist.
+        let existingKeys = Set(sockets.keys.filter { !$0.isEmpty })
+        let existingInterfaces = sockets.keys.contains("") ? Set<String>() : existingKeys
+        guard existingInterfaces != newInterfaces else { return }
+
+        let newKeys: Set<String> = newInterfaces.isEmpty ? [""] : newInterfaces
+        let currentKeys = Set(sockets.keys)
+        let keysToAdd = newKeys.subtracting(currentKeys)
+        let keysToRemove = currentKeys.subtracting(newKeys)
+
+        // Idle: no sockets are bound, so there are no awaits - mutate directly with no reservation.
+        guard lifecycle == .listening else {
+            keysToRemove.forEach { sockets.removeValue(forKey: $0) }
+            for key in keysToAdd {
+                sockets[key] = runtime.makeSocket(type: .transmit, ipMode: ipMode, port: 0)
+                socketsShouldTerminate.remove(key)
+            }
+            return
+        }
+
+        // Listening: reserve `.reconfiguring` and bind every new socket into a temp map first. If any bind
+        // fails (or a `stop()` interleaves), discard the temp sockets and leave the live set untouched -
+        // all-or-nothing, so a partial failure never leaves a half-bound or shape-broken socket set.
+        lifecycle = .reconfiguring
+        do {
+            var boundSockets: [String: ComponentSocket] = [:]
+            do {
+                for key in keysToAdd {
+                    let socket = runtime.makeSocket(type: .transmit, ipMode: ipMode, port: 0)
+                    try await listenForSocket(socket, on: key.isEmpty ? nil : key)
+                    if stopRequested {
+                        socket.close()
+                        throw CancellationError()
+                    }
+                    boundSockets[key] = socket
+                }
+            } catch {
+                boundSockets.values.forEach { $0.close() }
+                finishReconfigure()
+                throw error
+            }
+
+            // Commit: terminate/drop the removed interfaces, then install the freshly bound sockets.
+            terminateOrDropSockets(forKeys: keysToRemove)
+            for (key, socket) in boundSockets {
+                sockets[key] = socket
+                socketsShouldTerminate.remove(key)
+            }
+        }
+        finishReconfigure()
+    }
+
+    /// Restores the lifecycle after a `.reconfiguring` reservation: back to `.listening`, or - if a
+    /// `stop()` interleaved and set `stopRequested` - into the termination drain that resumes it.
+    private func finishReconfigure() {
+        if stopRequested {
+            beginTerminationDrain()
+        } else {
+            lifecycle = .listening
+        }
+    }
+
+    /// Terminates the universes on the given sockets (marking them for removal after the drain), or drops
+    /// the sockets outright when nothing is being transmitted.
+    private func terminateOrDropSockets(forKeys keys: Set<String>) {
+        guard !keys.isEmpty else { return }
+        if universes.isEmpty {
+            keys.forEach { sockets.removeValue(forKey: $0) }
+        } else {
+            keys.forEach { socketsShouldTerminate.insert($0) }
+            universes.forEach { $0.terminateSockets() }
+        }
     }
 
     /// Adds a new universe to this source.
     ///
-    /// If a universe with this number already exists, this universe will not be added.
+    /// If a universe with this number already exists, it will not be added.
     ///
     /// - Parameters:
     ///    - universe: The universe to add.
@@ -452,31 +472,24 @@ final public class sACNSource {
     /// - Throws: An error of type `sACNSourceValidationError`.
     ///
     public func addUniverse(_ universe: sACNSourceUniverse) throws {
-        try socketDelegateQueue.sync {
-            guard !shouldTerminate else {
-                throw sACNSourceValidationError.sourceTerminating
-            }
-
-            guard !universeNumbers.contains(universe.number) else {
-                throw sACNSourceValidationError.universeExists
-            }
-
-            let internalUniverse = SourceUniverse(
-                with: universe, sourcePriority: self.priority, nameData: self.nameData, rootLayer: self.rootLayer)
-            self.universes.append(internalUniverse)
-            self.universeNumbers.append(universe.number)
-            self.universeNumbers.sort()
-
-            if _isListening && delegateTransmissionState != true {
-                delegateTransmissionState = true
-                let delegate = delegate
-                delegateQueue.async {
-                    delegate?.transmissionStarted()
-                }
-            }
-
-            updateUniverseDiscoveryMessages()
+        guard !shouldTerminate else {
+            throw sACNSourceValidationError.sourceTerminating
         }
+        guard !universeNumbers.contains(universe.number) else {
+            throw sACNSourceValidationError.universeExists
+        }
+
+        let internalUniverse = SourceUniverse(
+            with: universe, sourcePriority: self.priority, nameData: self.nameData, rootLayer: self.rootLayer)
+        self.universes.append(internalUniverse)
+        self.universeNumbers.append(universe.number)
+        self.universeNumbers.sort()
+
+        if isListening {
+            setTransmitting(true)
+        }
+
+        updateUniverseDiscoveryMessages()
     }
 
     /// Removes an existing universe with the number provided.
@@ -487,23 +500,20 @@ final public class sACNSource {
     /// - Throws: An error of type `sACNSourceValidationError`.
     ///
     public func removeUniverse(with number: UInt16) throws {
-        try socketDelegateQueue.sync {
-            guard universeNumbers.contains(number) else {
-                throw sACNSourceValidationError.universeDoesNotExist
-            }
-
-            if _isListening {
-                if let internalUniverse = universes.first(where: { $0.number == number }) {
-                    // terminate this universe on all sockets
-                    internalUniverse.terminate(remove: true)
-                }
-            } else {
-                universes.removeAll(where: { $0.number == number })
-                universeNumbers.removeAll(where: { $0 == number })
-            }
-
-            updateUniverseDiscoveryMessages()
+        guard universeNumbers.contains(number) else {
+            throw sACNSourceValidationError.universeDoesNotExist
         }
+
+        if isListening {
+            if let internalUniverse = universes.first(where: { $0.number == number }) {
+                internalUniverse.terminate(remove: true)
+            }
+        } else {
+            universes.removeAll(where: { $0.number == number })
+            universeNumbers.removeAll(where: { $0 == number })
+        }
+
+        updateUniverseDiscoveryMessages()
     }
 
     /// Updates the human-readable name of this source.
@@ -512,13 +522,9 @@ final public class sACNSource {
     ///    - name: A human-readable name for this source.
     ///
     public func update(name: String) {
-        socketDelegateQueue.sync {
-            self.name = name
-
-            // rebuild all messages and layers dependent on name data
-            updateUniverseDiscoveryMessages()
-            updateDataFramingLayers()
-        }
+        self.name = name
+        updateUniverseDiscoveryMessages()
+        updateDataFramingLayers()
     }
 
     /// Updates the priority of this source.
@@ -527,43 +533,23 @@ final public class sACNSource {
     ///    - priority: A new priority for this source (values permitted 0-200).
     ///
     public func update(priority: UInt8) {
-        socketDelegateQueue.sync {
-            let validPriority = priority.nearestValidPriority()
-            self.priority = validPriority
-
-            updateDataFramingLayers()
-        }
+        self.priority = priority.nearestValidPriority()
+        updateDataFramingLayers()
     }
 
-    /// Updates an existing universe using the per-packet priority, levels and optionally per-slot priorities of an existing `sACNUniverse`.
+    /// Updates an existing universe using the per-packet priority, levels and optionally per-slot priorities.
     ///
-    /// Values will be checked to see if changes require output changes.
-    /// It is safe to send the same values without impacting output adversely.
-    ///
-    ///  - parameters:
+    ///  - Parameters:
     ///     - universe: An `sACNSourceUniverse`.
     ///
     ///  - Throws: An error of type `sACNSourceValidationError`.
     ///
     public func updateLevels(with universe: sACNSourceUniverse) throws {
-        try socketDelegateQueue.sync {
-            let internalUniverse = self.universes.first(where: { $0.number == universe.number })
-            guard let internalUniverse = internalUniverse else {
-                throw sACNSourceValidationError.universeDoesNotExist
-            }
-
-            guard !_isListening || !internalUniverse.removeAfterTerminate else {
-                throw sACNSourceValidationError.universeTerminating
-            }
-
-            try internalUniverse.update(with: universe, sourcePriority: self.priority, sourceActive: _isListening)
-        }
+        let internalUniverse = try requireUpdatableUniverse(number: universe.number)
+        try internalUniverse.update(with: universe, sourcePriority: self.priority, sourceActive: isListening)
     }
 
     /// Updates an existing universe with levels.
-    ///
-    /// Values will be checked to see if changes require output changes.
-    /// It is safe to send the same values without impacting output adversely.
     ///
     ///  - Parameters:
     ///     - levels: The new levels (512).
@@ -572,27 +558,13 @@ final public class sACNSource {
     ///  - Throws: An error of type `sACNSourceValidationError`.
     ///
     public func updateLevels(_ levels: [UInt8], in universeNumber: UInt16) throws {
-        try socketDelegateQueue.sync {
-            let internalUniverse = self.universes.first(where: { $0.number == universeNumber })
-            guard let internalUniverse = internalUniverse else {
-                throw sACNSourceValidationError.universeDoesNotExist
-            }
-
-            guard !_isListening || !internalUniverse.removeAfterTerminate else {
-                throw sACNSourceValidationError.universeTerminating
-            }
-
-            try internalUniverse.update(levels: levels, sourceActive: _isListening)
-        }
+        let internalUniverse = try requireUpdatableUniverse(number: universeNumber)
+        try internalUniverse.update(levels: levels, sourceActive: isListening)
     }
 
     /// Updates an existing universe with per-slot priorities.
     ///
-    /// If `nil` is passed to `priorities`, this source will no longer output
-    /// per-slot priority.
-    ///
-    /// Values will be checked to see if changes require output changes.
-    /// It is safe to send the same values without impacting output adversely.
+    /// If `nil` is passed, this source will no longer output per-slot priority.
     ///
     ///  - Parameters:
     ///     - priorities: Optional new per-slot priorities (512).
@@ -601,29 +573,13 @@ final public class sACNSource {
     ///  - Throws: An error of type `sACNSourceValidationError`.
     ///
     public func updatePriorities(_ priorities: [UInt8]?, in universeNumber: UInt16) throws {
-        try socketDelegateQueue.sync {
-            let internalUniverse = self.universes.first(where: { $0.number == universeNumber })
-            guard let internalUniverse = internalUniverse else {
-                throw sACNSourceValidationError.universeDoesNotExist
-            }
-
-            guard !_isListening || !internalUniverse.removeAfterTerminate else {
-                throw sACNSourceValidationError.universeTerminating
-            }
-
-            try internalUniverse.update(priorities: priorities, sourceActive: _isListening)
-        }
+        let internalUniverse = try requireUpdatableUniverse(number: universeNumber)
+        try internalUniverse.update(priorities: priorities, sourceActive: isListening)
     }
 
     /// Updates a slot of an existing universe with a level and optionally per-slot priority.
     ///
-    /// Values will be checked to see if changes require output changes.
-    /// It is safe to send the same values without impacting output adversely.
-    ///
-    /// If a priority is provided it will only be processed if per-slot priorities have previously been added using the
-    /// `addUniverse`, or `updateLevels(:sACNSourceUniverse)` methods
-    ///
-    ///  - parameters:
+    ///  - Parameters:
     ///     - slot: The slot to update (0-511).
     ///     - universeNumber: The universe number to update.
     ///     - level: The level for this slot.
@@ -632,29 +588,13 @@ final public class sACNSource {
     ///  - Throws: An error of type `sACNSourceValidationError`.
     ///
     public func updateSlot(slot: Int, in universeNumber: UInt16, level: UInt8, priority: UInt8? = nil) throws {
-        try socketDelegateQueue.sync {
-            let internalUniverse = self.universes.first(where: { $0.number == universeNumber })
-            guard let internalUniverse = internalUniverse else {
-                throw sACNSourceValidationError.universeDoesNotExist
-            }
-
-            guard !_isListening || !internalUniverse.removeAfterTerminate else {
-                throw sACNSourceValidationError.universeTerminating
-            }
-
-            try internalUniverse.update(slot: slot, level: level, priority: priority, sourceActive: _isListening)
-        }
+        let internalUniverse = try requireUpdatableUniverse(number: universeNumber)
+        try internalUniverse.update(slot: slot, level: level, priority: priority, sourceActive: isListening)
     }
 
     /// Updates a slot of an existing universe with a per-slot priority.
     ///
-    /// Values will be checked to see if changes require output changes.
-    /// It is safe to send the same values without impacting output adversely.
-    ///
-    /// If a priority is provided it will only be processed if per-slot priorities have previously been added using the
-    /// `addUniverse`, or `updateLevels(:sACNSourceUniverse)` methods
-    ///
-    ///  - parameters:
+    ///  - Parameters:
     ///     - slot: The slot to update (0-511).
     ///     - universeNumber: The universe number to update.
     ///     - priority: The per-slot priority for this slot.
@@ -662,96 +602,95 @@ final public class sACNSource {
     ///  - Throws: An error of type `sACNSourceValidationError`.
     ///
     public func updateSlot(slot: Int, in universeNumber: UInt16, priority: UInt8) throws {
-        try socketDelegateQueue.sync {
-            let internalUniverse = self.universes.first(where: { $0.number == universeNumber })
-            guard let internalUniverse = internalUniverse else {
-                throw sACNSourceValidationError.universeDoesNotExist
-            }
-
-            guard !_isListening || !internalUniverse.removeAfterTerminate else {
-                throw sACNSourceValidationError.universeTerminating
-            }
-
-            try internalUniverse.update(slot: slot, priority: priority, sourceActive: _isListening)
-        }
+        let internalUniverse = try requireUpdatableUniverse(number: universeNumber)
+        try internalUniverse.update(slot: slot, priority: priority, sourceActive: isListening)
     }
 
-    // MARK: General
+    /// Test seam: the numbers of the universes currently held (reflecting drain-time removals), for
+    /// lifecycle assertions. `[UInt16]` is `Sendable`, unlike the `SourceUniverse` array itself.
+    var currentUniverseNumbers: [UInt16] {
+        universes.map(\.number)
+    }
+
+    /// Test seam: terminates a specific universe in place (as `shouldOutput(false)` does for all
+    /// universes), so the transmit-builder characterization tests can stage a present-but-inactive state.
+    func terminate(universe number: UInt16, remove: Bool) {
+        universes.first { $0.number == number }?.terminate(remove: remove)
+    }
+
+    /// Test seam (performance guard): whether the packet emitted for the first universe shares backing
+    /// storage with that universe's stored pre-composed packet - i.e. it was handed over, not reallocated
+    /// per frame. Computed in-isolation so no off-actor `Data` copy perturbs the buffer identity.
+    func emittedPacketSharesStorage(perAddressPriority: Bool) -> Bool {
+        guard let universe = universes.first else { return false }
+        let startCodeOffset = RootLayer.Offset.data.rawValue + DataFramingLayer.Offset.data.rawValue + DMPLayer.Offset.propertyValues.rawValue
+        let wantedStartCode = perAddressPriority ? DMX.STARTCode.perAddressPriority.rawValue : DMX.STARTCode.null.rawValue
+        let (messages, _) = buildDataMessages()
+        guard let message = messages.first(where: { Array($0.data)[startCodeOffset] == wantedStartCode }) else { return false }
+        let stored = perAddressPriority ? universe.prioritiesPacket : universe.levelsPacket
+        return message.data.withUnsafeBytes { emitted in stored.withUnsafeBytes { s in emitted.baseAddress == s.baseAddress } }
+    }
+
+    /// Looks up a universe that is valid to update, or throws.
+    private func requireUpdatableUniverse(number: UInt16) throws -> SourceUniverse {
+        guard let internalUniverse = universes.first(where: { $0.number == number }) else {
+            throw sACNSourceValidationError.universeDoesNotExist
+        }
+        guard !isListening || !internalUniverse.removeAfterTerminate else {
+            throw sACNSourceValidationError.universeTerminating
+        }
+        return internalUniverse
+    }
+
+    // MARK: - General
 
     /// Attempts to start listening for a socket on an optional interface.
-    ///
-    /// - Parameters:
-    ///    - socket: The socket to start listening.
-    ///    - interface: Optional: An optional interface on which to listen (`nil` means all interfaces).
-    ///
-    /// - Throws: An error of type `sACNComponentSocketError`.
-    ///
-    private func listenForSocket(_ socket: ComponentSocket, on interface: String? = nil) throws {
+    private func listenForSocket(_ socket: ComponentSocket, on interface: String? = nil) async throws {
         socket.delegate = self
-        try socket.startListening(onInterface: interface)
+        try await socket.startListening(onInterface: interface)
     }
 
-    // MARK: Timers / Messaging
+    // MARK: - Timers / Messaging
 
     /// Starts this source's universe discovery timer.
     private func startUniverseDiscovery() {
-        timerQueue.async { [self] in
-            // send a discovery message straight away
-            self.socketDelegateQueue.async {
-                self.sendUniverseDiscoveryMessage()
-            }
-
-            let timer = DispatchSource.repeatingTimer(interval: Self.universeDiscoveryInterval, leeway: Self.timingLeeway, queue: timerQueue) {
-                [weak self] in
-                if let _ = self?.universeDiscoveryTimer {
-                    self?.socketDelegateQueue.async {
-                        self?.sendUniverseDiscoveryMessage()
-                    }
-                }
-            }
-            universeDiscoveryTimer = timer
+        // send a discovery message straight away (already isolated - no hop)
+        sendUniverseDiscoveryMessage()
+        universeDiscoveryTask = runtime.scheduleRepeated(after: Self.universeDiscoveryInterval, every: Self.universeDiscoveryInterval) {
+            [weak self] in
+            self?.assumeIsolated { $0.sendUniverseDiscoveryMessage() }
         }
     }
 
     /// Stops this source's universe discovery heartbeat.
     private func stopUniverseDiscovery() {
-        timerQueue.sync {
-            universeDiscoveryTimer?.cancel()
-            universeDiscoveryTimer = nil
-        }
+        universeDiscoveryTask?.cancel()
+        universeDiscoveryTask = nil
     }
 
     /// Starts this source's data transmission heartbeat.
     private func startDataTransmit() {
-        timerQueue.async { [self] in
-            let timer = DispatchSource.repeatingTimer(interval: Self.dataTransmitInterval, leeway: Self.timingLeeway, queue: timerQueue) {
-                [weak self] in
-                if let _ = self?.dataTransmitTimer {
-                    self?.socketDelegateQueue.async {
-                        self?.sendDataMessages()
-                    }
-                }
-            }
-            dataTransmitTimer = timer
+        dataTransmitTask = runtime.scheduleRepeated(after: Self.dataTransmitInterval, every: Self.dataTransmitInterval) { [weak self] in
+            self?.assumeIsolated { $0.sendDataMessages() }
         }
     }
 
-    /// Stops this source's data transmission for all sockets.
+    /// Stops this source's data transmission for all sockets (marking termination; the timer keeps running
+    /// until `sendDataMessages` observes termination is complete).
+    ///
+    /// Deliberately does **not** touch `socketsShouldTerminate`: the universes' `shouldTerminate` drives the
+    /// termination packets and the sockets close at teardown, so populating it here would be redundant - and
+    /// overwriting it would clobber a pending interface-removal mark from a concurrent `updateInterfaces`.
     private func stopDataTransmit() {
         shouldTerminate = true
-        let socketIds = sockets.reduce(into: [String: Bool]()) { dict, socket in
-            dict[socket.key] = false
-        }
-        socketsShouldTerminate = socketIds
-        // terminate all universes on all sockets, but keep the sockets and universes present
         universes.forEach { $0.terminate(remove: false) }
     }
 
     /// Sends the Universe Discovery messages for this source.
     private func sendUniverseDiscoveryMessage() {
-        guard _shouldOutput else { return }
+        guard lifecycle != .idle, _shouldOutput else { return }
 
-        sockets.forEach { interface, socket in
+        sockets.forEach { _, socket in
             for message in universeDiscoveryMessages {
                 if ipMode.usesIPv4() {
                     socket.send(message: message, host: IPv4.universeDiscoveryHostname, port: UDP.sdtPort)
@@ -762,18 +701,80 @@ final public class sACNSource {
             }
         }
 
-        let debugDelegate = debugDelegate
-        delegateQueue.async { debugDelegate?.debugLog("Sending universe discovery message(s) multicast") }
+        debugLogHub.yield("Sending universe discovery message(s) multicast")
     }
 
-    // MARK: Build and Update Data
+    /// Sends the data messages for this source (the ~44 fps heartbeat and termination drain).
+    ///
+    /// Also runs while `.reconfiguring`: `updateInterfaces` only mutates state synchronously between its
+    /// binds, so a tick interleaved at one of its suspensions sees a consistent (pre-commit) socket set -
+    /// and dropping ticks for the bind duration would starve NULL keep-alives and time the source out at
+    /// otherwise-healthy receivers.
+    private func sendDataMessages() {
+        guard lifecycle == .listening || lifecycle == .reconfiguring || lifecycle == .stopping else { return }
+
+        let universesToRemove = universes.filter { $0.removeAfterTerminate && $0.shouldTerminate && $0.dirtyCounter < 1 }
+        let universesReadyForSocketRemoval = universes.filter { $0.pendingSocketRemoval && $0.dirtyCounter < 1 }
+        self.universes.removeAll(where: { universesToRemove.contains($0) })
+        self.universeNumbers.removeAll(where: { universesToRemove.map { universe in universe.number }.contains($0) })
+
+        let activeUniverses = universes.filter { !$0.shouldTerminate || $0.dirtyCounter > 0 }
+
+        if activeUniverses.isEmpty {
+            setTransmitting(false)
+
+            // Drop (not merely un-mark) any sockets pending removal, so a reconfigure interrupted by a stop
+            // does not leave a removed interface in the dict to be re-bound on the next start.
+            socketsShouldTerminate.forEach { sockets.removeValue(forKey: $0) }
+            socketsShouldTerminate.removeAll()
+
+            if self.shouldTerminate {
+                // the source has finished terminating: stop the timer, close the sockets, and reach idle
+                // (clearing the drain flags and resuming any `stop()` caller awaiting completion)
+                dataTransmitTask?.cancel()
+                dataTransmitTask = nil
+                sockets.values.forEach { $0.close() }
+                reachedIdle()
+            }
+            return
+        }
+
+        setTransmitting(true)
+
+        // A socket-termination drain has finished (its universes sent their 3 packets): drop the removed
+        // sockets and clear the marks. One branch covers both whole-universe and socket-only removals, so a
+        // tick where both are ready cannot strand `pendingSocketRemoval`.
+        if !socketsShouldTerminate.isEmpty && (!universesToRemove.isEmpty || !universesReadyForSocketRemoval.isEmpty) {
+            socketsShouldTerminate.forEach { sockets.removeValue(forKey: $0) }
+            socketsShouldTerminate.removeAll()
+            universesReadyForSocketRemoval.forEach { $0.terminateSocketsComplete() }
+        }
+
+        let (universeMessages, socketTerminationMessages) = buildDataMessages()
+
+        sockets.forEach { interface, socket in
+            let messages = socketsShouldTerminate.contains(interface) ? socketTerminationMessages : universeMessages
+
+            for universeMessage in messages {
+                if ipMode.usesIPv4() {
+                    let hostname = IPv4.multicastHostname(for: universeMessage.universeNumber)
+                    socket.send(message: universeMessage.data, host: hostname, port: UDP.sdtPort)
+                }
+                if ipMode.usesIPv6() {
+                    let hostname = IPv6.multicastHostname(for: universeMessage.universeNumber)
+                    socket.send(message: universeMessage.data, host: hostname, port: UDP.sdtPort)
+                }
+            }
+        }
+    }
+
+    // MARK: - Build and Update Data
 
     /// Builds and updates the universe discovery messages for this source.
     private func updateUniverseDiscoveryMessages() {
         let univCount = universeNumbers.count
         let univMax = UniverseDiscoveryLayer.maxUniverseNumbers
 
-        // how many pages are required (must be capped at max pages even if more exist)
         let pageCount = min((univCount / univMax) + (univCount % univMax == 0 ? 0 : 1), Int(UInt8.max))
 
         var pages = [Data]()
@@ -782,18 +783,15 @@ final public class sACNSource {
             let last = min(first + univMax, univCount)
             let pageUniverseNumbers = Array(universeNumbers[first..<last])
 
-            // layers
             var rootLayer = RootLayer.createAsData(vector: .extended, cid: cid)
             var framingLayer = UniverseDiscoveryFramingLayer.createAsData(nameData: nameData)
             let universeDiscoveryLayer = UniverseDiscoveryLayer.createAsData(
                 page: UInt8(page), lastPage: UInt8(pageCount - 1), universeList: pageUniverseNumbers)
 
-            // calculate and insert framing layer length
-            let framingLayerLength: UInt16 = UInt16(framingLayer.count + universeDiscoveryLayer.count)
+            let framingLayerLength = UInt16(framingLayer.count + universeDiscoveryLayer.count)
             framingLayer.replacingUniverseDiscoveryFramingFlagsAndLength(with: framingLayerLength)
 
-            // calculate and insert root layer length
-            let rootLayerLength: UInt16 = UInt16(rootLayer.count + framingLayer.count + universeDiscoveryLayer.count - RootLayer.lengthCountOffset)
+            let rootLayerLength = UInt16(rootLayer.count + framingLayer.count + universeDiscoveryLayer.count - RootLayer.lengthCountOffset)
             rootLayer.replacingRootLayerFlagsAndLength(with: rootLayerLength)
 
             pages.append(rootLayer + framingLayer + universeDiscoveryLayer)
@@ -809,108 +807,13 @@ final public class sACNSource {
         }
     }
 
-}
-
-// MARK: -
-// MARK: -
-
-/// sACN Source Extension
-///
-/// Extensions to `sACNSource` to handle message creation and transmission.
-///
-private extension sACNSource {
-
-    /// Sends the data messages for this source.
-    private func sendDataMessages() {
-        // remove all universes which are full terminated and should be removed
-        let universesToRemove = universes.filter { $0.removeAfterTerminate && $0.shouldTerminate && $0.dirtyCounter < 1 }
-        let universesReadyForSocketRemoval = universes.filter { $0.pendingSocketRemoval && $0.dirtyCounter < 1 }
-        self.universes.removeAll(where: { universesToRemove.contains($0) })
-        self.universeNumbers.removeAll(where: { universesToRemove.map { universe in universe.number }.contains($0) })
-
-        let activeUniverses = universes.filter { !$0.shouldTerminate || $0.dirtyCounter > 0 }
-
-        if activeUniverses.isEmpty {
-            // notify transmission ended (once)
-            if delegateTransmissionState != false {
-                delegateTransmissionState = false
-                let delegate = delegate
-                delegateQueue.async {
-                    delegate?.transmissionEnded()
-                }
-            }
-
-            socketsShouldTerminate.removeAll()
-
-            // termination of all universes to be removed is complete
-            if self.shouldTerminate {
-                // the source should terminate
-                timerQueue.sync {
-                    dataTransmitTimer?.cancel()
-                    dataTransmitTimer = nil
-                }
-
-                sockets.forEach { _, socket in
-                    socket.stopListening()
-                }
-
-                // the source is now terminated
-                shouldTerminate = false
-                _isListening = false
-            }
-            return
-        } else if !universesToRemove.isEmpty && !socketsShouldTerminate.isEmpty {
-            // not all universes were removed, but some were and there may be sockets which should terminate
-            socketsShouldTerminate.forEach { interface, remove in
-                if remove {
-                    // deinit first stops listening
-                    sockets.removeValue(forKey: interface)
-                }
-            }
-            socketsShouldTerminate.removeAll()
-        } else if !universesReadyForSocketRemoval.isEmpty && !socketsShouldTerminate.isEmpty {
-            // all universes are ready for socket removal
-            socketsShouldTerminate.forEach { interface, remove in
-                if remove {
-                    // deinit first stops listening
-                    sockets.removeValue(forKey: interface)
-                }
-            }
-            socketsShouldTerminate.removeAll()
-            universesReadyForSocketRemoval.forEach { $0.terminateSocketsComplete() }
-        }
-
-        let (universeMessages, socketTerminationMessages) = buildDataMessages()
-
-        sockets.forEach { interface, socket in
-            let messages = socketsShouldTerminate[interface] != nil ? socketTerminationMessages : universeMessages
-
-            for universeMessage in messages {
-                if ipMode.usesIPv4() {
-                    let hostname = IPv4.multicastHostname(for: universeMessage.universeNumber)
-                    socket.send(message: universeMessage.data, host: hostname, port: UDP.sdtPort)
-                }
-                if ipMode.usesIPv6() {
-                    let hostname = IPv6.multicastHostname(for: universeMessage.universeNumber)
-                    socket.send(message: universeMessage.data, host: hostname, port: UDP.sdtPort)
-                }
-            }
-        }
-    }
-
-}
-
-/// Message building
-///
-/// Extensions to `sACNSource` to build the data messages for transmission.
-///
-extension sACNSource {
+    // MARK: - Message building
 
     /// Builds the data (and socket-termination) messages for the currently active universes.
     ///
-    /// This advances each universe's transmit state machine (sequence, dirty and transmit counters)
-    /// and returns the packets to be sent, performing no socket I/O. It is extracted from
-    /// `sendDataMessages()` so the transmit cadence and termination behavior can be unit tested.
+    /// Advances each universe's transmit state machine (sequence, dirty and transmit counters) and returns
+    /// the packets to send, performing no socket I/O. Extracted from `sendDataMessages()` so the transmit
+    /// cadence and termination behavior can be unit tested (`await source.buildDataMessages()`).
     ///
     /// - Returns: The universe messages to send, and the messages to send to terminating sockets.
     ///
@@ -995,6 +898,9 @@ public enum sACNSourceValidationError: LocalizedError, Sendable {
     /// The source is started.
     case sourceStarted
 
+    /// The source is busy with an in-flight start, stop or interface reconfiguration.
+    case sourceBusy
+
     /// The source is terminating.
     case sourceTerminating
 
@@ -1024,6 +930,8 @@ public enum sACNSourceValidationError: LocalizedError, Sendable {
         switch self {
         case .sourceStarted:
             return "The source is already started"
+        case .sourceBusy:
+            return "The source is busy starting, stopping or reconfiguring"
         case .sourceTerminating:
             return "The source is terminating"
         case .universeTerminating:
@@ -1048,45 +956,29 @@ public enum sACNSourceValidationError: LocalizedError, Sendable {
 // MARK: -
 // MARK: -
 
-/// sACN Source Extension
-///
 /// `ComponentSocketDelegate` conformance.
+///
+/// The source's sockets are actor-path sockets (`sACNRuntime.makeSocket`): they deliver on the event loop
+/// this actor is isolated to, so these `nonisolated` methods `assumeIsolated` into the actor with no hop.
+///
 extension sACNSource: ComponentSocketDelegate {
-    /// Called when a message has been received.
-    ///
-    /// - Parameters:
-    ///    - socket: The socket which received a message.
-    ///    - data: The message as `Data`.
-    ///    - sourceHostname: The hostname of the source of the message.
-    ///    - sourcePort: The UDP port of the source of the message.
-    ///    - ipFamily: The `ComponentSocketIPFamily` of the source of the message.
-    ///
-    func receivedMessage(
+
+    nonisolated func receivedMessage(
         for socket: ComponentSocket, withData data: Data, sourceHostname: String, sourcePort: UInt16, ipFamily: ComponentSocketIPFamily
     ) {
-        // sACN sources do not process messages
+        // sACN sources do not process received messages.
     }
 
-    /// Called when the socket was closed.
-    ///
-    /// - Parameters:
-    ///    - socket: The socket which was closed.
-    ///    - error: An optional error which occured when the socket was closed.
-    ///
-    func socket(_ socket: ComponentSocket, socketDidCloseWith reason: SocketCloseReason) {
-        guard self._isListening else { return }
-        let delegate = delegate
-        delegateQueue.async { delegate?.source(self, interface: socket.interface, socketDidCloseWithError: reason) }
+    nonisolated func socket(_ socket: ComponentSocket, socketDidCloseWith reason: SocketCloseReason) {
+        let interface = socket.interface
+        assumeIsolated { source in
+            guard source.isListening else { return }
+            source.eventsHub.yield(.socketClosed(interface: interface, reason: reason))
+        }
     }
 
-    /// Called when a debug socket log is produced.
-    ///
-    /// - Parameters:
-    ///    - socket: The socket for which this log event occured.
-    ///    - logMessage: The debug message.
-    ///
-    func debugLog(for socket: ComponentSocket, with logMessage: String) {
-        let debugDelegate = debugDelegate
-        delegateQueue.async { debugDelegate?.debugSocketLog(logMessage) }
+    nonisolated func debugLog(for socket: ComponentSocket, with logMessage: String) {
+        assumeIsolated { $0.debugLogHub.yield(logMessage) }
     }
+
 }

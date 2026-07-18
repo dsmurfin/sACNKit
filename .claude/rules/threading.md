@@ -1,15 +1,18 @@
-# Threading & concurrency contract (current, post-Phase 2)
+# Threading & concurrency contract (current, mid-Phase-4)
 
-The library has **no Swift Concurrency API yet**; it uses GCD serial queues + weak delegates, with
-`StrictConcurrency=targeted` checking staged in `Package.swift` (warning-clean; CI builds with
-warnings-as-errors). The actor/`async` model lands in Phase 4 (MODERNIZATION.md). Until then, these
-contracts hold and must be respected when touching the code.
+The concurrency model is **mixed**: `sACNSource` is now a Swift `actor` isolated to the shared NIO event
+loop (Phase 4 PR2 - see docs/modernization/phase-4.md and the actor rules below), while the **receivers**
+still use GCD serial queues + weak delegates, with `StrictConcurrency=targeted` checking in `Package.swift`
+(warning-clean; CI builds with warnings-as-errors). The remaining actor conversions land later in Phase 4.
+The GCD contracts below apply to the **receiver** components; do not apply them to the `sACNSource` actor.
 
-## Queue model
-- Each socket-owning component (`sACNSource`, `sACNReceiverRaw`, `sACNDiscoveryReceiver`) owns a
+## Queue model (receivers)
+- Each socket-owning **receiver** component (`sACNReceiverRaw`, `sACNDiscoveryReceiver`) owns a
   **`socketDelegateQueue`** (serial) that both receives socket callbacks **and doubles as the state
   mutex**; nearly all private mutable state - including the `delegate`/`debugDelegate` references -
-  is only touched on that queue. When adding state or methods, keep that invariant.
+  is only touched on that queue. When adding state or methods, keep that invariant. (`sACNSource` no
+  longer follows this - it is an actor; its state is actor-isolated and it reserves a `Lifecycle` enum
+  synchronously before each `await` at its lifecycle sites.)
 - `sACNReceiver` and `sACNReceiverGroup` each own a private serial **`stateQueue`** guarding their
   state (`sources`, mergers, `receivers`); public API uses `performOnStateQueue` (a
   `DispatchSpecificKey` sentinel + `stateQueue.sync`). The state queue must never target the

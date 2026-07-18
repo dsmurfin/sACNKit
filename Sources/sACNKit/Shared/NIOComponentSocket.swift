@@ -332,6 +332,21 @@ final class NIOComponentSocket: ComponentSocket, @unchecked Sendable {
         }
     }
 
+    /// Closes this socket's channels fire-and-forget (no blocking, no awaiting), so it is safe from any
+    /// context including the event loop.
+    func close() {
+        let channels = state.withLockedValue { state -> [Channel] in
+            let channels = Array(state.channels.values)
+            state.channels = [:]
+            state.closeReported = true
+            state.epoch &+= 1
+            return channels
+        }
+        for channel in channels {
+            channel.close(promise: nil)
+        }
+    }
+
     /// Sends a message to a specific host and port.
     ///
     /// - Parameters:

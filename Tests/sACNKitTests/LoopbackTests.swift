@@ -39,7 +39,7 @@ struct LoopbackTests {
     }
 
     @Test("A source's levels arrive merged at a receiver", .timeLimit(.minutes(1)))
-    func sourceToReceiver() throws {
+    func sourceToReceiver() async throws {
         let universe: UInt16 = 63999
         let levels: [UInt8] = (0..<512).map { UInt8($0 % 256) }
 
@@ -48,33 +48,31 @@ struct LoopbackTests {
         let delegate = DelegateMock()
         receiver.setDelegate(delegate)
         try receiver.start()
+        defer { receiver.stop() }
 
-        let source = sACNSource(name: "Loopback Test Source", delegateQueue: DispatchQueue(label: "com.danielmurfin.sACNKitTests.loopbackSource"))
-        try source.addUniverse(sACNSourceUniverse(number: universe, levels: levels))
-        try source.start()
-        defer {
-            source.stop()
-            receiver.stop()
+        let source = sACNSource(name: "Loopback Test Source")
+        try await source.addUniverse(sACNSourceUniverse(number: universe, levels: levels))
+        try await source.start()
+
+        try await withSourceStopped(source) {
+            // sampling (1500 ms) must complete before merged data is notified
+            let merged = try #require(try await Self.waitForMerged(delegate), "expected merged data from the loopback source")
+            #expect(merged.universe == universe)
+            #expect(merged.levels == levels)
+            #expect(merged.numberOfActiveSources == 1)
+
+            // source information is available from within and outside callbacks
+            let cid = try #require(merged.activeSources.first)
+            let information = try receiver.information(for: cid)
+            #expect(information.name == "Loopback Test Source")
         }
-
-        // sampling (1500 ms) must complete before merged data is notified
-        #expect(delegate.mergedSemaphore.wait(timeout: .now() + .seconds(10)) == .success, "expected merged data from the loopback source")
-        let merged = try #require(delegate.merged.last)
-        #expect(merged.universe == universe)
-        #expect(merged.levels == levels)
-        #expect(merged.numberOfActiveSources == 1)
-
-        // source information is available from within and outside callbacks
-        let cid = try #require(merged.activeSources.first)
-        let information = try receiver.information(for: cid)
-        #expect(information.name == "Loopback Test Source")
     }
 
     /// IPv6 end-to-end, exercising the `IPV6_MULTICAST_IF` egress path (the one untested-and-suspect
     /// area flagged in the Phase 3 completion note / risk R5). Requires working IPv6 multicast
     /// loopback, so it shares the `SACNKIT_NETWORK_TESTS` gate and is never a merge blocker.
     @Test("A source's levels arrive merged at a receiver over IPv6", .timeLimit(.minutes(1)))
-    func sourceToReceiverIPv6() throws {
+    func sourceToReceiverIPv6() async throws {
         let universe: UInt16 = 63999
         let levels: [UInt8] = (0..<512).map { UInt8($0 % 256) }
         let interface = TestInterface.loopback
@@ -85,24 +83,44 @@ struct LoopbackTests {
         let delegate = DelegateMock()
         receiver.setDelegate(delegate)
         try receiver.start()
+        defer { receiver.stop() }
 
-        let source = sACNSource(
-            name: "Loopback Test Source v6", ipMode: .ipv6Only, interfaces: [interface],
-            delegateQueue: DispatchQueue(label: "com.danielmurfin.sACNKitTests.loopbackSourceV6"))
-        try source.addUniverse(sACNSourceUniverse(number: universe, levels: levels))
-        try source.start()
-        defer {
-            source.stop()
-            receiver.stop()
+        let source = sACNSource(name: "Loopback Test Source v6", ipMode: .ipv6Only, interfaces: [interface])
+        try await source.addUniverse(sACNSourceUniverse(number: universe, levels: levels))
+        try await source.start()
+
+        try await withSourceStopped(source) {
+            let merged = try #require(try await Self.waitForMerged(delegate), "expected merged data from the loopback source over IPv6")
+            #expect(merged.universe == universe)
+            #expect(merged.levels == levels)
+            #expect(merged.numberOfActiveSources == 1)
         }
+    }
 
-        #expect(
-            delegate.mergedSemaphore.wait(timeout: .now() + .seconds(10)) == .success,
-            "expected merged data from the loopback source over IPv6")
-        let merged = try #require(delegate.merged.last)
-        #expect(merged.universe == universe)
-        #expect(merged.levels == levels)
-        #expect(merged.numberOfActiveSources == 1)
+    /// Polls a delegate for merged data up to a timeout, in an async-friendly way (no blocking semaphore).
+    /// The sleep propagates cancellation (rather than `try?`-swallowing it), so a cancelled/timed-out run
+    /// unwinds immediately instead of busy-spinning the poll to the deadline.
+    private static func waitForMerged(_ delegate: DelegateMock, timeout: Duration = .seconds(10)) async throws -> sACNReceiverMergedData? {
+        let clock = ContinuousClock()
+        let deadline = clock.now + timeout
+        while clock.now < deadline {
+            if let merged = delegate.merged.last { return merged }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        return delegate.merged.last
+    }
+
+    /// Runs `body`, then stops `source` on **every** exit (success or throw), so a failed assertion never
+    /// leaks an un-terminated source into the next network test on the shared universe. `stop()` is async,
+    /// so a `defer` cannot do this.
+    private func withSourceStopped(_ source: sACNSource, _ body: () async throws -> Void) async throws {
+        do {
+            try await body()
+        } catch {
+            await source.stop()
+            throw error
+        }
+        await source.stop()
     }
 
 }

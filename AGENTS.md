@@ -19,7 +19,8 @@ API, Swift 6, cross-platform incl. Linux) and the current-state baseline.
 
 - `Package.swift` - SwiftPM manifest; single product `sACNKit`, one dependency (SwiftNIO).
 - `Sources/sACNKit/` - library source, organized by role:
-  - `Source/` - sACN transmit: `sACNSource`, `SourceUniverse`, source delegate.
+  - `Source/` - sACN transmit: `sACNSource` (an `actor` with an `async` API + `events`/`debugLog`
+    `AsyncStream`s; migrated in Phase 4 PR2), `SourceUniverse`.
   - `Receiver/` (+ `Receiver/Delegate/`) - receive stack: `sACNReceiverRaw` (engine), `sACNReceiver`,
     `sACNReceiverGroup`, `sACNDiscoveryReceiver`, and their delegate/data types.
   - `Merger/` - standalone HTP/priority merge engine: `sACNMerger`, `MergerSource`.
@@ -29,7 +30,8 @@ API, Swift 6, cross-platform incl. Linux) and the current-state baseline.
     `NetworkInterfaceResolver`), timing (`MonotonicTimer`), `Definitions/`, `DMX/`, `Universe/`,
     `Data+Extensions.swift`.
   - `Vendor/CwlDispatch.swift` - vendored GCD timer helpers. **Do not edit by hand** (removed in
-    Phase 4 with the async redesign; still used by the receivers/source timers today).
+    Phase 4 with the async redesign; still used by the **receiver** timers today - the `sACNSource`
+    actor's timers already run on NIO scheduled tasks via `sACNRuntime`).
 - `Tests/sACNKitTests/` - test target. Coverage is currently thin (`DMPLayerTests` only) and is being
   expanded; see MODERNIZATION.md Phase 1.
 
@@ -40,12 +42,15 @@ API, Swift 6, cross-platform incl. Linux) and the current-state baseline.
 - Supported platforms (current, in `Package.swift`): **iOS 18 / macOS 15 / tvOS 18 / visionOS 2 + Linux**
   (raised from iOS 17 / macOS 14 / tvOS 17 / visionOS 1 in Phase 4 for `SerialExecutor.checkIsolated`;
   Android/Windows are best-effort stretch targets).
-- Concurrency: **none today** - GCD serial queues (one per component, doubling as the state mutex) +
-  weak-delegate callbacks; no `Sendable`/async. A full actor + `async`/`AsyncStream` redesign under
-  Swift 6 strict concurrency is planned (MODERNIZATION.md Phases 2 & 4). Do not assume async APIs exist yet.
+- Concurrency: **mixed, mid-migration.** `sACNSource` is now a Swift `actor` with an `async` API and
+  `AsyncStream` events (Phase 4 PR2). The **receivers** are still GCD serial queues (one per component,
+  doubling as the state mutex) + weak-delegate callbacks. The actor conversion continues per component
+  (MODERNIZATION.md / docs/modernization/phase-4.md); do not assume the receivers are async yet, and do
+  not add GCD-queue/sentinel patterns to the `sACNSource` actor.
 - Networking: **SwiftNIO** (`Shared/NIOComponentSocket.swift`) behind the internal `ComponentSocket`
   protocol; interface strings are resolved to NIO devices/addresses by `NetworkInterfaceResolver`.
-  The transport migration (Phase 3) is done; the GCD/`CwlDispatch` timers still run until Phase 4.
+  The transport migration (Phase 3) is done; the `sACNSource` actor's timers already run on NIO scheduled
+  tasks, while the GCD/`CwlDispatch` **receiver** timers run until their Phase 4 actor conversion.
   Linux is now a supported build/test target (MODERNIZATION.md).
 
 ## Conventions
@@ -73,9 +78,12 @@ API, Swift 6, cross-platform incl. Linux) and the current-state baseline.
 - ALWAYS make minimal, focused changes; don't refactor unrelated code.
 - ALWAYS keep platform-specific code behind `#if` guards with portable fallbacks (Linux is a target -
   see MODERNIZATION.md).
-- ALWAYS mutate a component's state only on its serial `socketDelegateQueue` (the queue is the state
-  mutex), and reuse the `DispatchSpecificKey` reentrancy sentinel for any method callable both
-  externally and from within the queue - see `.claude/rules/threading.md`.
+- ALWAYS, **for the GCD receiver components**, mutate a component's state only on its serial
+  `socketDelegateQueue` (the queue is the state mutex), and reuse the `DispatchSpecificKey` reentrancy
+  sentinel for any method callable both externally and from within the queue - see
+  `.claude/rules/threading.md`. (The `sACNSource` actor does not use this: its state is actor-isolated and
+  it reserves the `Lifecycle` enum synchronously before each `await`; do not add queue/sentinel patterns
+  to it.)
 - NEVER add new synchronous cross-queue delegate delivery (AB/BA deadlock hazard - see
   `.claude/rules/threading.md`).
 - NEVER edit `Sources/sACNKit/Vendor/CwlDispatch.swift` by hand.

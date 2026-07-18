@@ -12,14 +12,21 @@ Linux runtime baseline in `docs/modernization/pre-phase-4-baseline.md`.
 
 ## Locked decisions (maintainer)
 
-1. **Isolation:** Swift **actors pinned to the shared NIO event loop's own serial executor**
-   (`eventLoop.executor`; `SelectableEventLoop` conforms to `NIOSerialEventLoopExecutor`). Actor
-   reentrancy remains and is handled in code at a few lifecycle sites (it is not removed by the executor
-   choice). **Platform floors are raised to macOS 15 / iOS 18 / tvOS 18 / visionOS 2** (from 14/17/17/1)
-   because the synchronous in-isolation delivery mechanism (`assumeIsolated` from the channel handler)
-   depends on `SerialExecutor.checkIsolated()`, which is `@available(macOS 15, iOS 18)` - on older
-   runtimes it is never consulted and `assumeIsolated` from a loop thread would trap. (Supersedes the
-   original 14/17 floor; MODERNIZATION.md + AGENTS.md platform sections need the same update.)
+1. **Isolation:** Swift **actors pinned to a custom `EventLoopSerialExecutor` over the shared NIO event
+   loop**. Actor reentrancy remains and is handled in code at a few lifecycle sites (it is not removed by
+   the executor choice). **Platform floors are raised to macOS 15 / iOS 18 / tvOS 18 / visionOS 2** (from
+   14/17/17/1) because the synchronous in-isolation delivery mechanism (`assumeIsolated` from the channel
+   handler / timer tick) depends on `SerialExecutor.checkIsolated()`, which is `@available(macOS 15, iOS
+   18)` - on older runtimes it is never consulted and `assumeIsolated` from a loop thread would trap.
+   (Supersedes the original 14/17 floor; MODERNIZATION.md + AGENTS.md platform sections need the same
+   update.) **Delta (PR2, empirical reversal):** PR1 dropped a custom executor in favour of
+   `eventLoop.executor`, on the review argument that `SelectableEventLoop` conforms to
+   `NIOSerialEventLoopExecutor` and so already supplies `checkIsolated()`. The loopback end-to-end test
+   proved this wrong: NIO's `checkIsolated()` is `@available(macOS 15+)` **inside SwiftNIO's precompiled
+   module**, and reached through the `any SerialExecutor` existential it resolves to the stdlib **default**
+   `checkIsolated()` (`_Concurrency/Executor.swift`), which traps unconditionally ("Unexpected isolation
+   context"). The custom `EventLoopSerialExecutor` (compiled at this package's macOS 15 floor, with an
+   explicit `checkIsolated()` calling `preconditionInEventLoop`) is required and was restored.
 2. **Event API:** **split streams** - a typed high-rate `data` stream (buffering-newest) plus a low-rate
    `events` enum stream, per component.
 3. **Staging:** **component-by-component**, each PR building green under Swift 5 language mode; a final PR
@@ -83,12 +90,14 @@ must be, or the synchronous hot-path delivery (below) breaks. NIO is confined to
   (self-rescheduling for fixed-rate repeats - see below). The `RuntimeTask` conformers own their chain
   with `[weak self]`, so a dropped handle deinit-cancels (cancel-on-deinit true by construction);
   `makeSocket` (added in PR2) returns a `NIOComponentSocket` bound to that loop.
-- **Actor executor: reuse `eventLoop.executor`** (no custom executor). `MultiThreadedEventLoopGroup`'s
-  `SelectableEventLoop` conforms to `NIOSerialEventLoopExecutor`, so `eventLoop.executor` already provides
-  a serial executor with `checkIsolated()` (macOS 15 / iOS 18) and complex-equality. A component actor's
-  `unownedExecutor` returns `runtime.serialExecutor.asUnownedSerialExecutor()`. (An earlier plan revision
-  hand-rolled an `EventLoopSerialExecutor` on a mistaken belief the default omitted `checkIsolated`; that
-  was verified false against the pinned NIO source and removed.)
+- **Actor executor: a custom `EventLoopSerialExecutor`** (`Shared/EventLoopSerialExecutor.swift`) over the
+  loop. `NIORuntime.serialExecutor` returns it; a component actor's `unownedExecutor` returns
+  `runtime.serialExecutor.asUnownedSerialExecutor()`. PR1 briefly used `eventLoop.executor` instead (on the
+  argument that `SelectableEventLoop` conforms to `NIOSerialEventLoopExecutor`), but PR2's loopback test
+  proved that traps: NIO's `checkIsolated()` is `@available(macOS 15+)` in its precompiled module and,
+  through the `any SerialExecutor` existential, resolves to the trapping stdlib default. The custom
+  executor implements `checkIsolated()` directly (`preconditionInEventLoop`) and, being compiled at this
+  package's macOS 15 floor, is unconditionally present. See the decision-1 delta above.
 - Because the actor's executor **is** the loop, socket futures bridge to `await future.get()` (no `.wait()`,
   no thread block), and inbound packets from the channel handler (on that same loop) enter isolation
   **synchronously** via `actor.assumeIsolated { $0.process(...) }` - **zero Task spawns on the hot path**,
@@ -99,10 +108,12 @@ must be, or the synchronous hot-path delivery (below) breaks. NIO is confined to
   (not `Sendable`) with `public struct SocketCloseReason: Error, Sendable { errnoCode: CInt?; message: String }`,
   built where `isFatal` classifies errno (`:404-411`). `SocketCloseReason` is public (it rides the public
   `events` streams) but is NIO-agnostic. **Behavior delta (PR2):** the internal close delegate now carries
-  `SocketCloseReason`, so while the still-live public delegates (`sACNSourceDelegate` etc.) keep their
-  `socketDidCloseWithError: Error?` shape, the delivered value is now a `SocketCloseReason`, not the raw
-  NIO `IOError` - a client that downcast the error sees a different type. Acceptable: these delegates are
-  deleted this phase, and the async migration is the breaking major.
+  `SocketCloseReason`. `sACNSourceDelegate` was deleted with the source's actor conversion (PR2), so its
+  close reason now rides the `events` stream as `.socketClosed(interface:reason:)`; the **receiver**
+  delegates that remain keep their `socketDidCloseWithError: Error?` shape but the delivered value is now a
+  `SocketCloseReason`, not the raw NIO `IOError` - a client that downcast the error sees a different type.
+  Acceptable: those delegates are deleted as each receiver converts, and the async migration is the
+  breaking major.
 
 ### 3. Timing - replace all 5 GCD timers via `runtime.scheduleRepeated/Once`
 
@@ -178,14 +189,40 @@ isolation boundaries, which is exactly the intended constraint.
 - **PR0 - Capture (docs only).** This document + a durable memory of the internal-`sACNRuntime` layering
   decision.
 - **PR1 - Runtime seam (additive, internal).** New `sACNRuntime.swift` (protocol + `RuntimeTask`),
-  `NIORuntime.swift` (executor via `eventLoop.executor` + **fixed-rate** `scheduleRepeated`/`scheduleOnce`
-  with cancel-on-deinit for the repeated handle), `AsyncStreamHub.swift` (broadcast hub, buffering policy
-  fixed per hub, terminal after `finish`). *Done.* Deferred to PR2 (with their first consumer, the source
-  actor): `NIOComponentSocket` async bind/close + injected loop + `SocketCloseReason`, and
+  `NIORuntime.swift` (**fixed-rate** `scheduleRepeated`/`scheduleOnce` with cancel-on-deinit for the
+  repeated handle), `AsyncStreamHub.swift` (broadcast hub, buffering policy fixed per hub, terminal after
+  `finish`). *Done.* (PR1 used `eventLoop.executor`; PR2 replaced it with a custom
+  `EventLoopSerialExecutor` - see the decision-1 delta.) Deferred to PR2 (with their first consumer, the
+  source actor): `NIOComponentSocket` async bind/close + injected loop + `SocketCloseReason`, and
   `runtime.makeSocket`.
-- **PR2 - `sACNSource` -> actor.** `events` stream; remove `delegateQueue`/sentinel; two timers ->
-  scheduled; reserve-before-await; delete `Source/sACNSourceDelegate.swift`.
-  `buildDataMessages`/`sendDataMessages` stay `internal` (tests call via `await`).
+- **PR2 - `sACNSource` -> actor.** *Done.* `events` stream (+ separate `debugLog` stream) and
+  `isTransmitting`; removed `delegateQueue`/sentinel; two timers -> scheduled; deleted
+  `Source/sACNSourceDelegate.swift`; added `Shared/EventLoopSerialExecutor.swift`.
+  `buildDataMessages`/`sendDataMessages` (+ `terminate`, `emittedPacketSharesStorage` test seams) stay
+  `internal` (tests call via `await`). Loopback tests migrated off the blocking semaphore to an async poll.
+  **Lifecycle hardening (post-review):** reserve-before-await was completed across *every* mutating entry
+  point via a `Lifecycle` enum (`idle/starting/listening/reconfiguring/stopping`), not just `start()` -
+  `stop()` is now `async` and awaits the termination drain (continuation resumed at the `.idle`
+  transition), a stop during `.starting`/`.reconfiguring` supersedes the in-flight op via the socket's
+  epoch/`CancellationError` path, `updateInterfaces` reserves `.reconfiguring` and binds all-or-nothing
+  (temp map, committed only if every bind succeeds), and `shouldOutput` is lifecycle-guarded so it cannot
+  resurrect terminating universes mid-drain. `_isListening` was folded into `lifecycle` (one source of
+  truth). `SourceLifecycleTests` is the gated regression net.
+  **Second review pass (termination-mark model):** the `socketsShouldTerminate` bookkeeping was wholesale-
+  overwritten in ways that corrupted each other in stop/reconfigure/removeUniverse overlap windows. Fixed
+  as one change: `SourceUniverse.removeAfterTerminate` is now **sticky** (a stop's `terminate(remove:false)`
+  cannot downgrade a `removeUniverse` mark); `stopDataTransmit` no longer populates `socketsShouldTerminate`
+  (redundant - the universes' `shouldTerminate` drives termination); the quiescent/removal branches now
+  actually *drop* marked sockets rather than only clearing the marks (and merged into one branch, fixing a
+  `pendingSocketRemoval` strand); `updateInterfaces` is rejected while a prior socket-drain is pending
+  (`.sourceBusy`) so a revert can't converge to zero sockets; and `sendDataMessages` now runs while
+  `.reconfiguring` so keep-alives aren't starved during a slow bind. `shouldOutput(true)` resuming after a
+  drain now re-emits `transmissionStarted` via a single `setTransmitting` owner (so `isTransmitting` never
+  goes stale). **Finding 10b reversed and taken:** a full `buildDataMessages` trace confirmed the Bool was
+  always homogeneous (the `.terminated` packet reaches every socket via `universeMessages` regardless), so
+  `socketsShouldTerminate` is now `Set<String>` (membership = pending removal). Added `.sourceBusy` error
+  and an `unownedExecutor` doc. (Only the per-packet hostname/`inet_pton` perf items remain deferred to the
+  optional hot-path follow-up.)
 - **PR3 - `sACNDiscoveryReceiver` -> actor.** `discovery`+`events` streams; heartbeat -> scheduled;
   internal `async process(data:)` seam; delete `sACNDiscoveryReceiverDelegate.swift`.
 - **PR4 - Receiver vertical (`sACNReceiverRaw` + `sACNReceiver` + `sACNReceiverGroup`) -> actors, one PR.**
@@ -204,7 +241,11 @@ isolation boundaries, which is exactly the intended constraint.
 Dependency order: PR1 -> {PR2, PR3} -> PR4 -> PR5.
 
 Optional follow-up (defer, not on the critical path): `RawSpan`/`InlineArray` hot-path adoption behind
-`if #available` per the MODERNIZATION.md Phase 4 bullet.
+`if #available` per the MODERNIZATION.md Phase 4 bullet; and the transmit send-loop micro-costs flagged in
+the PR2 review (finding 10) - per-packet multicast-hostname `String` building + `inet_pton` re-parsing for
+addresses fixed at `addUniverse`, and the redundant per-tick universe filters/`removeAll` - which are
+pre-existing and orthogonal to the actor conversion. Cache the resolved `SocketAddress` per universe
+rather than restringifying `239.255.x.x`/`ff18::...` each frame.
 
 ## Invariants to preserve
 
@@ -223,9 +264,10 @@ Optional follow-up (defer, not on the critical path): `RawSpan`/`InlineArray` ho
 - **PR4 is unavoidably the one larger PR** (the receiver vertical converts together). Source and discovery
   remain genuinely independent single-component PRs. This is the honest reconciliation of decisions 1 and 3.
 - **`assumeIsolated` correctness depends on `checkIsolated`, which is macOS 15 / iOS 18** - hence the floor
-  raise. `MultiThreadedEventLoopGroup`'s `SelectableEventLoop` already conforms to
-  `NIOSerialEventLoopExecutor`, so `eventLoop.executor` supplies it; a non-conforming injected loop (e.g.
-  `EmbeddedEventLoop`) would not, so test doubles must use a real loop.
+  raise. It is supplied by the custom `EventLoopSerialExecutor` (not `eventLoop.executor`, whose NIO
+  `checkIsolated` is availability-gated in the precompiled module and degrades to the trapping stdlib
+  default through the existential - see the decision-1 delta). The executor still requires a real loop with
+  a running thread; an `EmbeddedEventLoop` is not usable, so test doubles must use a real loop.
 - **Shared-loop fan-out:** many components pinning to one `.next()` loop can land on the same OS thread
   (matches today, where all sockets already use the singleton). Keep consumer work off the loop (consumers
   `for await` on their own tasks).
