@@ -293,6 +293,27 @@ struct ReceiverRawTests {
         #expect(papLostSources(harness.events) == [cid, cid])
     }
 
+    @Test("A source that only ever sends levels never reports per-address priority loss")
+    func levelsOnlySourceNeverReportsPAPLoss() async throws {
+        let harness = try await makeHarness()  // perAddressPriorityWait = 60 ms
+        let cid = UUID()
+
+        // levels only, never a per-address priority packet: the new source's levels are held while waiting
+        // for per-address priority, then the wait expires and the source falls back to universe priority
+        await harness.inject(dataPacket(cid: cid, sequence: 0))
+        try await Task.sleep(for: .milliseconds(120))
+        await harness.inject(dataPacket(cid: cid, sequence: 1))
+        await harness.inject(dataPacket(cid: cid, sequence: 2))
+
+        // the held levels are delivered once the per-address priority wait expires...
+        #expect(await harness.data.waitForCount(1))
+        // ...but a source that never sent per-address priority must never report a loss (the "initial PAP
+        // wait expiry" path is silent; only a source that reached hasLevelsAndPAP can emit)
+        #expect(
+            await harness.events.expectNoMore(count: 0, where: Self.isPAPLost),
+            "a source that never sent per-address priority must not report a loss")
+    }
+
     // MARK: Sampling lifecycle
 
     @Test("endedSamplingPeriod ends sampling and notifies")
