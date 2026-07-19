@@ -9,10 +9,13 @@ separately-configurable PAP keep-alive to match ETC), so verify against source b
 - **Universe discovery interval: 10 s** (`Source/sACNSource.swift`, `universeDiscoveryInterval`).
 - **Change burst ("3 packets on change"):** any level/priority/config change sets `dirtyCounter = 3`,
   so the change is sent on 3 consecutive frames before suppression resumes (`Source/SourceUniverse.swift`).
-- **Keep-alive (suppressed) cadence:** `transmitCounter` cycles `0...42` (resets after >42, ~1 s at
-  44 fps); NULL levels are force-sent at counter `0, 11, 22, 33` (~every 250 ms), and PAP (`0xDD`) is
-  sent at counter `0` (~once/s). See the `switch universe.transmitCounter` in `Source/sACNSource.swift`.
-  (ETC uses ~800 ms NULL / ~1000 ms PAP keep-alive; aligning these is a Phase 5 item.)
+- **Keep-alive (suppressed) cadence:** separately configurable NULL and PAP keep-alive intervals, defaulting
+  to **800 ms NULL / 1000 ms PAP** (matching ETC; Phase 5 PR4), set via `sACNSource(nullKeepAliveInterval:
+  perAddressPriorityKeepAliveInterval:)`. Each is converted once to a whole number of ~44 fps transmit ticks
+  (`sACNSource.nullKeepAliveTicks`/`papKeepAliveTicks`, clamped to at least 1) and driven per-universe by the
+  `SourceUniverse.ticksSinceLevels`/`ticksSincePriorities` counters (reset on the respective send) in
+  `buildDataMessages`. Keep the interval below the 2500 ms data-loss timeout so receivers do not consider the
+  source lost. (Replaced the old fixed `transmitCounter` cadence of ~250 ms NULL / ~1 s PAP.)
 - **Termination:** `markTerminated()` sets `dirtyCounter = 3`, giving 3 packets with the `terminated`
   option bit set, then the stream stops (E1.31 requires 3 termination packets).
 
