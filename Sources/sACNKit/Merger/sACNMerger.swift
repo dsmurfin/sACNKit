@@ -58,12 +58,14 @@ public class sACNMerger {
     /// Whether per-address priority packets should be transmitted.
     ///
     /// This is used if the result of the merge needs to be sent over sACN, otherwise set to `nil`.
-    private var perAddressPrioritiesActive: Bool?
+    /// Internal read for tests and the merged-receiver surface.
+    private(set) var perAddressPrioritiesActive: Bool?
 
     /// The universe priority that should be transmitted.
     ///
     /// This is used if the result of the merge needs to be sent over sACN, otherwise set to `nil`.
-    private var universePriority: UInt8?
+    /// Internal read for tests and the merged-receiver surface.
+    private(set) var universePriority: UInt8?
 
     /// The maximum number of sources this merger will listen to.
     ///
@@ -207,10 +209,25 @@ public class sACNMerger {
             throw sACNMergerError.invalidLevelCount
         }
 
-        let oldPerAddressPrioritiesCount = source.perAddressPriorityCount
+        let previousPerAddressPriorityCount = source.perAddressPriorityCount
         source.perAddressPriorityCount = newPrioritiesCount
 
-        if newPrioritiesCount != oldPerAddressPrioritiesCount
+        // The number of trailing slots that must be cleared when the incoming per-address priority is shorter
+        // than the source's current extent. When the source is currently on universe priority its
+        // `addressPriorities` are filled across all 512 slots (by `removePAP` or `updateUniversePriorityForSource`),
+        // so the true extent is the full slot count, not the stale per-address count. Deriving it here fixes the
+        // remove-then-shorter-add case (SACN-403) and its universe-priority-first sibling at the single diffing
+        // site.
+        let clearToCount = source.usingUniversePriority ? DMX.addressCount : previousPerAddressPriorityCount
+
+        // The invariant: a reverted source (currently on universe priority) treats ANY per-address priority as
+        // news - its arrival is itself the transition off universe priority - while an active source
+        // deduplicates an identical resend. The `usingUniversePriority` disjunct is what makes that true: it
+        // also detects a first PAP equal to the universe priority (SACN-364, more robustly than a count change)
+        // and a same-count, values-equal-to-the-universe-fill PAP resuming after `removePAP` (which would
+        // otherwise early-out and leave the trailing slots wrongly sourced).
+        if source.usingUniversePriority
+            || newPrioritiesCount != previousPerAddressPriorityCount
             || (newPriorities.prefix(newPrioritiesCount) != source.addressPriorities.prefix(newPrioritiesCount))
         {
             source.usingUniversePriority = false
@@ -219,11 +236,11 @@ public class sACNMerger {
             }
             if sources.count == 1 {
                 updatePAPSingleSource(
-                    using: source, newPriorities: newPriorities, oldPrioritiesCount: oldPerAddressPrioritiesCount,
+                    using: source, newPriorities: newPriorities, oldPrioritiesCount: clearToCount,
                     newPrioritiesCount: newPrioritiesCount)
             } else {
                 updatePAPMultiSource(
-                    using: source, newPriorities: newPriorities, oldPrioritiesCount: oldPerAddressPrioritiesCount,
+                    using: source, newPriorities: newPriorities, oldPrioritiesCount: clearToCount,
                     newPrioritiesCount: newPrioritiesCount)
             }
         }
