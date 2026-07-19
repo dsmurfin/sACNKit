@@ -33,7 +33,10 @@ final class LockedBox<T> {
 /// `data`** streams buffer `.bufferingNewest(1)` (each frame is a complete DMX snapshot), so a collector on
 /// those reliably observes only the *latest* frame under lag - assert on latest state (e.g. `waitFor`/`all.last`)
 /// or on `count >= 1`, not on every intermediate frame.
-final class StreamCollector<Element: Sendable> {
+///
+/// `@unchecked Sendable`: `items` is guarded by `lock`, and `drain` is assigned once in `init` before the
+/// instance escapes, so a collector can be captured into a `Task`/`TaskGroup` closure.
+final class StreamCollector<Element: Sendable>: @unchecked Sendable {
 
     private let lock = NSLock()
     private var items: [Element] = []

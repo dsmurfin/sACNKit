@@ -42,12 +42,10 @@ import Darwin
 /// socket queue.
 ///
 /// Concurrency: `NIOComponentSocket` is `@unchecked Sendable`, all mutable state behind a single
-/// `NIOLockedValueBox`. It has two delivery modes (see `deliver(_:)`): the **delegate-queue path**
-/// (`delegateQueue` non-nil) hops callbacks via `delegateQueue.async` onto the owner's serial queue, as
-/// `GCDAsyncUdpSocket` did; the **actor path** (`delegateQueue` nil, used by `sACNRuntime.makeSocket`)
-/// delivers on `eventLoop` - synchronously when already there - so an owning actor isolated to that loop
-/// receives callbacks in-isolation (via `assumeIsolated` in its `nonisolated` delegate methods) with no
-/// queue hop. See docs/modernization/phase-4.md and `.claude/rules/threading.md`.
+/// `NIOLockedValueBox`. Callbacks are delivered on `eventLoop` (see `deliver(_:)`) - synchronously when
+/// already there - so an owning actor isolated to that loop (the socket is minted by `sACNRuntime.makeSocket`
+/// on the actor's loop) receives callbacks in-isolation (via `assumeIsolated` in its `nonisolated` delegate
+/// methods) with no queue hop. See docs/modernization/phase-4.md and `.claude/rules/threading.md`.
 ///
 final class NIOComponentSocket: ComponentSocket, @unchecked Sendable {
 
@@ -63,12 +61,9 @@ final class NIOComponentSocket: ComponentSocket, @unchecked Sendable {
     /// The UDP port on which to bind this socket.
     private let port: UInt16
 
-    /// The queue on which delegate callbacks are delivered (the owner's state mutex), or `nil` for the
-    /// actor path: an owner isolated to `eventLoop` receives callbacks **on the loop** (synchronously when
-    /// already there), so its `nonisolated` delegate methods can `assumeIsolated` in with no queue hop.
-    private let delegateQueue: DispatchQueue?
-
-    /// The single event loop on which this facade's channels are bound and read.
+    /// The single event loop on which this facade's channels are bound and read, and on which delegate
+    /// callbacks are delivered. An owner isolated to this loop receives callbacks **on the loop**
+    /// (synchronously when already there), so its `nonisolated` delegate methods can `assumeIsolated` in.
     private let eventLoop: EventLoop
 
     /// The mutable state guarded by `NIOLockedValueBox`.
@@ -95,26 +90,13 @@ final class NIOComponentSocket: ComponentSocket, @unchecked Sendable {
     /// The lock-guarded mutable state.
     private let state = NIOLockedValueBox(State())
 
-    /// The designated initializer. Prefer the two convenience initializers, which document the delivery
-    /// modes: a non-nil `delegateQueue` delivers asynchronously on that queue (GCD path), `nil` delivers
-    /// on `eventLoop` (actor path).
-    private init(type: ComponentSocketType, ipMode: sACNIPMode, port: UInt16, delegateQueue: DispatchQueue?, eventLoop: EventLoop) {
+    /// Creates a socket bound to a specific event loop, delivering callbacks **on that loop** (used by
+    /// `sACNRuntime.makeSocket` so the socket and its owning actor share one serial context).
+    init(type: ComponentSocketType, ipMode: sACNIPMode, port: UInt16 = 0, eventLoop: EventLoop) {
         self.socketType = type
         self.ipMode = ipMode
         self.port = port
-        self.delegateQueue = delegateQueue
         self.eventLoop = eventLoop
-    }
-
-    /// Creates a socket delivering callbacks asynchronously on a `delegateQueue` (the GCD-component path).
-    convenience init(type: ComponentSocketType, ipMode: sACNIPMode, port: UInt16 = 0, delegateQueue: DispatchQueue) {
-        self.init(type: type, ipMode: ipMode, port: port, delegateQueue: delegateQueue, eventLoop: MultiThreadedEventLoopGroup.singleton.next())
-    }
-
-    /// Creates a socket bound to a specific event loop, delivering callbacks **on that loop** (the actor
-    /// path; used by `sACNRuntime.makeSocket` so the socket and its owning actor share one serial context).
-    convenience init(type: ComponentSocketType, ipMode: sACNIPMode, port: UInt16 = 0, eventLoop: EventLoop) {
-        self.init(type: type, ipMode: ipMode, port: port, delegateQueue: nil, eventLoop: eventLoop)
     }
 
     deinit {
@@ -141,13 +123,6 @@ final class NIOComponentSocket: ComponentSocket, @unchecked Sendable {
         set { state.withLockedValue { $0.delegate = newValue } }
     }
 
-    /// Allows other services to reuse the port.
-    ///
-    /// No-op: `SO_REUSEPORT` is applied to receive channels at bind time, keyed off `socketType`
-    /// (see `makeBootstrap`). Retained to satisfy the `ComponentSocket` protocol.
-    ///
-    func enableReusePort() throws {}
-
     /// Attempts to join a multicast group.
     ///
     /// - Parameters:
@@ -155,16 +130,6 @@ final class NIOComponentSocket: ComponentSocket, @unchecked Sendable {
     ///
     /// - Throws: An error of type `sACNComponentSocketError`.
     ///
-    func join(multicastGroup: String) throws {
-        precondition(!eventLoop.inEventLoop, "the blocking join is not callable from the event loop; use the async overload")
-        guard let future = membershipFuture(joining: true, multicastGroup: multicastGroup) else { return }
-        do {
-            try future.wait()
-        } catch {
-            throw sACNComponentSocketError.couldNotJoin(multicastGroup: multicastGroup)
-        }
-    }
-
     func join(multicastGroup: String) async throws {
         guard let future = membershipFuture(joining: true, multicastGroup: multicastGroup) else { return }
         do {
@@ -195,16 +160,6 @@ final class NIOComponentSocket: ComponentSocket, @unchecked Sendable {
     ///
     /// - Throws: An error of type `sACNComponentSocketError`.
     ///
-    func leave(multicastGroup: String) throws {
-        precondition(!eventLoop.inEventLoop, "the blocking leave is not callable from the event loop; use the async overload")
-        guard let future = membershipFuture(joining: false, multicastGroup: multicastGroup) else { return }
-        do {
-            try future.wait()
-        } catch {
-            throw sACNComponentSocketError.couldNotLeave(multicastGroup: multicastGroup)
-        }
-    }
-
     func leave(multicastGroup: String) async throws {
         guard let future = membershipFuture(joining: false, multicastGroup: multicastGroup) else { return }
         do {
@@ -216,69 +171,21 @@ final class NIOComponentSocket: ComponentSocket, @unchecked Sendable {
 
     /// Starts listening for network data, binding fresh channels for the enabled families.
     ///
-    /// Channels are recreated on every call, so a facade may be stopped and restarted (owners reuse
-    /// their sockets across `stop()`/`start()`). Each listen cycle resets the close latch.
+    /// Channels are recreated on every call, so a facade may be stopped and restarted (owners reuse their
+    /// sockets across `stop()`/`start()`). Each listen cycle resets the close latch. If a `stopListening()`
+    /// interleaves the bind (actor reentrancy across the suspension), this throws `CancellationError` after
+    /// closing the just-opened channels - the stop wins, and the socket is left stopped. Returning without
+    /// throwing therefore means the socket is listening.
     ///
     /// - Parameters:
-    ///    - interface: An optional interface on which to bind (a name like "en1"/"lo0", an IP, or
-    ///      the aliases "localhost"/"loopback").
+    ///    - interface: An optional interface on which to bind (a name like "en1"/"lo0", an IP, or the aliases
+    ///      "localhost"/"loopback").
     ///
     /// - Throws: An error of type `sACNComponentSocketError`.
     ///
     /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interface must not be nil.
     ///
-    func startListening(onInterface interface: String?) throws {
-        precondition(!eventLoop.inEventLoop, "the blocking startListening is not callable from the event loop; use the async overload")
-        precondition(delegateQueue != nil, "the blocking startListening is for the delegate-queue path")
-        precondition(!ipMode.usesIPv6() || interface != nil, "An interface must be provided for IPv6.")
-
-        state.withLockedValue { state in
-            state.interface = interface
-            state.closeReported = false
-        }
-
-        var opened: [ComponentSocketIPFamily: Channel] = [:]
-        do {
-            if ipMode.usesIPv4() {
-                opened[.IPv4] = try bindChannel(family: .IPv4, interface: interface)
-            }
-            if ipMode.usesIPv6() {
-                opened[.IPv6] = try bindChannel(family: .IPv6, interface: interface)
-            }
-        } catch {
-            for channel in opened.values {
-                try? channel.close().wait()
-            }
-            throw error
-        }
-
-        state.withLockedValue { $0.channels = opened }
-    }
-
-    /// Stops listening for network data, synchronously closing this socket's channels.
-    func stopListening() {
-        precondition(!eventLoop.inEventLoop, "the blocking stopListening is not callable from the event loop; use the async overload")
-        precondition(delegateQueue != nil, "the blocking stopListening is for the delegate-queue path")
-        let channels = state.withLockedValue { state -> [Channel] in
-            let channels = Array(state.channels.values)
-            state.channels = [:]
-            // An intentional stop is a clean close: suppress any late error callback for this cycle.
-            state.closeReported = true
-            state.epoch &+= 1
-            return channels
-        }
-        for channel in channels {
-            try? channel.close().wait()
-        }
-    }
-
-    /// Starts listening without blocking (the actor path), binding fresh channels for the enabled families.
-    ///
-    /// If a `stopListening()` interleaves the bind (actor reentrancy across the suspension), this throws
-    /// `CancellationError` after closing the just-opened channels - the stop wins, and the socket is left
-    /// stopped. Returning without throwing therefore means the socket is listening.
     func startListening(onInterface interface: String?) async throws {
-        precondition(delegateQueue == nil, "the async startListening is for the actor / loop-delivery path")
         precondition(!ipMode.usesIPv6() || interface != nil, "An interface must be provided for IPv6.")
 
         let epoch = state.withLockedValue { state -> UInt64 in
@@ -317,9 +224,8 @@ final class NIOComponentSocket: ComponentSocket, @unchecked Sendable {
         }
     }
 
-    /// Stops listening without blocking (the actor path), closing this socket's channels.
+    /// Stops listening for network data, closing this socket's channels.
     func stopListening() async {
-        precondition(delegateQueue == nil, "the async stopListening is for the actor / loop-delivery path")
         let channels = state.withLockedValue { state -> [Channel] in
             let channels = Array(state.channels.values)
             state.channels = [:]
@@ -405,45 +311,6 @@ final class NIOComponentSocket: ComponentSocket, @unchecked Sendable {
     }
 
     /// Binds a channel for a family and, for IPv6 transmit sockets, sets the multicast egress interface.
-    private func bindChannel(family: ComponentSocketIPFamily, interface: String?) throws -> Channel {
-        let channel: Channel
-        do {
-            let address: SocketAddress
-            switch socketType {
-            case .transmit:
-                // Transmit binds to the interface's address (as GCDAsyncUdpSocket did).
-                address = try NetworkInterfaceResolver.bindAddress(interface: interface, family: family, port: port)
-            case .receive:
-                // Receive binds the wildcard on all addresses; interface selection happens at join.
-                address = NetworkInterfaceResolver.wildcard(family: family, port: port)
-            }
-            channel = try makeBootstrap(family: family).bind(to: address).wait()
-        } catch {
-            throw sACNComponentSocketError.couldNotBind(message: "\(id): Could not bind \(socketType.rawValue) socket.")
-        }
-
-        if socketType == .transmit, family == .IPv6, let interface {
-            do {
-                let device = try NetworkInterfaceResolver.device(matching: interface, family: .IPv6)
-                // IPV6_MULTICAST_IF is an IPPROTO_IPV6-level option; the default socketOption level
-                // is SOL_SOCKET, so name the level explicitly. The option value type is
-                // platform-dependent (CInt on Darwin, Int on Linux), so build it from the alias rather
-                // than hardcoding CInt - otherwise this fails to compile on Linux.
-                try channel.setOption(
-                    ChannelOptions.Types.SocketOption(level: .ipv6, name: .ipv6_multicast_if),
-                    value: ChannelOptions.Types.SocketOption.Value(device.interfaceIndex)
-                ).wait()
-            } catch {
-                try? channel.close().wait()
-                throw sACNComponentSocketError.couldNotAssignMulticastInterface(
-                    message: "\(id): Could not assign interface for sending multicast on \(socketType.rawValue) socket.")
-            }
-        }
-
-        return channel
-    }
-
-    /// Binds a channel without blocking (the actor path), bridging futures via `.get()` rather than `.wait()`.
     private func bindChannelAsync(family: ComponentSocketIPFamily, interface: String?) async throws -> Channel {
         let channel: Channel
         do {
@@ -481,13 +348,10 @@ final class NIOComponentSocket: ComponentSocket, @unchecked Sendable {
 
     // MARK: - Delivery
 
-    /// Delivers work to the owner. On the delegate-queue path it hops via `delegateQueue.async`; on the
-    /// actor path it runs the work **on the event loop** (synchronously when already there - the hot path -
-    /// so the owner's `nonisolated` delegate methods can `assumeIsolated` in without a queue hop).
+    /// Delivers work to the owner: runs it **on the event loop** (synchronously when already there - the hot
+    /// path - so the owner's `nonisolated` delegate methods can `assumeIsolated` in without a queue hop).
     private func deliver(_ work: @escaping @Sendable () -> Void) {
-        if let delegateQueue {
-            delegateQueue.async(execute: work)
-        } else if eventLoop.inEventLoop {
+        if eventLoop.inEventLoop {
             work()
         } else {
             eventLoop.execute(work)

@@ -262,7 +262,28 @@ isolation boundaries, which is exactly the intended constraint.
 
 Dependency order: PR1 -> {PR2, PR3} -> PR4 -> PR5.
 
-**Status: PR1-PR4 done; PR5 remaining.** PR4 shipped as two PRs: **PR-A** (the shared `LifecycleGate` +
+**Status: PR1-PR5 done - Phase 4 complete.** PR5 flipped the package to **Swift 6 language mode**
+(`swiftLanguageModes: [.v6]`, dropping `StrictConcurrency=targeted`; default actor isolation left
+`nonisolated`; `NonisolatedNonsendingByDefault` + `InferIsolatedConformances` upcoming features enabled). The
+240 complete-mode diagnostics came out at **0** - the actor rewrite was already `.v6`-clean (the only fixes
+were making the test-only `StreamCollector` `@unchecked Sendable` and moving the socket tests off the blocking
+API). `Vendor/CwlDispatch.swift` and the socket's legacy GCD `delegateQueue`/blocking bind-close path (+ the
+sync `ComponentSocket` requirements) are deleted; the 10 `NIOComponentSocketTests` were migrated to the async
+`makeSocket` path. Taking the breaking-major window, PR5 also drops three now-dead public/internal seams the
+Phase 3 "no public API change" guardrail had preserved: the never-thrown `sACNComponentSocketError.couldNotReceive`
+and `.couldNotEnablePortReuse` cases, and the callerless `ComponentSocket.enableReusePort()` (reuse-port is set
+at bind, keyed off `socketType`).
+
+**Deliberate delta (concurrency semantics):** PR5 adopts two upcoming features beyond the original plan -
+`NonisolatedNonsendingByDefault` (SE-0461) and `InferIsolatedConformances` (SE-0470). SE-0461 is
+semantics-changing: the socket's `nonisolated async` methods now run on the **caller's** executor (the owning
+actor's event loop) rather than hopping to the global one - fewer hops, and the I/O stays on the loop it
+already targets. This shifted the concurrency schedule **here in PR5**, not in PR2-PR4; the full suite + TSan
+re-ran green under the new semantics. SE-0470 is a no-op for this package (no global actors).
+
+With the Darwin-only `CwlDispatch` symbols gone (the concurrency captures already were),
+**Linux compiles** - the Linux `Build & Test` CI job is promoted to blocking and the Linux runtime baseline
+recorded in `pre-phase-4-baseline.md`. PR4 shipped as two PRs: **PR-A** (the shared `LifecycleGate` +
 `interfaceDiff` extraction, adopted in `sACNSource`/`sACNDiscoveryReceiver`) and **PR-B** (the receiver
 vertical -> actors). All three receivers are actors: `sACNReceiver` owns its `sACNReceiverRaw` on the same
 runtime and receives its output synchronously on-loop via `RawReceiverSink` (`assumeIsolated`, guarded by an

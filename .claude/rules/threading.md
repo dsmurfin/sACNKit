@@ -1,10 +1,11 @@
-# Threading & concurrency contract (current, Phase 4)
+# Threading & concurrency contract (current, Phase 4 complete)
 
-Every component is now a Swift **`actor`** - `sACNSource` (PR2), `sACNDiscoveryReceiver` (PR3), and the
+Every component is a Swift **`actor`** - `sACNSource` (PR2), `sACNDiscoveryReceiver` (PR3), and the
 receiver vertical `sACNReceiverRaw` / `sACNReceiver` / `sACNReceiverGroup` (PR4). No GCD queues, weak
-delegates, `DispatchSpecificKey` sentinels, or `CwlDispatch` timers remain. `StrictConcurrency=targeted`
-checks in `Package.swift` (warning-clean; CI builds with warnings-as-errors). The Swift 6 language-mode
-flip and the `Vendor/CwlDispatch.swift` deletion are the remaining Phase 4 item (PR5).
+delegates, `DispatchSpecificKey` sentinels, or vendored GCD timers remain. The package is in **Swift 6
+language mode** (`swiftLanguageModes: [.v6]`, PR5) with `.treatAllWarnings(as: .error)` and the
+`NonisolatedNonsendingByDefault` + `InferIsolatedConformances` upcoming features; default actor isolation is
+left `nonisolated` (each actor supplies its own event-loop isolation).
 
 ## Actor isolation model
 - Each actor is pinned to an `sACNRuntime` (a shared NIO event loop) via a custom `EventLoopSerialExecutor`
@@ -83,12 +84,10 @@ flip and the `Vendor/CwlDispatch.swift` deletion are the remaining Phase 4 item 
   `NIOLockedValueBox`, and the delegate reference is **weak** (an owner holds its socket strongly and sets
   `socket.delegate = self`; a strong reference would leak the component and defeat close-on-dealloc). Keep
   both invariants when touching it.
-- Sockets come from `sACNRuntime.makeSocket`; the channel handler runs on the actor's event loop and calls
-  the (nonisolated) `ComponentSocketDelegate` method, which `assumeIsolated`s into the actor - same serial
-  context, no cross-context hop. `startListening`/`stopListening` are `async` and await the NIO
-  bind/close futures from within the actor; never block an event loop thread.
-- Scope note: "no delegates remain" is true at the **component** tier. `NIOComponentSocket` still carries a
-  legacy GCD `delegateQueue` delivery path (async hop onto a caller queue + the blocking `.wait()`
-  bind/close) from the pre-actor components. No component uses it now - every owner takes the actor / loop
-  path - so it is dead in production and exercised only by `NIOComponentSocketTests`. It is removed in PR5
-  with `CwlDispatch` and the Swift 6 flip.
+- Sockets come from `sACNRuntime.makeSocket` (the only initializer - the socket delivers callbacks on the
+  actor's event loop, no delegate-queue path remains). The channel handler runs on that loop and calls the
+  (nonisolated) `ComponentSocketDelegate` method, which `assumeIsolated`s into the actor - same serial
+  context, no cross-context hop. `startListening`/`stopListening`/`join`/`leave` are `async` and bridge the
+  NIO bind/join/close futures via `.get()` from within the actor; never block an event loop thread. Under
+  Swift 6 mode these `nonisolated async` socket methods run on the caller's executor
+  (`NonisolatedNonsendingByDefault`), i.e. the actor's own loop - the natural home for the I/O.
