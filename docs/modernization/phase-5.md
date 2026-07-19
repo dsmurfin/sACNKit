@@ -139,6 +139,15 @@ pages; a single multicast send per `(socket, family)`; the sampling re-seed / re
 transitions; sequence-wrap at 0xFF. Weave any that sit next to a feature PR's code into that PR; this PR
 sweeps up the remainder so every inventory item has a regression test (the phase deliverable).
 
+**PR5 delivered note.** Audited existing coverage first: sequence-wrap (`SourceUniverseTests.sequenceWraps`),
+the discovery detector's short/<40-universe pages (`DiscoveryReceiverTests` already exercises 3-universe
+pages, single and multi), no-redundant-multicast (`dirtyBurstOfThree`/`allActiveUniversesProcessed` pin one
+message per universe per frame), and the sampling re-seed (gated `restartReSeedsSampling`) were already
+covered. Added the two genuine gaps: a NULL+PAP-in-one-frame test asserting two consecutive sequence numbers,
+and a source-side discovery test asserting a sorted ascending universe list and a zeroed reserved field
+(via a new `buildUniverseDiscoveryMessages()` test seam mirroring `buildDataMessages()`). Every inventory
+item now has a regression test. **Phase 5 is complete** (163 tests green on macOS + Linux, TSan + lint clean).
+
 ## Verification
 - Per PR: `swift test` green under Swift 6 (macOS); `swift-format lint --strict` clean; no warnings; new
   regression tests pass. Merger + keep-alive PRs additionally `swift test --sanitize=thread` clean.

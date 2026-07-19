@@ -257,4 +257,42 @@ struct SourceTransmitTests {
         #expect(terminationPackets == 3)
     }
 
+    // MARK: Sequence & universe-discovery lock-in
+
+    @Test("A frame emitting both levels and priority consumes two consecutive sequence numbers")
+    func nullAndPapConsumeTwoSequences() async throws {
+        let source = sACNSource()
+        try await source.addUniverse(
+            sACNSourceUniverse(number: 1, levels: Array(repeating: 0, count: 512), priorities: Array(repeating: 100, count: 512)))
+        await source.shouldOutput(true)
+
+        // the first frame sends both a NULL (levels) and a per-address priority (0xDD) packet
+        let messages = await source.buildDataMessages().messages
+        let nullPacket = try #require(messages.first { Array($0.data)[Self.startCodeOffset] == DMX.STARTCode.null.rawValue })
+        let papPacket = try #require(messages.first { Array($0.data)[Self.startCodeOffset] == DMX.STARTCode.perAddressPriority.rawValue })
+
+        // levels are stamped first, then the priority packet takes the next sequence number in the same frame
+        #expect(Array(nullPacket.data)[Self.sequenceOffset] == 0)
+        #expect(Array(papPacket.data)[Self.sequenceOffset] == 1)
+    }
+
+    @Test("Universe discovery messages carry a sorted universe list and a zeroed reserved field")
+    func discoverySortedListAndReservedField() async throws {
+        let source = sACNSource()
+        for number in [5, 1, 3, 2, 4] as [UInt16] {
+            try await source.addUniverse(sACNSourceUniverse(number: number, levels: Array(repeating: 0, count: 512)))
+        }
+        let page = try #require(await source.buildUniverseDiscoveryMessages().first)
+
+        // the 4-octet reserved field (framing offset 70, after the 38-byte root layer) must be zero
+        let reservedStart = RootLayer.Offset.data.rawValue + UniverseDiscoveryFramingLayer.Offset.reserved.rawValue
+        #expect(Array(page)[reservedStart..<reservedStart + 4] == [0, 0, 0, 0])
+
+        // the universe list is sorted ascending regardless of the order universes were added
+        let root = try RootLayer.parse(fromData: page)
+        let framing = try UniverseDiscoveryFramingLayer.parse(fromData: root.data)
+        let discovery = try UniverseDiscoveryLayer.parse(fromData: framing.data)
+        #expect(discovery.universeList == [1, 2, 3, 4, 5])
+    }
+
 }

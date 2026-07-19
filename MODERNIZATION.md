@@ -388,6 +388,13 @@ and `Source/sACNSourceDelegate.swift` (removed); `Shared/sACNComponent.swift`; `
 **Goal:** port ETC's behavioral spec/correctness fixes and high-value features, each guarded by the
 Phase 1 net (now running on the modern stack). See the inventory below for the full list.
 
+> **Status: complete** - see docs/modernization/phase-5.md. Shipped as five PRs: PR1 merger correctness
+> (SACN-403 PAP-revert family + order-independence + SACN-364), PR2 receiver data model (sequence / options /
+> sync universe, SACN-392), PR3 richer merge callbacks + per-source priority + the `perAddressPriorityLost`
+> event, PR4 ETC-aligned configurable keep-alive intervals (800 ms NULL / 1000 ms PAP), and PR5 regression
+> lock-in for the already-correct items. Validated against ETCLabs/sACN v4.0.0.6; the characterization-first
+> discipline caught five latent bugs that predated the modernization.
+
 - **Spec/on-wire fixes:** source sequence numbering; universe-discovery reserved-field write + sorted
   universe list; discovery detector accepting <40-universe pages; eliminate redundant multicast sends.
   *Reuse existing plumbing:* `DataFramingLayer` already exposes in-place data-extension replacers for
