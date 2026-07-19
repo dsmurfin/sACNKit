@@ -5,8 +5,8 @@
 Phase 4 is complete: every component is a Swift 6 `actor` on the shared event-loop executor, with an
 `async` API and `AsyncStream` output. Phase 5 ports ETC's behavioral/correctness fixes and high-value
 features onto that foundation, per the `MODERNIZATION.md` appendix (the source-of-truth inventory) and
-validated against the ETC reference implementation at `~/Developer/sACN` (ETCLabs/sACN, tag **v4.0.0.6**;
-`main` is +2 commits: SACN-403 merger fix `3c0834e`, SACN-404 cosmetic). Each ported item ships with a
+validated against the ETC reference implementation (ETCLabs/sACN, https://github.com/ETCLabs/sACN, tag
+**v4.0.0.6**; `main` is +2 commits: SACN-403 merger fix `3c0834e`, SACN-404 cosmetic). Each ported item ships with a
 regression test; the phase merges only with green CI (macOS + Linux) and no characterization regression.
 
 A recon of both trees (sACNKit + ETC) found that **5 of the 9 inventory items are already correct** in
@@ -36,7 +36,7 @@ only perf/robustness extras that do not translate cleanly onto the NIO/Swift sta
 ## Locked decisions (maintainer)
 
 1. **Keep-alive (item 8): match ETC.** Separately configurable NULL and PAP keep-alive intervals,
-   defaulting to ETC's **800 ms NULL / 1000 ms PAP** (`~/Developer/sACN` `include/sacn/source.h:70,72`).
+   defaulting to ETC's **800 ms NULL / 1000 ms PAP** (ETCLabs/sACN `include/sacn/source.h:70,72`).
    This is a deliberate on-wire change (NULL keep-alive drops from ~250 ms to 800 ms; both comply with the
    2500 ms loss timeout).
 2. **Scope: core only.** Port the inventory's correctness + features. Defer, as future candidates only, the
@@ -56,15 +56,18 @@ The merger has **no test suite today**, so this PR builds the net *then* fixes.
   (`mergeNewPriority` reading current `winners[slot]` - the classic order-sensitivity spot); **order
   independence** (same inputs, different orders -> identical output; ETC 3.0.0); universe-priority-0 =
   unsourced; PAP vs universe-priority interaction.
-- **SACN-403** (remove-PAP-then-add-PAP; ETC `3c0834e`): reproduce - `removePAP` (`sACNMerger.swift:301-319`)
-  refills `addressPriorities` but never resets `source.perAddressPriorityCount`, so a later
-  `updatePAPForSource` with a shorter count diffs against the stale count (`:210-214`) and leaves trailing
-  slots wrong. Apply ETC's fix (reset the count in `removePAP`).
+- **SACN-403** (remove-PAP-then-add-PAP; ETC `3c0834e`): reproduce - `removePAP` refills `addressPriorities`
+  across all 512 slots but leaves `source.perAddressPriorityCount` stale, so a later `updatePAPForSource` with
+  a shorter count diffs against that stale count and leaves trailing slots wrong. **Shipped fix** (see the
+  delivered note below - it evolved across review): derive the trailing-clear extent at the single diffing
+  site in `updatePAPForSource` and lead the change-detection guard with `usingUniversePriority`, which closes
+  the whole PAP-revert family (SACN-403, the universe-priority-first sibling, and the identical-resume corner)
+  in one place; the `removePAP` count-sync is not needed.
 - **SACN-364** (`perAddressPrioritiesActive` correct when PAP == universe priority; ETC `2f4496c`): confirmed
   already-correct via a characterization test (no logic change), as the plan anticipated.
 
-**PR1 delivered note (honest history).** The characterization-first discipline paid off twice. (1) The
-initial SACN-403 fix reset `perAddressPriorityCount` inside `removePAP` - but adversarial review found a
+**PR1 delivered note (honest history).** The characterization-first discipline paid off across three review
+rounds. (1) The initial SACN-403 fix reset `perAddressPriorityCount` inside `removePAP` - but adversarial review found a
 **sibling** of the same bug: `updateUniversePriorityForSource` *also* fills all 512 `addressPriorities` while
 the count stays 0, so a *short first PAP* after universe priority left the trailing slots wrongly sourced
 (wire-reachable: the receiver applies universe priority from data packets before the 1500 ms PAP wait). The
@@ -144,6 +147,6 @@ sweeps up the remainder so every inventory item has a regression test (the phase
   `Layers/DataFramingLayer.swift`, `Receiver/{sACNReceiver,sACNReceiverRaw}.swift`.
 - Source: `Source/sACNSource.swift`, `Source/SourceUniverse.swift`.
 - Docs: `.claude/rules/timing.md`, `MODERNIZATION.md` (mark Phase 5 items done), this file.
-- ETC reference (read-only): `~/Developer/sACN` - `src/sacn/dmx_merger.c`, `source_state.c`,
-  `receiver_state.c`, `include/sacn/{source,receiver}.h`; fix commits SACN-403 `3c0834e`, SACN-364
-  `2f4496c`, SACN-392 `075de10`.
+- ETC reference (read-only): ETCLabs/sACN (https://github.com/ETCLabs/sACN) - `src/sacn/dmx_merger.c`,
+  `source_state.c`, `receiver_state.c`, `include/sacn/{source,receiver}.h`; fix commits SACN-403 `3c0834e`,
+  SACN-364 `2f4496c`, SACN-392 `075de10`.

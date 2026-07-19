@@ -55,9 +55,12 @@ public class sACNMerger {
     /// Winning owners are always tracked here.
     public private(set) var winners: [UUID?]
 
-    /// Whether per-address priority packets should be transmitted.
+    /// Whether the merge currently has any source using per-address priority.
     ///
-    /// This is used if the result of the merge needs to be sent over sACN, otherwise set to `nil`.
+    /// This is **dynamically recalculated** as sources are updated - it is `true` while at least one source is
+    /// on per-address priority (rather than universe priority), and `false` when every source is on universe
+    /// priority. It is only tracked when the merger is configured to transmit results over sACN
+    /// (`sACNMergerConfig.transmitPerAddressPriorities` non-nil); when tracking is off it stays `nil`.
     /// Internal read for tests and the merged-receiver surface.
     private(set) var perAddressPrioritiesActive: Bool?
 
