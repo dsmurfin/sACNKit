@@ -65,6 +65,9 @@ public actor sACNReceiverGroup {
         /// One or more sources were lost for a universe (coalesced).
         case sourcesLost([UUID], universe: UInt16)
 
+        /// A source stopped sending per-address priority for a universe (its levels revert to universe priority).
+        case perAddressPriorityLost(UUID, universe: UInt16)
+
         /// A universe's source limit was reached (a new source was dropped).
         case sourceLimitExceeded(universe: UInt16)
 
@@ -327,6 +330,8 @@ public actor sACNReceiverGroup {
             eventsHub.yield(.samplingEnded(universe: universe))
         case .sourcesLost(let sourceIds):
             eventsHub.yield(.sourcesLost(sourceIds, universe: universe))
+        case .perAddressPriorityLost(let sourceId):
+            eventsHub.yield(.perAddressPriorityLost(sourceId, universe: universe))
         case .sourceLimitExceeded:
             eventsHub.yield(.sourceLimitExceeded(universe: universe))
         case .socketClosed(let interface, let reason):

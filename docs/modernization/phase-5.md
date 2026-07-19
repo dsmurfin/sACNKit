@@ -108,6 +108,21 @@ SACN-364 preservation are pinned by probe-verified regression tests (each shown 
   re-merge at `sACNReceiver:375-384`; the raw receiver already emits it, merged folds it).
 - Regression tests for the new payload fields + the PAP-lost event.
 
+**PR3 delivered note (honest history).** Surfacing `perAddressPrioritiesActive`/`universePriority` on the
+merged payload required the receiver's mergers to actually *track* those outputs, so PR3 configures them with
+`sACNMergerConfig(transmitPerAddressPriorities: false, universePriority: 0, ...)`. That config change enabled
+a **dormant, pre-existing guard bug**: `updateUniversePriorityForSource`'s dedupe compared the merger's
+tracked *output* `universePriority` against the source's stored value instead of the *incoming* `priority`.
+While the output was untracked (`nil`) the guard was always-true (harmless); once tracked, it silently
+**dropped a source's priority decrease** whenever the output equalled that source's stored value (e.g. two
+sources at 100, one drops to 80 - the lowered source kept winning at its stale 100). This is a genuine
+merge-correctness bug, live for any standalone transmit-configured `sACNMerger` (public API), so it is fixed
+here: compare the incoming `priority`. Pinned by a probe-verified regression test (two sources at 100, drop
+one to 80, assert the other wins). Pattern: this is the **second** time enabling a dormant config path
+surfaced a latent guard (PR1's count-sync family was the first) - the remaining config-touching PR (PR4
+keep-alive) gets a probe pass over any newly-reachable branch. Candidate for the ETC cross-check: if
+upstream's guard shares this shape, upstream drops priority changes too.
+
 ### PR4 - Separately configurable keep-alive intervals, ETC-aligned (item 8)
 `Source/sACNSource.swift`, `Source/SourceUniverse.swift`; `.claude/rules/timing.md`.
 - Replace the hardcoded cadence (`buildDataMessages` `switch universe.transmitCounter` - NULL at 0/11/22/33

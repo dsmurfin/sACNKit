@@ -63,6 +63,9 @@ public actor sACNReceiver {
         /// One or more sources were lost (coalesced).
         case sourcesLost([UUID])
 
+        /// A source stopped sending per-address priority; its levels revert to universe priority in the merge.
+        case perAddressPriorityLost(UUID)
+
         /// The receiver's source limit was reached (a new source was dropped).
         case sourceLimitExceeded
 
@@ -165,7 +168,10 @@ public actor sACNReceiver {
         self.runtime = runtime
         self.universe = universe
         self.receiver = receiver
-        let config = sACNMergerConfig(sourceLimit: sourceLimit)
+        // Enable per-address-priority-active and universe-priority output tracking (the values are surfaced on
+        // `sACNReceiverMergedData`). This only computes those outputs; it does not change the merged levels or
+        // winners, and nothing is transmitted (this is a receive-side merge).
+        let config = sACNMergerConfig(transmitPerAddressPriorities: false, universePriority: 0, sourceLimit: sourceLimit)
         self.merger = sACNMerger(id: universe, config: config)
         self.samplingMerger = sACNMerger(id: universe, config: config)
     }
@@ -223,7 +229,8 @@ public actor sACNReceiver {
     ///
     public func information(for sourceId: UUID) throws -> sACNReceiverSource {
         guard let source = sources[sourceId] else { throw sACNReceiverValidationError.sourceDoesNotExist }
-        return sACNReceiverSource(receiverSource: source)
+        let mergerSource = (source.sampling ? samplingMerger : merger).source(identified: sourceId)
+        return sACNReceiverSource(receiverSource: source, mergerSource: mergerSource)
     }
 
     // MARK: Raw event handling
@@ -367,7 +374,8 @@ public actor sACNReceiver {
         eventsHub.yield(.sourcesLost(sourceIds))
     }
 
-    /// The receiver lost per-address priority for a source (folded into a re-merge, no public event).
+    /// The receiver lost per-address priority for a source: the merge reverts it to universe priority and a
+    /// `.perAddressPriorityLost` event is emitted.
     ///
     /// - Parameters:
     ///    - sourceId: The identifier of the source which lost per-address priority.
@@ -381,14 +389,17 @@ public actor sACNReceiver {
         if !source.sampling && numberOfPendingSources == 0 {
             notifyMerge()
         }
+
+        eventsHub.yield(.perAddressPriorityLost(sourceId))
     }
 
     /// Notifies the new merge values on `data`.
     private func notifyMerge() {
         let activeSources = sources.compactMap { !$0.value.sampling ? $0.value.cid : nil }
         let mergedNotification = sACNReceiverMergedData(
-            universe: universe, levels: merger.levels, winners: merger.winners, activeSources: activeSources,
-            numberOfActiveSources: activeSources.count)
+            universe: universe, levels: merger.levels, winners: merger.winners, perAddressPriorities: merger.perAddressPriorities,
+            perAddressPrioritiesActive: merger.perAddressPrioritiesActive ?? false, universePriority: merger.universePriority ?? 0,
+            activeSources: activeSources, numberOfActiveSources: activeSources.count)
         dataHub.yield(mergedNotification)
     }
 

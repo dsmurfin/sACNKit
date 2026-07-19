@@ -37,6 +37,15 @@ public struct sACNReceiverMergedData: Sendable {
     /// The (512) optional winners for each level.
     public var winners: [UUID?]
 
+    /// The (512) winning per-address priority for each slot (the priority of the winning source at that slot).
+    public var perAddressPriorities: [UInt8]
+
+    /// Whether any contributing source is using per-address priority (rather than universe priority).
+    public var perAddressPrioritiesActive: Bool
+
+    /// The winning (highest) universe priority among the contributing sources (`0` when there are none).
+    public var universePriority: UInt8
+
     /// The identifiers of the sources.
     public var activeSources: [UUID]
 

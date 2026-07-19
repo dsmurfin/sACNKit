@@ -42,11 +42,28 @@ public struct sACNReceiverSource: Sendable {
     /// Whether this source is currently sampling.
     public var isSampling: Bool
 
-    init(receiverSource: ReceiverSource) {
+    /// Whether this source is currently merged using its universe priority (rather than per-address priority).
+    public var usingUniversePriority: Bool
+
+    /// The universe priority most recently received from this source.
+    public var universePriority: UInt8
+
+    /// The per-address priorities most recently received from this source, or `nil` when the source is using
+    /// its universe priority (`usingUniversePriority`).
+    public var perAddressPriorities: [UInt8]?
+
+    init(receiverSource: ReceiverSource, mergerSource: MergerSource?) {
         cid = receiverSource.cid
         hostname = receiverSource.hostname
         name = receiverSource.name
         isSampling = receiverSource.sampling
+        usingUniversePriority = mergerSource?.usingUniversePriority ?? true
+        universePriority = mergerSource?.universePriority ?? 0
+        if let mergerSource, !mergerSource.usingUniversePriority {
+            perAddressPriorities = Array(mergerSource.addressPriorities.prefix(mergerSource.perAddressPriorityCount))
+        } else {
+            perAddressPriorities = nil
+        }
     }
 
 }

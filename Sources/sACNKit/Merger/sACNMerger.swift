@@ -48,7 +48,8 @@ public class sACNMerger {
     /// The (512) per-address priorities for each winning slot.
     ///
     /// Winning priorities are always tracked here, even if not using per-address priority.
-    private var perAddressPriorities: [UInt8]
+    /// Internal read for the merged-receiver surface.
+    private(set) var perAddressPriorities: [UInt8]
 
     /// The (512) identifiers (or `nil` if there is no winner) of the winning `MergerSource`s for the merge on a each slot.
     ///
@@ -266,8 +267,13 @@ public class sACNMerger {
     public func updateUniversePriorityForSource(identified sourceId: UUID, priority: UInt8) throws {
         guard let source = sources[sourceId] else { throw sACNMergerError.noSourceWithIdentifier(sourceId) }
 
-        // only continue if the universe priority is different or uninitialized
-        guard universePriority != source.universePriority || source.universePriorityUninitialized else { return }
+        // Only continue if the incoming universe priority differs from the source's stored one, or it is
+        // uninitialized. The dedupe must compare the incoming `priority`, not the merger's tracked output
+        // `universePriority`: comparing the output silently drops a real priority change whenever the output
+        // happens to equal the source's stored value (e.g. a source lowering its priority while another holds
+        // the same output value). That path was dormant while the output was untracked (`nil`), and becomes
+        // reachable once universe-priority tracking is configured.
+        guard priority != source.universePriority || source.universePriorityUninitialized else { return }
         source.universePriorityUninitialized = false
 
         // is this the curent universe priority output?

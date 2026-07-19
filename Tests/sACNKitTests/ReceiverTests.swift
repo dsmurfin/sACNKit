@@ -176,6 +176,88 @@ struct ReceiverTests {
         #expect(harness.merged.count >= 1)
     }
 
+    // MARK: Phase 5 - richer merge surface
+
+    @Test("Merged data surfaces per-address priorities, the active flag, and the universe priority")
+    func mergedDataSurfacesPriorityFields() async throws {
+        let harness = try await makeHarness()
+        let cid = UUID()
+        let levels = Array(repeating: UInt8(255), count: 512)
+        var priorities = Array(repeating: UInt8(120), count: 512)
+        priorities[0] = 0  // slot 0 unsourced
+
+        await harness.inject(dataPacket(cid: cid, sequence: 0, values: levels))
+        await harness.inject(dataPacket(cid: cid, sequence: 1, startCode: .perAddressPriority, values: priorities))
+        await harness.inject(dataPacket(cid: cid, sequence: 2, values: levels))
+        #expect(await harness.merged.waitForCount(1))
+
+        let merged = try #require(harness.merged.all.last)
+        #expect(merged.perAddressPrioritiesActive == true)
+        #expect(merged.perAddressPriorities[0] == 0)  // unsourced slot
+        #expect(merged.perAddressPriorities[1] == 120)  // winning per-address priority
+        #expect(merged.universePriority == 100)  // the source's universe priority (packet default)
+    }
+
+    @Test("information(for:) surfaces per-source priority information")
+    func informationSurfacesPriorityInfo() async throws {
+        let harness = try await makeHarness()
+        let cid = UUID()
+        let levels = Array(repeating: UInt8(255), count: 512)
+        var priorities = Array(repeating: UInt8(120), count: 512)
+        priorities[0] = 0
+
+        await harness.inject(dataPacket(cid: cid, sequence: 0, values: levels))
+        await harness.inject(dataPacket(cid: cid, sequence: 1, startCode: .perAddressPriority, values: priorities))
+        await harness.inject(dataPacket(cid: cid, sequence: 2, values: levels))
+        #expect(await harness.merged.waitForCount(1))
+
+        let info = try await harness.receiver.information(for: cid)
+        #expect(info.usingUniversePriority == false)
+        #expect(info.universePriority == 100)
+        #expect(info.perAddressPriorities?.count == 512)
+        #expect(info.perAddressPriorities?[0] == 0)
+        #expect(info.perAddressPriorities?[1] == 120)
+    }
+
+    @Test("After per-address priority loss a source reports universe priority with no per-address priorities")
+    func informationUniversePriorityAfterPAPLoss() async throws {
+        let harness = try await makeHarness(sourceLossTimeout: Self.fastTimeout, perAddressPriorityWait: Self.fastTimeout)
+        let cid = UUID()
+        let levels = Array(repeating: UInt8(200), count: 512)
+
+        await harness.inject(dataPacket(cid: cid, sequence: 0, values: levels))
+        await harness.inject(dataPacket(cid: cid, sequence: 1, startCode: .perAddressPriority, values: Array(repeating: 100, count: 512)))
+        await harness.inject(dataPacket(cid: cid, sequence: 2, values: levels))
+        #expect(await harness.merged.waitForCount(1))
+
+        // let per-address priority time out, then deliver levels to surface the loss (reverts to universe priority)
+        try await Task.sleep(for: Self.fastTimeoutExpiry)
+        await harness.inject(dataPacket(cid: cid, sequence: 3, values: levels))
+        #expect(await harness.waitUntilMerged { $0.perAddressPrioritiesActive == false })
+
+        let info = try await harness.receiver.information(for: cid)
+        #expect(info.usingUniversePriority == true)
+        #expect(info.perAddressPriorities == nil)
+    }
+
+    @Test("Losing per-address priority emits a perAddressPriorityLost event")
+    func perAddressPriorityLostEmitsEvent() async throws {
+        let harness = try await makeHarness(sourceLossTimeout: Self.fastTimeout, perAddressPriorityWait: Self.fastTimeout)
+        let events = StreamCollector(harness.receiver.events)
+        let cid = UUID()
+        let levels = Array(repeating: UInt8(255), count: 512)
+
+        await harness.inject(dataPacket(cid: cid, sequence: 0, values: levels))
+        await harness.inject(dataPacket(cid: cid, sequence: 1, startCode: .perAddressPriority, values: Array(repeating: 100, count: 512)))
+        await harness.inject(dataPacket(cid: cid, sequence: 2, values: levels))
+        #expect(await harness.merged.waitForCount(1))
+
+        // let the per-address priority timer expire, then deliver levels to surface the loss
+        try await Task.sleep(for: Self.fastTimeoutExpiry)
+        await harness.inject(dataPacket(cid: cid, sequence: 3, values: levels))
+        #expect(await events.waitFor { if case .perAddressPriorityLost(let id) = $0, id == cid { return true } else { return false } })
+    }
+
     // MARK: Per-address priority and sampling regression tests
 
     @Test("Per-address priorities captured during sampling are applied when sampling ends")
