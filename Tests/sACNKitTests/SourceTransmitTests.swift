@@ -28,7 +28,7 @@ struct SourceTransmitTests {
     @Test("A new universe emits a dirty burst of 3 level packets then suppresses")
     func dirtyBurstOfThree() async throws {
         let source = try await activeSource()
-        #expect(await source.buildDataMessages().messages.count == 1)  // transmitCounter 0
+        #expect(await source.buildDataMessages().messages.count == 1)  // dirty 3
         #expect(await source.buildDataMessages().messages.count == 1)  // dirty 2
         #expect(await source.buildDataMessages().messages.count == 1)  // dirty 1
         #expect(await source.buildDataMessages().messages.count == 0)  // dirty 0, suppressed
@@ -72,39 +72,83 @@ struct SourceTransmitTests {
         #expect(Set(emitted) == [9])
     }
 
-    @Test("Suppressed levels are force-sent at transmit counters 0, 11, 22 and 33")
+    @Test("Suppressed levels are re-sent every NULL keep-alive interval (default ~800 ms)")
     func keepAliveCadence() async throws {
         let source = try await activeSource()
-        for _ in 0..<3 { _ = await source.buildDataMessages() }  // drain the burst (counters 0, 1, 2)
+        let ticks = await source.nullKeepAliveTicks  // ~35 ticks (800 ms at 44 fps)
+        for _ in 0..<3 { _ = await source.buildDataMessages() }  // drain the dirty burst
 
         var emittingFrames = [Int]()
-        for frame in 0..<44 {
+        for frame in 0..<(ticks * 2 + 2) {
             if await !source.buildDataMessages().messages.isEmpty {
                 emittingFrames.append(frame)
             }
         }
-        // the cycle covers counters 3...43 then 0...2; keep-alives fire at counters 11, 22, 33 and 0
-        #expect(emittingFrames == [8, 19, 30, 41])
+        // after the burst the counter sits at 1, so keep-alives land `ticks` frames apart
+        #expect(emittingFrames == [ticks - 1, ticks * 2 - 1])
     }
 
-    @Test("Suppressed per-address priority is re-sent only at transmit counter 0")
+    @Test("Suppressed per-address priority is re-sent every PAP keep-alive interval (default ~1000 ms)")
     func papKeepAliveCadence() async throws {
         let source = sACNSource()
         try await source.addUniverse(
             sACNSourceUniverse(
                 number: 1, levels: Array(repeating: 0, count: 512), priorities: Array(repeating: 100, count: 512)))
         await source.shouldOutput(true)
-        for _ in 0..<3 { _ = await source.buildDataMessages() }  // drain the burst (counters 0, 1, 2)
+        let ticks = await source.papKeepAliveTicks  // ~44 ticks (1000 ms at 44 fps)
+        for _ in 0..<3 { _ = await source.buildDataMessages() }  // drain the burst (priority sent once)
 
         var papFrames = [Int]()
-        for frame in 0..<44 {
+        for frame in 0..<(ticks * 2 + 4) {
             for message in await source.buildDataMessages().messages
             where Array(message.data)[Self.startCodeOffset] == DMX.STARTCode.perAddressPriority.rawValue {
                 papFrames.append(frame)
             }
         }
-        // one PAP keep-alive per cycle, at counter 0 (~once per second at 44 fps)
-        #expect(papFrames == [41])
+        // priority was sent once during the burst (counter at 3), so keep-alives land `ticks` frames apart
+        #expect(papFrames == [ticks - 3, ticks * 2 - 3])
+    }
+
+    @Test("Keep-alive intervals are configurable")
+    func configurableKeepAlive() async throws {
+        // custom short intervals so the cadence is quick to observe
+        let source = sACNSource(nullKeepAliveInterval: .milliseconds(200), perAddressPriorityKeepAliveInterval: .milliseconds(300))
+        try await source.addUniverse(
+            sACNSourceUniverse(
+                number: 1, levels: Array(repeating: 0, count: 512), priorities: Array(repeating: 100, count: 512)))
+        await source.shouldOutput(true)
+
+        let nullTicks = await source.nullKeepAliveTicks
+        let papTicks = await source.papKeepAliveTicks
+        // 200 ms / 300 ms at ~44 fps
+        #expect(nullTicks == 9)
+        #expect(papTicks == 13)
+
+        for _ in 0..<3 { _ = await source.buildDataMessages() }  // drain the burst
+        var levelFrames = [Int]()
+        for frame in 0..<(nullTicks * 2 + 2) {
+            if await source.buildDataMessages().messages.contains(where: {
+                Array($0.data)[Self.startCodeOffset] == DMX.STARTCode.null.rawValue
+            }) {
+                levelFrames.append(frame)
+            }
+        }
+        #expect(levelFrames == [nullTicks - 1, nullTicks * 2 - 1])
+    }
+
+    @Test("A keep-alive interval shorter than one transmit tick clamps to every tick")
+    func subTickKeepAliveClampsToEveryTick() async throws {
+        // 1 ms is well under one ~22.7 ms transmit tick, so it rounds down to 0 and clamps to 1
+        let source = sACNSource(nullKeepAliveInterval: .milliseconds(1))
+        #expect(await source.nullKeepAliveTicks == 1)  // clamped to at least one tick
+
+        try await source.addUniverse(sACNSourceUniverse(number: 1, levels: Array(repeating: 0, count: 512)))
+        await source.shouldOutput(true)
+        for _ in 0..<3 { _ = await source.buildDataMessages() }  // drain the burst
+
+        // with a one-tick keep-alive, levels are re-sent on every frame (no suppression)
+        #expect(await !source.buildDataMessages().messages.isEmpty)
+        #expect(await !source.buildDataMessages().messages.isEmpty)
     }
 
     @Test("Emitted packets carry incrementing sequence numbers")

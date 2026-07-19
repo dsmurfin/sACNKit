@@ -19,7 +19,8 @@ struct SourceUniverseTests {
     func initialState() {
         let universe = makeUniverse()
         #expect(universe.sequence == 0)
-        #expect(universe.transmitCounter == 0)
+        #expect(universe.ticksSinceLevels == 0)
+        #expect(universe.ticksSincePriorities == 0)
         #expect(universe.dirtyCounter == 3)
         #expect(universe.dirtyPriority == true)
         #expect(universe.shouldTerminate == false)
@@ -36,13 +37,21 @@ struct SourceUniverseTests {
         #expect(universe.sequence == 0)
     }
 
-    @Test("Transmit counter cycles 0...43 then wraps to 0")
-    func counterCycles() {
+    @Test("Keep-alive tick counters advance together and reset independently")
+    func keepAliveCountersAdvanceAndReset() {
         let universe = makeUniverse()
-        for _ in 0..<43 { universe.incrementCounter() }
-        #expect(universe.transmitCounter == 43)
-        universe.incrementCounter()
-        #expect(universe.transmitCounter == 0)
+        for _ in 0..<5 { universe.incrementKeepAliveCounters() }
+        #expect(universe.ticksSinceLevels == 5)
+        #expect(universe.ticksSincePriorities == 5)
+
+        // levels keep-alive resets independently of priorities
+        universe.resetLevelsKeepAlive()
+        #expect(universe.ticksSinceLevels == 0)
+        #expect(universe.ticksSincePriorities == 5)
+
+        // priorities keep-alive resets when a priority is sent
+        universe.prioritySent()
+        #expect(universe.ticksSincePriorities == 0)
     }
 
     @Test("Dirty counter decrements to and floors at 0")
@@ -85,9 +94,10 @@ struct SourceUniverseTests {
     func resetRestoresState() {
         let universe = makeUniverse()
         universe.terminate(remove: true)
-        for _ in 0..<10 { universe.incrementCounter() }
+        for _ in 0..<10 { universe.incrementKeepAliveCounters() }
         universe.reset()
-        #expect(universe.transmitCounter == 0)
+        #expect(universe.ticksSinceLevels == 0)
+        #expect(universe.ticksSincePriorities == 0)
         #expect(universe.dirtyCounter == 3)
         #expect(universe.dirtyPriority == true)
         #expect(universe.shouldTerminate == false)

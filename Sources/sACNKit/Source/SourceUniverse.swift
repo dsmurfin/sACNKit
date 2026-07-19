@@ -56,8 +56,13 @@ class SourceUniverse: Equatable {
     /// The last transmitted sequence number for this universe.
     private(set) var sequence: UInt8
 
-    /// The data transmit timer counter (0...43 @ 44fps)
-    private(set) var transmitCounter: Int
+    /// The number of transmit ticks since a NULL start-code (levels) packet was last sent, used to drive the
+    /// keep-alive cadence (reset to 0 whenever levels are sent, whether on change or keep-alive).
+    private(set) var ticksSinceLevels: Int
+
+    /// The number of transmit ticks since a per-address priority (0xDD) packet was last sent, used to drive
+    /// the PAP keep-alive cadence (reset to 0 whenever priorities are sent).
+    private(set) var ticksSincePriorities: Int
 
     /// The number of non-changing messages that have been sent (starts at 3 when levels have changed).
     private(set) var dirtyCounter: Int
@@ -93,7 +98,8 @@ class SourceUniverse: Equatable {
             rootLayer + framingLayer
             + DMPLayer.createAsData(startCode: .perAddressPriority, values: universe.priorities ?? Array(repeating: 0, count: 512))
         self.sequence = 0
-        self.transmitCounter = 0
+        self.ticksSinceLevels = 0
+        self.ticksSincePriorities = 0
         self.dirtyCounter = 3
         self.dirtyPriority = true
         self.shouldTerminate = false
@@ -103,7 +109,8 @@ class SourceUniverse: Equatable {
 
     /// Resets this universe for new transmission.
     func reset() {
-        self.transmitCounter = 0
+        self.ticksSinceLevels = 0
+        self.ticksSincePriorities = 0
         self.dirtyCounter = 3
         self.dirtyPriority = true
         self.shouldTerminate = false
@@ -346,13 +353,15 @@ class SourceUniverse: Equatable {
         sequence &+= 1
     }
 
-    /// Increments the counter for this universe.
-    func incrementCounter() {
-        if transmitCounter > 42 {
-            self.transmitCounter = 0
-        } else {
-            self.transmitCounter += 1
-        }
+    /// Advances the keep-alive tick counters for this universe (called once per transmit tick).
+    func incrementKeepAliveCounters() {
+        ticksSinceLevels += 1
+        ticksSincePriorities += 1
+    }
+
+    /// Resets the levels keep-alive counter (call whenever a NULL start-code packet is sent).
+    func resetLevelsKeepAlive() {
+        ticksSinceLevels = 0
     }
 
     /// Decrements the dirty messages counter for this universe.
@@ -362,9 +371,10 @@ class SourceUniverse: Equatable {
         }
     }
 
-    /// When a priority message has been sent, this resets the dirty state.
+    /// When a priority message has been sent, this resets the dirty state and the PAP keep-alive counter.
     func prioritySent() {
         dirtyPriority = false
+        ticksSincePriorities = 0
     }
 
     /// Terminates transmission of this universe.

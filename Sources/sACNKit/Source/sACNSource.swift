@@ -184,6 +184,26 @@ public actor sACNSource {
     /// The data transmit interval (~22.7 ms, ~44 fps).
     private static let dataTransmitInterval: Duration = .seconds(1) / 44
 
+    /// The number of transmit ticks between forced NULL start-code (levels) keep-alive packets (from the
+    /// configured interval; internal for tests).
+    let nullKeepAliveTicks: Int
+
+    /// The number of transmit ticks between forced per-address priority (0xDD) keep-alive packets (from the
+    /// configured interval; internal for tests).
+    let papKeepAliveTicks: Int
+
+    /// Converts a keep-alive interval to a whole number of ~44 fps transmit ticks (rounded half-up, at least
+    /// 1). The seconds-to-nanoseconds multiply cannot overflow: the init precondition bounds the interval
+    /// below 2500 ms (so `components.seconds <= 2`), and `dataTransmitInterval` is a fixed sub-second
+    /// constant. (`NIOCore.TimeAmount` would clamp this, but `sACNSource` deliberately names no NIO types -
+    /// see the runtime seam.)
+    private static func keepAliveTicks(for interval: Duration) -> Int {
+        let intervalNanos = interval.components.seconds * 1_000_000_000 + interval.components.attoseconds / 1_000_000_000
+        let tickNanos = dataTransmitInterval.components.seconds * 1_000_000_000 + dataTransmitInterval.components.attoseconds / 1_000_000_000
+        guard tickNanos > 0 else { return 1 }
+        return max(1, Int((intervalNanos + tickNanos / 2) / tickNanos))
+    }
+
     /// The universe discovery timer.
     private var universeDiscoveryTask: (any RuntimeTask)?
 
@@ -202,11 +222,30 @@ public actor sACNSource {
     ///    - ipMode: Optional: IP mode for this source (IPv4/IPv6/Both).
     ///    - interfaces: Optional: The network interfaces for this source. An interface may be a name (e.g. "en1" or "lo0") or the corresponding IP address (e.g. "192.168.4.35").
     ///    - priority: Optional: Default priority for this source (values permitted 0-200).
+    ///    - nullKeepAliveInterval: Optional: How often NULL start-code (levels) packets are re-sent when
+    ///      unchanged (defaults to 800 ms, matching ETC). Keep this below the 2500 ms network-data-loss
+    ///      timeout so receivers do not consider the source lost.
+    ///    - perAddressPriorityKeepAliveInterval: Optional: How often per-address priority (0xDD) packets are
+    ///      re-sent when unchanged (defaults to 1000 ms, matching ETC).
     ///
     /// - Precondition: If `ipMode` is `ipv6only` or `ipv4And6`, interfaces must not be empty.
     ///
-    public init(name: String? = nil, cid: UUID = UUID(), ipMode: sACNIPMode = .ipv4Only, interfaces: Set<String> = [], priority: UInt8 = 100) {
+    public init(
+        name: String? = nil, cid: UUID = UUID(), ipMode: sACNIPMode = .ipv4Only, interfaces: Set<String> = [], priority: UInt8 = 100,
+        nullKeepAliveInterval: Duration = .milliseconds(800), perAddressPriorityKeepAliveInterval: Duration = .milliseconds(1000)
+    ) {
         precondition(!ipMode.usesIPv6() || !interfaces.isEmpty, "At least one interface must be provided for IPv6.")
+        // A keep-alive at or above the 2500 ms network-data-loss timeout makes every receiver cyclically
+        // declare the source lost during suppressed periods; require a positive interval below that bound.
+        precondition(
+            nullKeepAliveInterval > .zero && nullKeepAliveInterval < .milliseconds(2500),
+            "nullKeepAliveInterval must be greater than zero and below the 2500 ms data-loss timeout.")
+        precondition(
+            perAddressPriorityKeepAliveInterval > .zero && perAddressPriorityKeepAliveInterval < .milliseconds(2500),
+            "perAddressPriorityKeepAliveInterval must be greater than zero and below the 2500 ms data-loss timeout.")
+
+        self.nullKeepAliveTicks = Self.keepAliveTicks(for: nullKeepAliveInterval)
+        self.papKeepAliveTicks = Self.keepAliveTicks(for: perAddressPriorityKeepAliveInterval)
 
         let runtime = NIORuntime()
         self.runtime = runtime
@@ -795,23 +834,23 @@ public actor sACNSource {
         var universeMessages = [UniverseData]()
         var socketTerminationMessages = [UniverseData]()
 
+        // hoist the actor-isolated keep-alive thresholds into locals so the per-universe loop body reads only
+        // `universe` and Sendable `Int`s (mixing a `self` property read into the loop trips Swift 6
+        // region-based isolation on Linux - `sending 'universe' risks causing data races`)
+        let nullTicks = nullKeepAliveTicks
+        let papTicks = papKeepAliveTicks
+
         for universe in activeUniverses {
 
-            // should levels be sent?
-            let sendLevels: Bool
-            switch universe.transmitCounter {
-            case 0, 11, 22, 33:
-                sendLevels = true
-            default:
-                sendLevels = universe.dirtyCounter > 0 ? true : false
-            }
+            // should levels be sent? (during a change burst, or when the NULL keep-alive interval has elapsed)
+            let sendLevels = universe.dirtyCounter > 0 || universe.ticksSinceLevels >= nullTicks
 
             let framingOptions: DataFramingLayer.Options = universe.shouldTerminate ? [.terminated] : .none
 
-            // should per-slot priority be sent?
+            // should per-address priority be sent? (on change, or when the PAP keep-alive interval has elapsed)
             let sendPriority: Bool
             if !universe.shouldTerminate, universe.priorities != nil {
-                sendPriority = universe.dirtyPriority || universe.transmitCounter == 0
+                sendPriority = universe.dirtyPriority || universe.ticksSincePriorities >= papTicks
             } else {
                 sendPriority = false
             }
@@ -836,9 +875,11 @@ public actor sACNSource {
                 if universe.shouldTerminate && universe.dirtyCounter > 0, let terminationUniverse {
                     universeMessages.append(terminationUniverse)
                     universe.incrementSequence()
+                    universe.resetLevelsKeepAlive()
                 } else if _shouldOutput {
                     universeMessages.append(UniverseData(universeNumber: universe.number, data: universe.levelsPacket))
                     universe.incrementSequence()
+                    universe.resetLevelsKeepAlive()
                 }
                 universe.decrementDirty()
             }
@@ -853,7 +894,7 @@ public actor sACNSource {
                 }
             }
 
-            universe.incrementCounter()
+            universe.incrementKeepAliveCounters()
         }
 
         return (universeMessages, socketTerminationMessages)
