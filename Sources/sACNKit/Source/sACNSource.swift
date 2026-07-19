@@ -901,6 +901,13 @@ public actor sACNSource {
         return (universeMessages, socketTerminationMessages)
     }
 
+    /// Rebuilds and returns the current universe-discovery messages (paged, sorted ascending). Internal test
+    /// seam so the discovery packet layout (sorted universe list, reserved field) can be unit tested.
+    func buildUniverseDiscoveryMessages() -> [Data] {
+        updateUniverseDiscoveryMessages()
+        return universeDiscoveryMessages
+    }
+
 }
 
 /// sACN Source Validation Error
