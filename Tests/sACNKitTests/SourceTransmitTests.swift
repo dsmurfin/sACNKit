@@ -84,7 +84,7 @@ struct SourceTransmitTests {
                 emittingFrames.append(frame)
             }
         }
-        // after the burst the counter sits at 1, so keep-alives land `ticks` frames apart
+        // after the burst `ticksSinceLevels` sits at 1, so keep-alives land `ticks` frames apart
         #expect(emittingFrames == [ticks - 1, ticks * 2 - 1])
     }
 
@@ -105,7 +105,7 @@ struct SourceTransmitTests {
                 papFrames.append(frame)
             }
         }
-        // priority was sent once during the burst (counter at 3), so keep-alives land `ticks` frames apart
+        // priority was sent once during the burst (`ticksSincePriorities` at 3), so keep-alives land `ticks` frames apart
         #expect(papFrames == [ticks - 3, ticks * 2 - 3])
     }
 

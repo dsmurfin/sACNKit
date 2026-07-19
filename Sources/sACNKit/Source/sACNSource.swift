@@ -822,9 +822,10 @@ public actor sACNSource {
 
     /// Builds the data (and socket-termination) messages for the currently active universes.
     ///
-    /// Advances each universe's transmit state machine (sequence, dirty and transmit counters) and returns
-    /// the packets to send, performing no socket I/O. Extracted from `sendDataMessages()` so the transmit
-    /// cadence and termination behavior can be unit tested (`await source.buildDataMessages()`).
+    /// Advances each universe's transmit state machine (sequence, the dirty change-burst counter, and the
+    /// `ticksSinceLevels`/`ticksSincePriorities` keep-alive counters) and returns the packets to send,
+    /// performing no socket I/O. Extracted from `sendDataMessages()` so the transmit cadence and termination
+    /// behavior can be unit tested (`await source.buildDataMessages()`).
     ///
     /// - Returns: The universe messages to send, and the messages to send to terminating sockets.
     ///

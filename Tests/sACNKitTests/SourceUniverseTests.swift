@@ -3,7 +3,7 @@ import Testing
 
 @testable import sACNKit
 
-/// Characterizes the transmit counter/flag state machine on `SourceUniverse`.
+/// Characterizes the keep-alive tick counters and dirty/termination flag state machine on `SourceUniverse`.
 /// These are pure, synchronous primitives (no sockets or timers).
 @Suite("SourceUniverse state machine")
 struct SourceUniverseTests {
