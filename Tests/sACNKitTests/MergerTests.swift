@@ -257,6 +257,28 @@ struct MergerTests {
         #expect(merger.perAddressPrioritiesActive == true)
     }
 
+    @Test("A source lowering its universe priority is re-merged, not deduped against the tracked output")
+    func universePriorityDecreaseReMerges() throws {
+        // universe-priority output tracking configured (as the merged receiver does), which exercises the
+        // dedupe guard in updateUniversePriorityForSource
+        let merger = sACNMerger(id: 1, config: sACNMergerConfig(transmitPerAddressPriorities: nil, universePriority: 0, sourceLimit: nil))
+        let a = UUID()
+        let b = UUID()
+        try merger.addSource(identified: a)
+        try merger.addSource(identified: b)
+        try merger.updateUniversePriorityForSource(identified: a, priority: 100)
+        try merger.updateUniversePriorityForSource(identified: b, priority: 100)
+        try merger.updateLevelsForSource(identified: a, newLevels: fullLevels(200), newLevelsCount: 512)
+        try merger.updateLevelsForSource(identified: b, newLevels: fullLevels(50), newLevelsCount: 512)
+        #expect(merger.winners[0] == a)  // equal priority -> HTP -> a's higher level wins
+
+        // a lowers its universe priority below b; the change must not be deduped away (the tracked output is
+        // still 100, and the buggy guard would compare that to a's stored 100 and drop the update)
+        try merger.updateUniversePriorityForSource(identified: a, priority: 80)
+        #expect(merger.winners[0] == b, "b (priority 100) must win after a drops to 80")
+        #expect(merger.levels[0] == 50)
+    }
+
     @Test("With per-address priorities, the higher priority wins per slot across sources")
     func multiSourcePerAddressPriorityWinner() throws {
         let merger = sACNMerger(id: 1)
