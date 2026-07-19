@@ -78,6 +78,9 @@ struct DataFramingLayer: Sendable {
     /// The priority of this source.
     private(set) var priority: UInt8
 
+    /// The synchronization universe (address) for this message; `0` means the source is not synchronizing.
+    private(set) var syncAddress: UInt16
+
     /// The sequence number for this message.
     private(set) var sequenceNumber: UInt8
 
@@ -146,8 +149,11 @@ struct DataFramingLayer: Sendable {
         guard UInt8.validPriorities.contains(priority) else {
             throw DataFramingLayerValidationError.invalidPriority(priority)
         }
-        // reserved
-        // ignore
+        // the synchronization universe (address) - surfaced to receivers but not acted upon (universe sync
+        // is not handled); a value of 0 means the source is not synchronizing
+        guard let syncAddress: UInt16 = data.toUInt16(atOffset: Offset.syncAddress.rawValue) else {
+            throw DataFramingLayerValidationError.unableToParse(field: "Synchronization Address")
+        }
         // the sequence number
         guard let sequenceNumber: UInt8 = data.toUInt8(atOffset: Offset.sequenceNumber.rawValue) else {
             throw DataFramingLayerValidationError.unableToParse(field: "Sequence Number")
@@ -167,8 +173,8 @@ struct DataFramingLayer: Sendable {
         let data = data.subdata(in: Offset.data.rawValue..<data.count)
 
         return Self(
-            vector: validVector, sourceName: sourceName, priority: priority, sequenceNumber: sequenceNumber, options: Options(rawValue: options),
-            universe: universe, data: data)
+            vector: validVector, sourceName: sourceName, priority: priority, syncAddress: syncAddress, sequenceNumber: sequenceNumber,
+            options: Options(rawValue: options), universe: universe, data: data)
     }
 
 }
@@ -194,6 +200,16 @@ internal extension Data {
     ///
     mutating func replacingOptions(with options: DataFramingLayer.Options) {
         self[DataFramingLayer.Offset.options.rawValue] = options.rawValue
+    }
+
+    /// Replaces the `DataFramingLayer` synchronization universe (address).
+    ///
+    /// - Parameters:
+    ///    - syncAddress: The synchronization universe to be replaced in the layer.
+    ///
+    mutating func replacingSyncAddress(with syncAddress: UInt16) {
+        replaceSubrange(
+            DataFramingLayer.Offset.syncAddress.rawValue..<(DataFramingLayer.Offset.syncAddress.rawValue + 2), with: syncAddress.data)
     }
 
     /// Replaces the `DataFramingLayer` options.

@@ -62,8 +62,17 @@ struct LayerTests {
         #expect(parsed.priority == 150)
         #expect(parsed.sequenceNumber == 0)
         #expect(parsed.options == .none)
+        #expect(parsed.syncAddress == 0)
         #expect(parsed.universe == 42)
         #expect(parsed.data == dmpData)
+    }
+
+    @Test("DataFramingLayer parses the synchronization universe (address)")
+    func dataFramingParsesSyncAddress() throws {
+        var data = dataFramingData(nameData: Source.buildNameData(from: "Sync Source"))
+        data.replacingSyncAddress(with: 20001)
+        let parsed = try DataFramingLayer.parse(fromData: data)
+        #expect(parsed.syncAddress == 20001)
     }
 
     @Test("DataFramingLayer parse rejects an unknown vector")
