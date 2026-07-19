@@ -47,11 +47,13 @@ struct ReceiverRawTests {
     /// Builds a complete sACN data packet (root + framing + DMP).
     private func dataPacket(
         cid: UUID, name: String = "Test Source", universe: UInt16 = 1, sequence: UInt8, priority: UInt8 = 100,
-        options: DataFramingLayer.Options = .none, startCode: DMX.STARTCode = .null, values: [UInt8] = Array(repeating: 0, count: 512)
+        options: DataFramingLayer.Options = .none, syncUniverse: UInt16 = 0, startCode: DMX.STARTCode = .null,
+        values: [UInt8] = Array(repeating: 0, count: 512)
     ) -> Data {
         var framing = DataFramingLayer.createAsData(nameData: Source.buildNameData(from: name), priority: priority, universe: universe)
         framing.replacingSequence(with: sequence)
         framing.replacingOptions(with: options)
+        framing.replacingSyncAddress(with: syncUniverse)
         framing.append(DMPLayer.createAsData(startCode: startCode, values: values))
         var packet = RootLayer.createAsData(vector: .data, cid: cid)
         packet.append(framing)
@@ -84,6 +86,26 @@ struct ReceiverRawTests {
     }
 
     // MARK: Delivery characterization
+
+    @Test("Sequence, options, and sync universe from the packet are surfaced on received data")
+    func packetMetadataSurfaced() async throws {
+        let harness = try await makeHarness()
+        let cid = UUID()
+        let sequence = await establishSource(cid: cid, in: harness)  // the collector holds the establishing PAP frame
+
+        // a levels packet carrying distinctive metadata (force-sync is surfaced, but not filtered or terminated)
+        await harness.inject(
+            dataPacket(
+                cid: cid, sequence: sequence, options: [.forceSync], syncUniverse: 1234, values: (0..<512).map { UInt8($0 % 256) }))
+        #expect(await harness.data.waitForCount(2))
+
+        let received = try #require(harness.data.all.last)
+        #expect(received.sequence == sequence)
+        #expect(received.syncUniverse == 1234)
+        #expect(received.options.contains(.forceSynchronization))
+        #expect(received.options.contains(.preview) == false)
+        #expect(received.options.contains(.terminated) == false)
+    }
 
     @Test("A new source's levels are held until per-address priority arrives, then delivered with payload fidelity")
     func newSourceHeldUntilPAP() async throws {

@@ -44,6 +44,17 @@ public struct sACNReceiverRawSourceData: Sendable {
     /// The universe priority received.
     public var priority: UInt8
 
+    /// The sequence number of the received packet.
+    public var sequence: UInt8
+
+    /// The options field of the received packet (preview / terminated / force-synchronization bits).
+    public var options: sACNDataOptions
+
+    /// The synchronization universe of the received packet, or `0` if the source is not synchronizing.
+    ///
+    /// Surfaced for information only; universe synchronization is not currently processed.
+    public var syncUniverse: UInt16
+
     /// Whether this is preview data.
     public var preview: Bool
 

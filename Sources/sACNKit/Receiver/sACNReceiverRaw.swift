@@ -691,8 +691,9 @@ extension sACNReceiverRaw {
         emit(
             data: sACNReceiverRawSourceData(
                 cid: rootLayer.cid, name: framingLayer.sourceName, hostname: hostname, universe: universe, priority: framingLayer.priority,
-                preview: previewData, isSampling: isSampling, startCode: dmpLayer.startCode, valuesCount: dmpLayer.values.count,
-                values: dmpLayer.values))
+                sequence: framingLayer.sequenceNumber, options: sACNDataOptions(rawValue: framingLayer.options.rawValue),
+                syncUniverse: framingLayer.syncAddress, preview: previewData, isSampling: isSampling, startCode: dmpLayer.startCode,
+                valuesCount: dmpLayer.values.count, values: dmpLayer.values))
     }
 
     /// Decides whether level data should be notified for a source.
