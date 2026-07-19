@@ -266,10 +266,17 @@ struct SourceTransmitTests {
             sACNSourceUniverse(number: 1, levels: Array(repeating: 0, count: 512), priorities: Array(repeating: 100, count: 512)))
         await source.shouldOutput(true)
 
-        // the first frame sends both a NULL (levels) and a per-address priority (0xDD) packet
+        // the first frame sends both a NULL (levels) and a per-address priority (0xDD) packet. The length
+        // guard in each predicate means a short/malformed packet fails the `#require` (no match) rather than
+        // trapping on an out-of-bounds byte read - and `startCodeOffset` is past `sequenceOffset`, so a matched
+        // packet is guaranteed long enough to read either byte.
         let messages = await source.buildDataMessages().messages
-        let nullPacket = try #require(messages.first { Array($0.data)[Self.startCodeOffset] == DMX.STARTCode.null.rawValue })
-        let papPacket = try #require(messages.first { Array($0.data)[Self.startCodeOffset] == DMX.STARTCode.perAddressPriority.rawValue })
+        let nullPacket = try #require(
+            messages.first { $0.data.count > Self.startCodeOffset && Array($0.data)[Self.startCodeOffset] == DMX.STARTCode.null.rawValue })
+        let papPacket = try #require(
+            messages.first {
+                $0.data.count > Self.startCodeOffset && Array($0.data)[Self.startCodeOffset] == DMX.STARTCode.perAddressPriority.rawValue
+            })
 
         // levels are stamped first, then the priority packet takes the next sequence number in the same frame
         #expect(Array(nullPacket.data)[Self.sequenceOffset] == 0)
@@ -286,7 +293,9 @@ struct SourceTransmitTests {
 
         // the 4-octet reserved field (framing offset 70, after the 38-byte root layer) must be zero
         let reservedStart = RootLayer.Offset.data.rawValue + UniverseDiscoveryFramingLayer.Offset.reserved.rawValue
-        #expect(Array(page)[reservedStart..<reservedStart + 4] == [0, 0, 0, 0])
+        let bytes = Array(page)
+        try #require(bytes.count >= reservedStart + 4)  // fail (not trap) if the page is unexpectedly short
+        #expect(bytes[reservedStart..<reservedStart + 4] == [0, 0, 0, 0])
 
         // the universe list is sorted ascending regardless of the order universes were added
         let root = try RootLayer.parse(fromData: page)
