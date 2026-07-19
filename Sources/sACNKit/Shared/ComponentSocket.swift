@@ -71,34 +71,18 @@ protocol ComponentSocket: AnyObject {
     /// leaks the component and prevents the close-on-dealloc teardown owners rely on.
     var delegate: ComponentSocketDelegate? { get set }
 
-    /// Allows other services to reuse the port.
-    func enableReusePort() throws
-
     /// Attempts to join a multicast group.
-    func join(multicastGroup: String) throws
-
-    /// Attempts to leave a multicast group.
-    func leave(multicastGroup: String) throws
-
-    /// Attempts to join a multicast group without blocking (the actor path).
     func join(multicastGroup: String) async throws
 
-    /// Attempts to leave a multicast group without blocking (the actor path).
+    /// Attempts to leave a multicast group.
     func leave(multicastGroup: String) async throws
 
     /// Starts listening for network data, binding sockets on an optional interface.
-    func startListening(onInterface interface: String?) throws
-
-    /// Stops listening for network data, closing this socket.
-    func stopListening()
-
-    /// Starts listening for network data without blocking, binding sockets on an optional interface.
     ///
-    /// The actor path (sockets minted by `sACNRuntime.makeSocket`, delivering into an event-loop-isolated
-    /// actor) uses this instead of the blocking `startListening(onInterface:)`.
+    /// Sockets are minted by `sACNRuntime.makeSocket` and deliver into an event-loop-isolated actor.
     func startListening(onInterface interface: String?) async throws
 
-    /// Stops listening for network data without blocking, closing this socket.
+    /// Stops listening for network data, closing this socket.
     func stopListening() async
 
     /// Closes this socket's channels fire-and-forget, without blocking or awaiting.
@@ -222,9 +206,6 @@ public struct SocketCloseReason: Error, Sendable {
 ///
 public enum sACNComponentSocketError: LocalizedError, Sendable {
 
-    /// It was not possible to enable port reuse.
-    case couldNotEnablePortReuse
-
     /// It was not possible to join this multicast group.
     case couldNotJoin(multicastGroup: String)
 
@@ -237,21 +218,16 @@ public enum sACNComponentSocketError: LocalizedError, Sendable {
     /// It was not possible to assign the interface on which to send multicast.
     case couldNotAssignMulticastInterface(message: String)
 
-    /// It was not possible to start receiving data, e.g. because no bind occured first.
-    case couldNotReceive(message: String)
-
     /**
      A human-readable description of the error useful for logging purposes.
     */
     public var logDescription: String {
         switch self {
-        case .couldNotEnablePortReuse:
-            return "Could not enable port reuse"
         case let .couldNotJoin(multicastGroup):
             return "Could not join multicast group \(multicastGroup)"
         case let .couldNotLeave(multicastGroup):
             return "Could not leave multicast group \(multicastGroup)"
-        case let .couldNotBind(message), let .couldNotReceive(message), let .couldNotAssignMulticastInterface(message):
+        case let .couldNotBind(message), let .couldNotAssignMulticastInterface(message):
             return message
         }
     }

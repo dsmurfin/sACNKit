@@ -3,16 +3,20 @@
 
 import PackageDescription
 
-// Phase 2 stages strict concurrency checking at `targeted` while remaining in Swift 5 language
-// mode (warnings only). Removed in Phase 4 when Swift 6 language mode (equivalent to `complete`)
-// is enabled (see MODERNIZATION.md).
+// Phase 4 (PR5) turns on Swift 6 language mode (equivalent to `complete` concurrency), so the
+// `StrictConcurrency=targeted` experimental flag of Phases 2-3 is dropped. Default actor isolation is
+// deliberately left `nonisolated` (no `.defaultIsolation(MainActor.self)`): each component is a Swift
+// `actor` that supplies its own event-loop isolation, so a package-wide MainActor default would be wrong.
+// Two upcoming features are adopted early: `NonisolatedNonsendingByDefault` (SE-0461 - a nonisolated async
+// function runs on the caller's executor rather than hopping to the global one, which suits the socket I/O
+// that already lives on the owning actor's event loop) and `InferIsolatedConformances` (SE-0470).
 //
-// Phase 3 moves warnings-as-errors enforcement off the CI `-Xswiftc -warnings-as-errors` flag
-// (which applies to every module, including dependencies like swift-nio) and into this per-target
-// setting, which applies only to our own targets (see MODERNIZATION.md / docs/modernization/phase-3.md).
+// `.treatAllWarnings(as: .error)` (Phase 3) keeps warnings-as-errors per-target (applying only to our own
+// targets, not dependencies like swift-nio - see docs/modernization/phase-3.md).
 let sharedSwiftSettings: [SwiftSetting] = [
-    .enableExperimentalFeature("StrictConcurrency=targeted"),
     .treatAllWarnings(as: .error),
+    .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
+    .enableUpcomingFeature("InferIsolatedConformances"),
 ]
 
 let package = Package(
@@ -46,7 +50,7 @@ let package = Package(
             dependencies: ["sACNKit"],
             swiftSettings: sharedSwiftSettings),
     ],
-    // Phase 1 keeps the existing GCD/delegate sources compiling by staying in Swift 5 language
-    // mode. Strict concurrency / Swift 6 mode is adopted in Phases 2 and 4 (see MODERNIZATION.md).
-    swiftLanguageModes: [.v5]
+    // Swift 6 language mode (Phase 4 PR5). The whole stack is actors on a custom event-loop executor;
+    // see MODERNIZATION.md / docs/modernization/phase-4.md.
+    swiftLanguageModes: [.v6]
 )

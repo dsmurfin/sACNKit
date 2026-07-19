@@ -350,6 +350,12 @@ callback on clean close - see docs/modernization/phase-3.md).
 ### Phase 4 - Swift Concurrency API Redesign (actors + async)
 **Goal:** rebuild the public API around Swift Concurrency; adopt Swift 6 language mode fully. Breaking.
 
+> **Status: complete** - see docs/modernization/phase-4.md. Every component is a Swift `actor` on a custom
+> event-loop executor with an `async` API + `AsyncStream` output (PR2-PR4); PR5 turned on **Swift 6 language
+> mode** (`swiftLanguageModes: [.v6]`, default isolation left `nonisolated`, `NonisolatedNonsendingByDefault` +
+> `InferIsolatedConformances`), deleted `Vendor/CwlDispatch.swift` and the socket's legacy GCD path, and
+> promoted the Linux `Build & Test` CI job to blocking.
+
 - Convert core components (`sACNSource`, `sACNReceiver`, `sACNReceiverGroup`,
   `sACNDiscoveryReceiver`, `sACNMerger`) to **actors** (or NIO `EventLoop`-isolated types), removing
   the queue-as-mutex pattern and the mandatory `delegateQueue` init parameter.

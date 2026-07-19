@@ -37,5 +37,5 @@ separately-configurable PAP keep-alive to match ETC), so verify against source b
   receiver heartbeats, and `scheduleOnce` for `sACNReceiverRaw`'s single-shot, self-re-arming sampling
   timer (`sampleTask`). Ticks guard before acting - the heartbeat on `gate.isListening`, the sample tick on
   the `sampling` flag (which `teardown` clears) - so a tick that raced a stop cannot act or re-arm; the old
-  GCD generation tokens are gone. `Vendor/CwlDispatch.swift` is now unreferenced (deleted in PR5). The
-  constants above are unchanged - only the timer mechanism moved.
+  GCD generation tokens (and the vendored `CwlDispatch` timers) are gone. The constants above are unchanged -
+  only the timer mechanism moved.
